@@ -11,14 +11,25 @@ const powerInput = z.object({
   orderId: z.string().uuid(),
   signal: z.enum(["start", "stop", "restart", "kill"]),
 });
-/** Public panel base URL (safe to expose — it's the URL users log into). */
-export const getPanelUrl = createServerFn({ method: "GET" }).handler(async () => {
-  const raw = (process.env.PTERODACTYL_PANEL_URL ?? "").trim().replace(/\/+$/, "");
-  if (!raw) return { url: "" };
-  return { url: /^https?:\/\//i.test(raw) ? raw : `https://${raw}` };
-});
 
-/** List the current user's provisioned servers (from our DB + live status from Pterodactyl). */
+const orderInput = z.object({ orderId: z.string().uuid() });
+
+/** Resolve a server identifier owned by the current user (or admin). */
+async function loadIdentifier(
+  supabase: import("@supabase/supabase-js").SupabaseClient,
+  orderId: string,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from("server_orders")
+    .select("pterodactyl_server_identifier")
+    .eq("id", orderId)
+    .single();
+  if (error || !data?.pterodactyl_server_identifier) {
+    throw new Error("Server not found or access denied.");
+  }
+  return data.pterodactyl_server_identifier as string;
+}
+
 export const listMyServers = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
@@ -31,21 +42,37 @@ export const listMyServers = createServerFn({ method: "GET" })
     return { servers: data ?? [] };
   });
 
-/** Provision a new server through the Pterodactyl Application API. */
 export const deployServer = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => deployInput.parse(d))
   .handler(async ({ data, context }) => {
-    const { supabase, userId } = context;
+    const { supabase, userId, claims } = context;
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { ptero, getDefaultLocationId, getEggDefaultEnvironment, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    const { ptero, getDefaultLocationId, getEggDefaultEnvironment, createPanelUser, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroConfigured();
 
     const { data: plan, error: planErr } = await supabaseAdmin
       .from("plans").select("*").eq("id", data.planId).eq("is_active", true).single();
     if (planErr || !plan) throw new Error("Plan not found.");
 
-    // Create the order row in 'provisioning' state.
+    // Ensure the user has a panel account.
+    const { data: profile } = await supabaseAdmin
+      .from("profiles").select("id, email, display_name, pterodactyl_user_id").eq("id", userId).maybeSingle();
+
+    let pteroUserId = profile?.pterodactyl_user_id ?? null;
+    if (!pteroUserId) {
+      const email = (profile?.email ?? claims?.email ?? "") as string;
+      if (!email) throw new Error("Missing email for panel account creation.");
+      const display = (profile?.display_name ?? email.split("@")[0]) as string;
+      pteroUserId = await createPanelUser({
+        email,
+        username: email.split("@")[0],
+        firstName: display.split(" ")[0] || "Player",
+        lastName: display.split(" ").slice(1).join(" ") || "User",
+      });
+      await supabaseAdmin.from("profiles").update({ pterodactyl_user_id: pteroUserId }).eq("id", userId);
+    }
+
     const { data: order, error: orderErr } = await supabase
       .from("server_orders")
       .insert({ user_id: userId, plan_id: plan.id, server_name: data.serverName, status: "provisioning" })
@@ -53,18 +80,14 @@ export const deployServer = createServerFn({ method: "POST" })
     if (orderErr || !order) throw new Error(orderErr?.message ?? "Could not create order.");
 
     try {
-      // Resolve the panel owner: we provision under the admin's panel user id (env), or the first admin user we find.
-      const ownerId = Number(process.env.PTERODACTYL_DEFAULT_USER_ID ?? "1");
       const locationId = await getDefaultLocationId();
-
       const planEnv = (plan.environment as Record<string, unknown>) ?? {};
       const eggDefaults = await getEggDefaultEnvironment(plan.pterodactyl_nest_id, plan.pterodactyl_egg_id);
-      // Egg defaults fill in required vars; plan overrides win.
       const env: Record<string, unknown> = { ...eggDefaults, ...planEnv };
 
       const payload = {
         name: data.serverName,
-        user: ownerId,
+        user: pteroUserId,
         egg: plan.pterodactyl_egg_id,
         docker_image: plan.docker_image,
         startup: plan.startup,
@@ -107,45 +130,171 @@ export const deployServer = createServerFn({ method: "POST" })
     }
   });
 
-/** Send a power signal (start/stop/restart/kill) to a server the user owns. */
 export const powerServer = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => powerInput.parse(d))
   .handler(async ({ data, context }) => {
-    const { supabase } = context;
-    const { data: order, error } = await supabase
-      .from("server_orders").select("pterodactyl_server_identifier").eq("id", data.orderId).single();
-    if (error || !order?.pterodactyl_server_identifier) throw new Error("Server not found.");
-
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
     const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroConfigured();
-
-    await ptero.client(`/servers/${order.pterodactyl_server_identifier}/power`, {
+    await ptero.client(`/servers/${identifier}/power`, {
       method: "POST",
       body: JSON.stringify({ signal: data.signal }),
     });
     return { ok: true };
   });
 
-/** Live resource snapshot for a single server (used in the dashboard). */
-export const getServerResources = createServerFn({ method: "POST" })
+export const getServerDetail = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) => z.object({ orderId: z.string().uuid() }).parse(d))
+  .inputValidator((d: unknown) => orderInput.parse(d))
   .handler(async ({ data, context }) => {
-    const { supabase } = context;
-    const { data: order } = await supabase
-      .from("server_orders").select("pterodactyl_server_identifier").eq("id", data.orderId).single();
-    if (!order?.pterodactyl_server_identifier) return { state: "unknown" as const };
+    const { data: order, error } = await context.supabase
+      .from("server_orders")
+      .select("id, server_name, status, pterodactyl_server_identifier, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)")
+      .eq("id", data.orderId)
+      .single();
+    if (error || !order) throw new Error("Server not found.");
+    if (!order.pterodactyl_server_identifier) return { order, live: null };
 
     const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroConfigured();
-    const res = (await ptero.client(`/servers/${order.pterodactyl_server_identifier}/resources`)) as {
-      attributes: { current_state: string; resources: { memory_bytes: number; cpu_absolute: number; disk_bytes: number } };
+    try {
+      const res = (await ptero.client(`/servers/${order.pterodactyl_server_identifier}/resources`)) as {
+        attributes: { current_state: string; resources: { memory_bytes: number; cpu_absolute: number; disk_bytes: number; network_rx_bytes: number; network_tx_bytes: number } };
+      };
+      const meta = (await ptero.client(`/servers/${order.pterodactyl_server_identifier}`)) as {
+        attributes: { sftp_details?: { ip: string; port: number }; relationships?: unknown };
+      };
+      return {
+        order,
+        live: {
+          state: res.attributes.current_state,
+          memoryMb: Math.round(res.attributes.resources.memory_bytes / 1024 / 1024),
+          cpu: Math.round(res.attributes.resources.cpu_absolute),
+          diskMb: Math.round(res.attributes.resources.disk_bytes / 1024 / 1024),
+          rxMb: Math.round(res.attributes.resources.network_rx_bytes / 1024 / 1024),
+          txMb: Math.round(res.attributes.resources.network_tx_bytes / 1024 / 1024),
+          sftp: meta.attributes.sftp_details ?? null,
+        },
+      };
+    } catch {
+      return { order, live: null };
+    }
+  });
+
+/** Get the Pterodactyl websocket URL + short-lived token for the in-app console. */
+export const getServerWebsocket = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    const res = (await ptero.client(`/servers/${identifier}/websocket`)) as { data: { token: string; socket: string } };
+    return res.data;
+  });
+
+/** Send a console command to a running server. */
+export const sendServerCommand = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ orderId: z.string().uuid(), command: z.string().min(1).max(2000) }).parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    await ptero.client(`/servers/${identifier}/command`, {
+      method: "POST",
+      body: JSON.stringify({ command: data.command }),
+    });
+    return { ok: true };
+  });
+
+/** List files in a directory. */
+export const listServerFiles = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ orderId: z.string().uuid(), directory: z.string().default("/") }).parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    const res = (await ptero.client(`/servers/${identifier}/files/list?directory=${encodeURIComponent(data.directory)}`)) as {
+      data: Array<{ attributes: { name: string; mode: string; size: number; is_file: boolean; is_symlink: boolean; mimetype: string; modified_at: string } }>;
     };
-    return {
-      state: res.attributes.current_state,
-      memoryMb: Math.round(res.attributes.resources.memory_bytes / 1024 / 1024),
-      cpu: Math.round(res.attributes.resources.cpu_absolute),
-      diskMb: Math.round(res.attributes.resources.disk_bytes / 1024 / 1024),
-    };
+    return { directory: data.directory, files: res.data.map((d) => d.attributes) };
+  });
+
+/** Read a text file. */
+export const readServerFile = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ orderId: z.string().uuid(), file: z.string().min(1) }).parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    const text = (await ptero.client(
+      `/servers/${identifier}/files/contents?file=${encodeURIComponent(data.file)}`,
+      { raw: true },
+    )) as string;
+    return { contents: text };
+  });
+
+/** Write a text file. */
+export const writeServerFile = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ orderId: z.string().uuid(), file: z.string().min(1), contents: z.string().max(5_000_000) }).parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    await ptero.client(`/servers/${identifier}/files/write?file=${encodeURIComponent(data.file)}`, {
+      method: "POST",
+      body: data.contents,
+      contentType: "text/plain",
+    });
+    return { ok: true };
+  });
+
+/** Delete files or folders. */
+export const deleteServerFiles = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ orderId: z.string().uuid(), root: z.string().default("/"), files: z.array(z.string()).min(1) }).parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    await ptero.client(`/servers/${identifier}/files/delete`, {
+      method: "POST",
+      body: JSON.stringify({ root: data.root, files: data.files }),
+    });
+    return { ok: true };
+  });
+
+/** Create a new folder. */
+export const createServerFolder = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ orderId: z.string().uuid(), root: z.string().default("/"), name: z.string().min(1).max(255) }).parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    await ptero.client(`/servers/${identifier}/files/create-folder`, {
+      method: "POST",
+      body: JSON.stringify({ root: data.root, name: data.name }),
+    });
+    return { ok: true };
+  });
+
+/** Rename a file or folder. */
+export const renameServerFile = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ orderId: z.string().uuid(), root: z.string().default("/"), from: z.string().min(1), to: z.string().min(1) }).parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    await ptero.client(`/servers/${identifier}/files/rename`, {
+      method: "PUT",
+      body: JSON.stringify({ root: data.root, files: [{ from: data.from, to: data.to }] }),
+    });
+    return { ok: true };
   });
