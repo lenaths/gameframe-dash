@@ -32,7 +32,7 @@ export const deployServer = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { ptero, getDefaultLocationId, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    const { ptero, getDefaultLocationId, getEggDefaultEnvironment, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroConfigured();
 
     const { data: plan, error: planErr } = await supabaseAdmin
