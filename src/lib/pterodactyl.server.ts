@@ -1,7 +1,11 @@
 // Server-only helpers for talking to a Pterodactyl panel.
 // Never import this from client code.
 
-const PANEL = () => (process.env.PTERODACTYL_PANEL_URL ?? "").replace(/\/+$/, "");
+const PANEL = () => {
+  const raw = (process.env.PTERODACTYL_PANEL_URL ?? "").trim().replace(/\/+$/, "");
+  if (!raw) return "";
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+};
 const APP_KEY = () => process.env.PTERODACTYL_APP_API_KEY ?? "";
 const CLIENT_KEY = () => process.env.PTERODACTYL_CLIENT_API_KEY ?? "";
 
