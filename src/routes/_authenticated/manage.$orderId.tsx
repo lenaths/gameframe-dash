@@ -15,7 +15,7 @@ import {
   listServerFiles, readServerFile, writeServerFile, deleteServerFiles, createServerFolder,
 } from "@/lib/servers.functions";
 
-export const Route = createFileRoute("/_authenticated/dashboard/server/$orderId")({
+export const Route = createFileRoute("/_authenticated/manage/$orderId")({
   head: () => ({ meta: [{ title: "Manage server · NexusHost" }] }),
   component: ServerDetail,
 });

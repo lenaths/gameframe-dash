@@ -16,7 +16,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedDeployRouteImport } from './routes/_authenticated/deploy'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as AuthenticatedAdminRouteImport } from './routes/_authenticated/admin'
-import { Route as AuthenticatedDashboardServerOrderIdRouteImport } from './routes/_authenticated/dashboard.server.$orderId'
+import { Route as AuthenticatedManageOrderIdRouteImport } from './routes/_authenticated/manage.$orderId'
 
 const PricingRoute = PricingRouteImport.update({
   id: '/pricing',
@@ -52,11 +52,11 @@ const AuthenticatedAdminRoute = AuthenticatedAdminRouteImport.update({
   path: '/admin',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
-const AuthenticatedDashboardServerOrderIdRoute =
-  AuthenticatedDashboardServerOrderIdRouteImport.update({
-    id: '/server/$orderId',
-    path: '/server/$orderId',
-    getParentRoute: () => AuthenticatedDashboardRoute,
+const AuthenticatedManageOrderIdRoute =
+  AuthenticatedManageOrderIdRouteImport.update({
+    id: '/manage/$orderId',
+    path: '/manage/$orderId',
+    getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
@@ -64,18 +64,18 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/admin': typeof AuthenticatedAdminRoute
-  '/dashboard': typeof AuthenticatedDashboardRouteWithChildren
+  '/dashboard': typeof AuthenticatedDashboardRoute
   '/deploy': typeof AuthenticatedDeployRoute
-  '/dashboard/server/$orderId': typeof AuthenticatedDashboardServerOrderIdRoute
+  '/manage/$orderId': typeof AuthenticatedManageOrderIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/admin': typeof AuthenticatedAdminRoute
-  '/dashboard': typeof AuthenticatedDashboardRouteWithChildren
+  '/dashboard': typeof AuthenticatedDashboardRoute
   '/deploy': typeof AuthenticatedDeployRoute
-  '/dashboard/server/$orderId': typeof AuthenticatedDashboardServerOrderIdRoute
+  '/manage/$orderId': typeof AuthenticatedManageOrderIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -84,9 +84,9 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/_authenticated/admin': typeof AuthenticatedAdminRoute
-  '/_authenticated/dashboard': typeof AuthenticatedDashboardRouteWithChildren
+  '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
   '/_authenticated/deploy': typeof AuthenticatedDeployRoute
-  '/_authenticated/dashboard/server/$orderId': typeof AuthenticatedDashboardServerOrderIdRoute
+  '/_authenticated/manage/$orderId': typeof AuthenticatedManageOrderIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -97,7 +97,7 @@ export interface FileRouteTypes {
     | '/admin'
     | '/dashboard'
     | '/deploy'
-    | '/dashboard/server/$orderId'
+    | '/manage/$orderId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -106,7 +106,7 @@ export interface FileRouteTypes {
     | '/admin'
     | '/dashboard'
     | '/deploy'
-    | '/dashboard/server/$orderId'
+    | '/manage/$orderId'
   id:
     | '__root__'
     | '/'
@@ -116,7 +116,7 @@ export interface FileRouteTypes {
     | '/_authenticated/admin'
     | '/_authenticated/dashboard'
     | '/_authenticated/deploy'
-    | '/_authenticated/dashboard/server/$orderId'
+    | '/_authenticated/manage/$orderId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -177,41 +177,28 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedAdminRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
-    '/_authenticated/dashboard/server/$orderId': {
-      id: '/_authenticated/dashboard/server/$orderId'
-      path: '/server/$orderId'
-      fullPath: '/dashboard/server/$orderId'
-      preLoaderRoute: typeof AuthenticatedDashboardServerOrderIdRouteImport
-      parentRoute: typeof AuthenticatedDashboardRoute
+    '/_authenticated/manage/$orderId': {
+      id: '/_authenticated/manage/$orderId'
+      path: '/manage/$orderId'
+      fullPath: '/manage/$orderId'
+      preLoaderRoute: typeof AuthenticatedManageOrderIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
     }
   }
 }
 
-interface AuthenticatedDashboardRouteChildren {
-  AuthenticatedDashboardServerOrderIdRoute: typeof AuthenticatedDashboardServerOrderIdRoute
-}
-
-const AuthenticatedDashboardRouteChildren: AuthenticatedDashboardRouteChildren =
-  {
-    AuthenticatedDashboardServerOrderIdRoute:
-      AuthenticatedDashboardServerOrderIdRoute,
-  }
-
-const AuthenticatedDashboardRouteWithChildren =
-  AuthenticatedDashboardRoute._addFileChildren(
-    AuthenticatedDashboardRouteChildren,
-  )
-
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedAdminRoute: typeof AuthenticatedAdminRoute
-  AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRouteWithChildren
+  AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
   AuthenticatedDeployRoute: typeof AuthenticatedDeployRoute
+  AuthenticatedManageOrderIdRoute: typeof AuthenticatedManageOrderIdRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedAdminRoute: AuthenticatedAdminRoute,
-  AuthenticatedDashboardRoute: AuthenticatedDashboardRouteWithChildren,
+  AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
   AuthenticatedDeployRoute: AuthenticatedDeployRoute,
+  AuthenticatedManageOrderIdRoute: AuthenticatedManageOrderIdRoute,
 }
 
 const AuthenticatedRouteRouteWithChildren =
@@ -226,3 +213,13 @@ const rootRouteChildren: RootRouteChildren = {
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
+  interface Register {
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
+  }
+}
