@@ -51,7 +51,10 @@ export const deployServer = createServerFn({ method: "POST" })
       const ownerId = Number(process.env.PTERODACTYL_DEFAULT_USER_ID ?? "1");
       const locationId = await getDefaultLocationId();
 
-      const env = (plan.environment as Record<string, unknown>) ?? {};
+      const planEnv = (plan.environment as Record<string, unknown>) ?? {};
+      const eggDefaults = await getEggDefaultEnvironment(plan.pterodactyl_nest_id, plan.pterodactyl_egg_id);
+      // Egg defaults fill in required vars; plan overrides win.
+      const env: Record<string, unknown> = { ...eggDefaults, ...planEnv };
 
       const payload = {
         name: data.serverName,
