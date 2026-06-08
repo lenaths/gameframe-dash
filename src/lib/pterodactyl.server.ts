@@ -52,3 +52,14 @@ export async function getDefaultLocationId(): Promise<number> {
   if (!first) throw new Error("No locations configured on the Pterodactyl panel.");
   return first;
 }
+
+/** Fetch egg variables and return defaults map (env_variable -> default_value). */
+export async function getEggDefaultEnvironment(nestId: number, eggId: number): Promise<Record<string, string>> {
+  const res = (await ptero.app(`/nests/${nestId}/eggs/${eggId}?include=variables`)) as {
+    attributes?: { relationships?: { variables?: { data?: Array<{ attributes: { env_variable: string; default_value: string | null } }> } } };
+  };
+  const vars = res.attributes?.relationships?.variables?.data ?? [];
+  const env: Record<string, string> = {};
+  for (const v of vars) env[v.attributes.env_variable] = v.attributes.default_value ?? "";
+  return env;
+}
