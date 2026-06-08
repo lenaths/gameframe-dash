@@ -96,7 +96,7 @@ function Dashboard() {
                       <Button size="sm" variant="outline" onClick={() => power.mutate({ orderId: s.id, signal: "restart" })}><RotateCw className="h-4 w-4" /></Button>
                       <Button size="sm" variant="outline" onClick={() => power.mutate({ orderId: s.id, signal: "stop" })}><Square className="h-4 w-4" /></Button>
                       <Button asChild size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90">
-                        <Link to="/dashboard/server/$orderId" params={{ orderId: s.id }}>
+                        <Link to="/manage/$orderId" params={{ orderId: s.id }}>
                           <Settings className="h-4 w-4 mr-1.5" /> Manage
                         </Link>
                       </Button>
