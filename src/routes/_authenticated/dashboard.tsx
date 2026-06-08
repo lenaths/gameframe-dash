@@ -1,10 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { Play, Square, RotateCw, Server as ServerIcon, Plus, ShieldAlert } from "lucide-react";
+import { Play, Square, RotateCw, Server as ServerIcon, Plus, ShieldAlert, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
-import { listMyServers, powerServer } from "@/lib/servers.functions";
+import { listMyServers, powerServer, getPanelUrl } from "@/lib/servers.functions";
 import { checkIsAdmin } from "@/lib/admin.functions";
 import { toast } from "sonner";
 
