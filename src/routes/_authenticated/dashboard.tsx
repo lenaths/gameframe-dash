@@ -94,10 +94,17 @@ function Dashboard() {
                     {s.status}
                   </span>
                   {s.status === "active" && (
-                    <div className="flex gap-1.5">
+                    <div className="flex gap-1.5 items-center">
                       <Button size="sm" variant="outline" onClick={() => power.mutate({ orderId: s.id, signal: "start" })}><Play className="h-4 w-4" /></Button>
                       <Button size="sm" variant="outline" onClick={() => power.mutate({ orderId: s.id, signal: "restart" })}><RotateCw className="h-4 w-4" /></Button>
                       <Button size="sm" variant="outline" onClick={() => power.mutate({ orderId: s.id, signal: "stop" })}><Square className="h-4 w-4" /></Button>
+                      {panelUrl && s.pterodactyl_server_identifier && (
+                        <Button asChild size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90">
+                          <a href={`${panelUrl}/server/${s.pterodactyl_server_identifier}`} target="_blank" rel="noreferrer">
+                            <Terminal className="h-4 w-4 mr-1.5" /> Console & Files
+                          </a>
+                        </Button>
+                      )}
                     </div>
                   )}
                 </div>
