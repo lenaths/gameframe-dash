@@ -14,16 +14,189 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      plans: {
+        Row: {
+          cpu_percent: number
+          created_at: string
+          description: string | null
+          disk_mb: number
+          docker_image: string
+          environment: Json
+          game: string
+          id: string
+          io_weight: number
+          is_active: boolean
+          name: string
+          price_monthly_cents: number
+          pterodactyl_egg_id: number
+          pterodactyl_nest_id: number
+          ram_mb: number
+          slug: string
+          sort_order: number
+          startup: string
+          swap_mb: number
+          updated_at: string
+        }
+        Insert: {
+          cpu_percent: number
+          created_at?: string
+          description?: string | null
+          disk_mb: number
+          docker_image: string
+          environment?: Json
+          game: string
+          id?: string
+          io_weight?: number
+          is_active?: boolean
+          name: string
+          price_monthly_cents: number
+          pterodactyl_egg_id: number
+          pterodactyl_nest_id: number
+          ram_mb: number
+          slug: string
+          sort_order?: number
+          startup: string
+          swap_mb?: number
+          updated_at?: string
+        }
+        Update: {
+          cpu_percent?: number
+          created_at?: string
+          description?: string | null
+          disk_mb?: number
+          docker_image?: string
+          environment?: Json
+          game?: string
+          id?: string
+          io_weight?: number
+          is_active?: boolean
+          name?: string
+          price_monthly_cents?: number
+          pterodactyl_egg_id?: number
+          pterodactyl_nest_id?: number
+          ram_mb?: number
+          slug?: string
+          sort_order?: number
+          startup?: string
+          swap_mb?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          display_name: string | null
+          email: string | null
+          id: string
+          pterodactyl_user_id: number | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          display_name?: string | null
+          email?: string | null
+          id: string
+          pterodactyl_user_id?: number | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          display_name?: string | null
+          email?: string | null
+          id?: string
+          pterodactyl_user_id?: number | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      server_orders: {
+        Row: {
+          created_at: string
+          error_message: string | null
+          id: string
+          plan_id: string
+          pterodactyl_server_id: number | null
+          pterodactyl_server_identifier: string | null
+          server_name: string
+          status: Database["public"]["Enums"]["server_status"]
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          plan_id: string
+          pterodactyl_server_id?: number | null
+          pterodactyl_server_identifier?: string | null
+          server_name: string
+          status?: Database["public"]["Enums"]["server_status"]
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          error_message?: string | null
+          id?: string
+          plan_id?: string
+          pterodactyl_server_id?: number | null
+          pterodactyl_server_identifier?: string | null
+          server_name?: string
+          status?: Database["public"]["Enums"]["server_status"]
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "server_orders_plan_id_fkey"
+            columns: ["plan_id"]
+            isOneToOne: false
+            referencedRelation: "plans"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_roles: {
+        Row: {
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          id?: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      app_role: "admin" | "user"
+      server_status:
+        | "pending"
+        | "provisioning"
+        | "active"
+        | "suspended"
+        | "failed"
+        | "cancelled"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +323,16 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      app_role: ["admin", "user"],
+      server_status: [
+        "pending",
+        "provisioning",
+        "active",
+        "suspended",
+        "failed",
+        "cancelled",
+      ],
+    },
   },
 } as const
