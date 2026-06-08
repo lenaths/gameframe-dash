@@ -11,6 +11,12 @@ const powerInput = z.object({
   orderId: z.string().uuid(),
   signal: z.enum(["start", "stop", "restart", "kill"]),
 });
+/** Public panel base URL (safe to expose — it's the URL users log into). */
+export const getPanelUrl = createServerFn({ method: "GET" }).handler(async () => {
+  const raw = (process.env.PTERODACTYL_PANEL_URL ?? "").trim().replace(/\/+$/, "");
+  if (!raw) return { url: "" };
+  return { url: /^https?:\/\//i.test(raw) ? raw : `https://${raw}` };
+});
 
 /** List the current user's provisioned servers (from our DB + live status from Pterodactyl). */
 export const listMyServers = createServerFn({ method: "GET" })

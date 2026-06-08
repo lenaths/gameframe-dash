@@ -1,10 +1,10 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { Play, Square, RotateCw, Server as ServerIcon, Plus, ShieldAlert } from "lucide-react";
+import { Play, Square, RotateCw, Server as ServerIcon, Plus, ShieldAlert, Terminal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
-import { listMyServers, powerServer } from "@/lib/servers.functions";
+import { listMyServers, powerServer, getPanelUrl } from "@/lib/servers.functions";
 import { checkIsAdmin } from "@/lib/admin.functions";
 import { toast } from "sonner";
 
@@ -25,11 +25,14 @@ const statusColor: Record<string, string> = {
 function Dashboard() {
   const fetchServers = useServerFn(listMyServers);
   const fetchAdmin = useServerFn(checkIsAdmin);
+  const fetchPanel = useServerFn(getPanelUrl);
   const sendPower = useServerFn(powerServer);
   const qc = useQueryClient();
 
   const { data, isLoading } = useQuery({ queryKey: ["my-servers"], queryFn: () => fetchServers() });
   const { data: adminData } = useQuery({ queryKey: ["is-admin"], queryFn: () => fetchAdmin() });
+  const { data: panelData } = useQuery({ queryKey: ["panel-url"], queryFn: () => fetchPanel() });
+  const panelUrl = panelData?.url ?? "";
 
   const power = useMutation({
     mutationFn: (vars: { orderId: string; signal: "start" | "stop" | "restart" }) => sendPower({ data: vars }),
@@ -91,10 +94,17 @@ function Dashboard() {
                     {s.status}
                   </span>
                   {s.status === "active" && (
-                    <div className="flex gap-1.5">
+                    <div className="flex gap-1.5 items-center">
                       <Button size="sm" variant="outline" onClick={() => power.mutate({ orderId: s.id, signal: "start" })}><Play className="h-4 w-4" /></Button>
                       <Button size="sm" variant="outline" onClick={() => power.mutate({ orderId: s.id, signal: "restart" })}><RotateCw className="h-4 w-4" /></Button>
                       <Button size="sm" variant="outline" onClick={() => power.mutate({ orderId: s.id, signal: "stop" })}><Square className="h-4 w-4" /></Button>
+                      {panelUrl && s.pterodactyl_server_identifier && (
+                        <Button asChild size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90">
+                          <a href={`${panelUrl}/server/${s.pterodactyl_server_identifier}`} target="_blank" rel="noreferrer">
+                            <Terminal className="h-4 w-4 mr-1.5" /> Console & Files
+                          </a>
+                        </Button>
+                      )}
                     </div>
                   )}
                 </div>
