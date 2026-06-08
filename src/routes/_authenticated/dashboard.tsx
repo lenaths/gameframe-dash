@@ -25,11 +25,14 @@ const statusColor: Record<string, string> = {
 function Dashboard() {
   const fetchServers = useServerFn(listMyServers);
   const fetchAdmin = useServerFn(checkIsAdmin);
+  const fetchPanel = useServerFn(getPanelUrl);
   const sendPower = useServerFn(powerServer);
   const qc = useQueryClient();
 
   const { data, isLoading } = useQuery({ queryKey: ["my-servers"], queryFn: () => fetchServers() });
   const { data: adminData } = useQuery({ queryKey: ["is-admin"], queryFn: () => fetchAdmin() });
+  const { data: panelData } = useQuery({ queryKey: ["panel-url"], queryFn: () => fetchPanel() });
+  const panelUrl = panelData?.url ?? "";
 
   const power = useMutation({
     mutationFn: (vars: { orderId: string; signal: "start" | "stop" | "restart" }) => sendPower({ data: vars }),
