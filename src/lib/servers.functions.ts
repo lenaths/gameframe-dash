@@ -50,12 +50,20 @@ export const deployServer = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { supabase, userId, claims } = context;
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { ptero, getDefaultLocationId, getEggDefaultEnvironment, createPanelUser, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    const { ptero, getDefaultLocationId, getEggDetails, createPanelUser, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroConfigured();
 
     const { data: plan, error: planErr } = await supabaseAdmin
       .from("plans").select("*").eq("id", data.planId).eq("is_active", true).single();
     if (planErr || !plan) throw new Error("Plan not found.");
+
+    // Resolve the chosen variant (or fall back to the plan's single egg).
+    type Variant = { nest_id: number; egg_id: number; label?: string; docker_image?: string; startup?: string };
+    const variantsRaw: Variant[] = Array.isArray(plan.allowed_eggs) && plan.allowed_eggs.length > 0
+      ? (plan.allowed_eggs as unknown as Variant[])
+      : [{ nest_id: plan.pterodactyl_nest_id, egg_id: plan.pterodactyl_egg_id }];
+    const variant = variantsRaw[data.variantIndex] ?? variantsRaw[0];
+    const egg = await getEggDetails(variant.nest_id, variant.egg_id);
 
     // Ensure the user has a panel account.
     const { data: profile } = await supabaseAdmin
@@ -83,37 +91,28 @@ export const deployServer = createServerFn({ method: "POST" })
 
     try {
       const locationId = await getDefaultLocationId();
+      // Defaults from the egg, overlaid with plan-wide overrides and the user's choices.
+      const eggDefaults: Record<string, string> = {};
+      for (const v of egg.variables) eggDefaults[v.env_variable] = v.default_value ?? "";
       const planEnv = (plan.environment as Record<string, unknown>) ?? {};
-      const eggDefaults = await getEggDefaultEnvironment(plan.pterodactyl_nest_id, plan.pterodactyl_egg_id);
-      const env: Record<string, unknown> = { ...eggDefaults, ...planEnv };
+      const env: Record<string, unknown> = { ...eggDefaults, ...planEnv, ...data.environment };
 
-      // Pick a sensible default port per game so allocations don't land on a random one.
       const defaultPorts: Record<string, string> = {
-        minecraft: "25565",
-        bungeecord: "25565",
-        rust: "28015",
-        valheim: "2456",
-        terraria: "7777",
-        ark: "7777",
-        csgo: "27015",
-        garrysmod: "27015",
+        minecraft: "25565", bungeecord: "25565", rust: "28015", valheim: "2456",
+        terraria: "7777", ark: "7777", csgo: "27015", garrysmod: "27015",
       };
-      const gameKey = String(plan.game ?? "").toLowerCase();
-      const preferredPort = defaultPorts[gameKey];
+      const preferredPort = defaultPorts[String(plan.game ?? "").toLowerCase()];
 
       const payload = {
         name: data.serverName,
         user: pteroUserId,
-        egg: plan.pterodactyl_egg_id,
-        docker_image: plan.docker_image,
-        startup: plan.startup,
+        egg: variant.egg_id,
+        docker_image: variant.docker_image || egg.docker_image,
+        startup: variant.startup || egg.startup,
         environment: env,
         limits: {
-          memory: plan.ram_mb,
-          swap: plan.swap_mb,
-          disk: plan.disk_mb,
-          io: plan.io_weight,
-          cpu: plan.cpu_percent,
+          memory: plan.ram_mb, swap: plan.swap_mb, disk: plan.disk_mb,
+          io: plan.io_weight, cpu: plan.cpu_percent,
         },
         feature_limits: { databases: 1, allocations: 1, backups: 2 },
         deploy: {
@@ -121,7 +120,6 @@ export const deployServer = createServerFn({ method: "POST" })
           dedicated_ip: false,
           port_range: preferredPort ? [preferredPort] : [],
         },
-        // Run the egg's install script (downloads jar/files) and boot the server when it finishes.
         skip_scripts: false,
         start_on_completion: true,
       };
@@ -130,6 +128,7 @@ export const deployServer = createServerFn({ method: "POST" })
         method: "POST",
         body: JSON.stringify(payload),
       })) as { attributes: { id: number; identifier: string } };
+
 
       const { error: updErr } = await supabaseAdmin
         .from("server_orders")
