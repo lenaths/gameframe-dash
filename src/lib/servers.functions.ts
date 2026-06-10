@@ -319,3 +319,64 @@ export const renameServerFile = createServerFn({ method: "POST" })
     });
     return { ok: true };
   });
+
+/** Get current startup state (egg, vars, environment) for a server. */
+export const getServerStartup = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { data: order, error } = await context.supabase
+      .from("server_orders")
+      .select("id, pterodactyl_server_id, plan_id")
+      .eq("id", data.orderId)
+      .single();
+    if (error || !order?.pterodactyl_server_id) throw new Error("Server not found.");
+
+    const { getServerStartupApp, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+    const s = await getServerStartupApp(order.pterodactyl_server_id);
+    return {
+      nest: s.nest,
+      egg: s.egg,
+      startup: s.startup,
+      image: s.image,
+      environment: s.environment,
+      variables: s.variables.filter((v) => v.user_viewable),
+    };
+  });
+
+/** Update startup variables. Triggers reinstall when caller asks (or when egg/version-like vars change). */
+export const updateServerStartup = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({
+    orderId: z.string().uuid(),
+    environment: z.record(z.string(), z.string()),
+    reinstall: z.boolean().default(false),
+  }).parse(d))
+  .handler(async ({ data, context }) => {
+    const { data: order, error } = await context.supabase
+      .from("server_orders")
+      .select("id, pterodactyl_server_id")
+      .eq("id", data.orderId)
+      .single();
+    if (error || !order?.pterodactyl_server_id) throw new Error("Server not found.");
+
+    const { getServerStartupApp, updateServerStartupApp, reinstallServer, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroConfigured();
+
+    const current = await getServerStartupApp(order.pterodactyl_server_id);
+    const editable = new Set(current.variables.filter((v) => v.user_editable).map((v) => v.env_variable));
+    const nextEnv: Record<string, string> = { ...current.environment };
+    for (const [k, v] of Object.entries(data.environment)) {
+      if (editable.has(k)) nextEnv[k] = v;
+    }
+
+    await updateServerStartupApp(order.pterodactyl_server_id, {
+      environment: nextEnv,
+      startup: current.startup,
+      egg: current.egg,
+      image: current.image,
+    });
+    if (data.reinstall) await reinstallServer(order.pterodactyl_server_id);
+    return { ok: true };
+  });
