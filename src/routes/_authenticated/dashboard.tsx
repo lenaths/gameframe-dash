@@ -9,7 +9,7 @@ import { checkIsAdmin } from "@/lib/admin.functions";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
-  head: () => ({ meta: [{ title: "Dashboard · NexusHost" }] }),
+  head: () => ({ meta: [{ title: "Dashboard · XntServers" }] }),
   component: Dashboard,
 });
 

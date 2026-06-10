@@ -6,7 +6,7 @@ import { SiteHeader } from "@/components/site-header";
 import { adminListAll } from "@/lib/admin.functions";
 
 export const Route = createFileRoute("/_authenticated/admin")({
-  head: () => ({ meta: [{ title: "Admin · NexusHost" }] }),
+  head: () => ({ meta: [{ title: "Admin · XntServers" }] }),
   component: Admin,
 });
 

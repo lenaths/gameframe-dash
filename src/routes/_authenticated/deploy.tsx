@@ -16,7 +16,7 @@ const searchSchema = z.object({ plan: z.string().optional() });
 
 export const Route = createFileRoute("/_authenticated/deploy")({
   validateSearch: searchSchema,
-  head: () => ({ meta: [{ title: "Deploy a server · NexusHost" }] }),
+  head: () => ({ meta: [{ title: "Deploy a server · XntServers" }] }),
   component: Deploy,
 });
 

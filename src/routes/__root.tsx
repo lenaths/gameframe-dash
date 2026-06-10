@@ -78,9 +78,9 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "NexusHost — Game servers, instantly deployed" },
+      { title: "XntServers — Game servers, instantly deployed" },
       { name: "description", content: "Premium game server hosting for Minecraft, ARK, Conan Exiles & Garry's Mod. Deploy in seconds, manage from one dashboard." },
-      { property: "og:title", content: "NexusHost — Game servers, instantly deployed" },
+      { property: "og:title", content: "XntServers — Game servers, instantly deployed" },
       { property: "og:description", content: "Deploy Minecraft, ARK, Conan & Garry's Mod servers in seconds." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },

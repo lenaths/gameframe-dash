@@ -11,7 +11,7 @@ import { listPlans } from "@/lib/plans.functions";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "NexusHost — Game servers, instantly deployed" },
+      { title: "XntServers — Game servers, instantly deployed" },
       { name: "description", content: "Premium hosting for Minecraft, ARK, Conan Exiles & Garry's Mod. NVMe SSD, DDoS protection, 99.9% uptime." },
     ],
   }),

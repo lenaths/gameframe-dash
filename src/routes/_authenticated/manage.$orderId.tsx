@@ -16,7 +16,7 @@ import {
 } from "@/lib/servers.functions";
 
 export const Route = createFileRoute("/_authenticated/manage/$orderId")({
-  head: () => ({ meta: [{ title: "Manage server · NexusHost" }] }),
+  head: () => ({ meta: [{ title: "Manage server · XntServers" }] }),
   component: ServerDetail,
 });
 

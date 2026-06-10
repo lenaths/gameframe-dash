@@ -12,7 +12,7 @@ import { useAuth } from "@/hooks/use-auth";
 export const Route = createFileRoute("/pricing")({
   head: () => ({
     meta: [
-      { title: "Pricing — NexusHost game server hosting" },
+      { title: "Pricing — XntServers game server hosting" },
       { name: "description", content: "Transparent monthly pricing for Minecraft, ARK, Conan Exiles and Garry's Mod servers. Pick a plan and deploy." },
     ],
   }),
