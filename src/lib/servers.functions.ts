@@ -85,6 +85,20 @@ export const deployServer = createServerFn({ method: "POST" })
       const eggDefaults = await getEggDefaultEnvironment(plan.pterodactyl_nest_id, plan.pterodactyl_egg_id);
       const env: Record<string, unknown> = { ...eggDefaults, ...planEnv };
 
+      // Pick a sensible default port per game so allocations don't land on a random one.
+      const defaultPorts: Record<string, string> = {
+        minecraft: "25565",
+        bungeecord: "25565",
+        rust: "28015",
+        valheim: "2456",
+        terraria: "7777",
+        ark: "7777",
+        csgo: "27015",
+        garrysmod: "27015",
+      };
+      const gameKey = String(plan.game ?? "").toLowerCase();
+      const preferredPort = defaultPorts[gameKey];
+
       const payload = {
         name: data.serverName,
         user: pteroUserId,
@@ -100,8 +114,14 @@ export const deployServer = createServerFn({ method: "POST" })
           cpu: plan.cpu_percent,
         },
         feature_limits: { databases: 1, allocations: 1, backups: 2 },
-        deploy: { locations: [locationId], dedicated_ip: false, port_range: [] },
-        start_on_completion: false,
+        deploy: {
+          locations: [locationId],
+          dedicated_ip: false,
+          port_range: preferredPort ? [preferredPort] : [],
+        },
+        // Run the egg's install script (downloads jar/files) and boot the server when it finishes.
+        skip_scripts: false,
+        start_on_completion: true,
       };
 
       const created = (await ptero.app("/servers", {
