@@ -5,6 +5,8 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 const deployInput = z.object({
   planId: z.string().uuid(),
   serverName: z.string().min(2).max(40),
+  variantIndex: z.number().int().min(0).default(0),
+  environment: z.record(z.string(), z.string()).default({}),
 });
 
 const powerInput = z.object({
