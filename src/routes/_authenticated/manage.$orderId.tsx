@@ -13,7 +13,9 @@ import { toast } from "sonner";
 import {
   getServerDetail, getServerWebsocket, powerServer, sendServerCommand,
   listServerFiles, readServerFile, writeServerFile, deleteServerFiles, createServerFolder,
+  getServerStartup, updateServerStartup,
 } from "@/lib/servers.functions";
+import { EggVariablesForm } from "@/components/egg-variables-form";
 
 export const Route = createFileRoute("/_authenticated/manage/$orderId")({
   head: () => ({ meta: [{ title: "Manage server · XntServers" }] }),
@@ -79,7 +81,8 @@ function ServerDetail() {
               <TabsList>
                 <TabsTrigger value="console">Console</TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
-                <TabsTrigger value="info">SFTP & Info</TabsTrigger>
+                <TabsTrigger value="startup">Startup &amp; Variables</TabsTrigger>
+                <TabsTrigger value="info">SFTP &amp; Info</TabsTrigger>
               </TabsList>
 
               <TabsContent value="console" className="mt-4">
@@ -87,6 +90,9 @@ function ServerDetail() {
               </TabsContent>
               <TabsContent value="files" className="mt-4">
                 <FilesTab orderId={orderId} />
+              </TabsContent>
+              <TabsContent value="startup" className="mt-4">
+                <StartupTab orderId={orderId} />
               </TabsContent>
               <TabsContent value="info" className="mt-4">
                 <InfoTab sftp={live?.sftp ?? null} />
