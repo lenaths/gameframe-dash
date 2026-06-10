@@ -1,0 +1,1 @@
+ALTER TABLE public.plans ADD COLUMN IF NOT EXISTS allowed_eggs jsonb NOT NULL DEFAULT '[]'::jsonb;

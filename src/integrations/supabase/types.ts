@@ -16,6 +16,7 @@ export type Database = {
     Tables: {
       plans: {
         Row: {
+          allowed_eggs: Json
           cpu_percent: number
           created_at: string
           description: string | null
@@ -38,6 +39,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          allowed_eggs?: Json
           cpu_percent: number
           created_at?: string
           description?: string | null
@@ -60,6 +62,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          allowed_eggs?: Json
           cpu_percent?: number
           created_at?: string
           description?: string | null
