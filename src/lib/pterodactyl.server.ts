@@ -59,14 +59,87 @@ export async function getDefaultLocationId(): Promise<number> {
   return first;
 }
 
-export async function getEggDefaultEnvironment(nestId: number, eggId: number): Promise<Record<string, string>> {
+export type EggVariable = {
+  name: string;
+  description: string;
+  env_variable: string;
+  default_value: string;
+  user_viewable: boolean;
+  user_editable: boolean;
+  rules: string;
+};
+
+export type EggDetails = {
+  id: number;
+  name: string;
+  description: string;
+  docker_image: string;
+  startup: string;
+  variables: EggVariable[];
+};
+
+export async function getEggDetails(nestId: number, eggId: number): Promise<EggDetails> {
   const res = (await ptero.app(`/nests/${nestId}/eggs/${eggId}?include=variables`)) as {
-    attributes?: { relationships?: { variables?: { data?: Array<{ attributes: { env_variable: string; default_value: string | null } }> } } };
+    attributes: {
+      id: number;
+      name: string;
+      description: string;
+      docker_image: string;
+      startup: string;
+      relationships?: { variables?: { data?: Array<{ attributes: EggVariable }> } };
+    };
   };
-  const vars = res.attributes?.relationships?.variables?.data ?? [];
+  const a = res.attributes;
+  return {
+    id: a.id,
+    name: a.name,
+    description: a.description,
+    docker_image: a.docker_image,
+    startup: a.startup,
+    variables: (a.relationships?.variables?.data ?? []).map((v) => v.attributes),
+  };
+}
+
+export async function getEggDefaultEnvironment(nestId: number, eggId: number): Promise<Record<string, string>> {
+  const details = await getEggDetails(nestId, eggId);
   const env: Record<string, string> = {};
-  for (const v of vars) env[v.attributes.env_variable] = v.attributes.default_value ?? "";
+  for (const v of details.variables) env[v.env_variable] = v.default_value ?? "";
   return env;
+}
+
+/** Update an existing server's startup (env vars, egg, image). */
+export async function updateServerStartupApp(
+  serverId: number,
+  payload: { environment: Record<string, string>; startup: string; egg: number; image: string; skip_scripts?: boolean },
+) {
+  await ptero.app(`/servers/${serverId}/startup`, {
+    method: "PATCH",
+    body: JSON.stringify({ skip_scripts: false, ...payload }),
+  });
+}
+
+export async function reinstallServer(serverId: number) {
+  await ptero.app(`/servers/${serverId}/reinstall`, { method: "POST", body: "" });
+}
+
+/** Get a server's current egg, image, startup, env from app API. */
+export async function getServerStartupApp(serverId: number) {
+  const res = (await ptero.app(`/servers/${serverId}?include=egg,variables`)) as {
+    attributes: {
+      nest: number;
+      egg: number;
+      container: { startup_command: string; image: string; environment: Record<string, string> };
+      relationships?: { variables?: { data?: Array<{ attributes: EggVariable }> } };
+    };
+  };
+  return {
+    nest: res.attributes.nest,
+    egg: res.attributes.egg,
+    startup: res.attributes.container.startup_command,
+    image: res.attributes.container.image,
+    environment: res.attributes.container.environment,
+    variables: (res.attributes.relationships?.variables?.data ?? []).map((v) => v.attributes),
+  };
 }
 
 /** Create a Pterodactyl panel user. Returns the user id. */
