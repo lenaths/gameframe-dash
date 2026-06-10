@@ -13,10 +13,12 @@ import { toast } from "sonner";
 import {
   getServerDetail, getServerWebsocket, powerServer, sendServerCommand,
   listServerFiles, readServerFile, writeServerFile, deleteServerFiles, createServerFolder,
+  getServerStartup, updateServerStartup,
 } from "@/lib/servers.functions";
+import { EggVariablesForm } from "@/components/egg-variables-form";
 
 export const Route = createFileRoute("/_authenticated/manage/$orderId")({
-  head: () => ({ meta: [{ title: "Manage server · NexusHost" }] }),
+  head: () => ({ meta: [{ title: "Manage server · XntServers" }] }),
   component: ServerDetail,
 });
 
@@ -79,7 +81,8 @@ function ServerDetail() {
               <TabsList>
                 <TabsTrigger value="console">Console</TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
-                <TabsTrigger value="info">SFTP & Info</TabsTrigger>
+                <TabsTrigger value="startup">Startup &amp; Variables</TabsTrigger>
+                <TabsTrigger value="info">SFTP &amp; Info</TabsTrigger>
               </TabsList>
 
               <TabsContent value="console" className="mt-4">
@@ -87,6 +90,9 @@ function ServerDetail() {
               </TabsContent>
               <TabsContent value="files" className="mt-4">
                 <FilesTab orderId={orderId} />
+              </TabsContent>
+              <TabsContent value="startup" className="mt-4">
+                <StartupTab orderId={orderId} />
               </TabsContent>
               <TabsContent value="info" className="mt-4">
                 <InfoTab sftp={live?.sftp ?? null} />
@@ -372,6 +378,77 @@ function InfoTab({ sftp }: { sftp: { ip: string; port: number } | null }) {
         ) : (
           <div className="text-sm text-muted-foreground">SFTP details unavailable.</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Startup & Variables ---------------- */
+
+function StartupTab({ orderId }: { orderId: string }) {
+  const fetchStartup = useServerFn(getServerStartup);
+  const saveStartup = useServerFn(updateServerStartup);
+  const qc = useQueryClient();
+
+  const startup = useQuery({
+    queryKey: ["startup", orderId],
+    queryFn: () => fetchStartup({ data: { orderId } }),
+  });
+
+  const [env, setEnv] = useState<Record<string, string>>({});
+  const [reinstall, setReinstall] = useState(false);
+
+  useEffect(() => {
+    if (startup.data) setEnv({ ...startup.data.environment });
+  }, [startup.data]);
+
+  const save = useMutation({
+    mutationFn: () => saveStartup({ data: { orderId, environment: env, reinstall } }),
+    onSuccess: () => {
+      toast.success(reinstall ? "Saved — reinstalling…" : "Variables saved");
+      setReinstall(false);
+      qc.invalidateQueries({ queryKey: ["startup", orderId] });
+      qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  if (startup.isLoading) return <div className="text-sm text-muted-foreground">Loading…</div>;
+  if (startup.error) return <div className="text-sm text-destructive">{(startup.error as Error).message}</div>;
+  if (!startup.data) return null;
+
+  return (
+    <div className="rounded-xl border border-border/60 bg-surface p-6 space-y-6">
+      <div>
+        <h3 className="font-display text-lg font-semibold">Server variables</h3>
+        <p className="text-xs text-muted-foreground mt-1">
+          Change version, mods, modpack ID, or any other option below. Changing the version or modpack usually requires a reinstall.
+        </p>
+      </div>
+
+      <EggVariablesForm variables={startup.data.variables} values={env} onChange={setEnv} />
+
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-4">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={reinstall}
+            onChange={(e) => setReinstall(e.target.checked)}
+            className="accent-[color:var(--primary)]"
+          />
+          Reinstall after save
+          <span className="text-xs text-muted-foreground">(wipes &amp; re-downloads files — use when changing version or modpack)</span>
+        </label>
+        <Button
+          onClick={() => {
+            if (reinstall && !confirm("Reinstalling will wipe server files and re-run the install script. Continue?")) return;
+            save.mutate();
+          }}
+          disabled={save.isPending}
+          className="bg-primary text-primary-foreground hover:bg-primary/90"
+        >
+          {save.isPending ? "Saving…" : "Save changes"}
+        </Button>
       </div>
     </div>
   );

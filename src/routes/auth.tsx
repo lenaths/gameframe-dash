@@ -13,7 +13,7 @@ const searchSchema = z.object({ redirect: z.string().optional() });
 
 export const Route = createFileRoute("/auth")({
   validateSearch: searchSchema,
-  head: () => ({ meta: [{ title: "Sign in · NexusHost" }] }),
+  head: () => ({ meta: [{ title: "Sign in · XntServers" }] }),
   component: Auth,
 });
 
@@ -64,7 +64,7 @@ function Auth() {
           <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/15 text-primary">
             <Gamepad2 className="h-5 w-5" />
           </span>
-          <span className="font-display text-lg font-bold">NEXUS<span className="text-primary">HOST</span></span>
+          <span className="font-display text-lg font-bold">XNT<span className="text-primary">SERVERS</span></span>
         </div>
         <h1 className="font-display text-2xl font-bold">{mode === "signin" ? "Welcome back" : "Create your account"}</h1>
         <p className="text-sm text-muted-foreground mt-1">

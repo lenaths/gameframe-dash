@@ -13,7 +13,7 @@ export function SiteHeader() {
             <Gamepad2 className="h-5 w-5" />
           </span>
           <span className="font-display text-lg font-bold tracking-tight">
-            NEXUS<span className="text-primary">HOST</span>
+            XNT<span className="text-primary">SERVERS</span>
           </span>
         </Link>
         <nav className="hidden items-center gap-7 text-sm md:flex">
