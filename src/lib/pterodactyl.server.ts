@@ -31,7 +31,14 @@ async function pteroFetch(path: string, key: string, opts: PteroOptions = {}) {
   if (opts.contentType !== null) {
     headers["Content-Type"] = opts.contentType ?? "application/json";
   }
-  const res = await fetch(url, { ...opts, headers });
+  let res: Response;
+  try {
+    res = await fetch(url, { ...opts, headers });
+  } catch (e) {
+    const cause = (e as Error & { cause?: Error }).cause?.message ?? (e as Error).message;
+    throw new Error(`Pterodactyl fetch failed for ${path}: ${cause}`);
+  }
+
   const text = await res.text();
   if (!res.ok) {
     throw new Error(`Pterodactyl ${res.status} ${path}: ${text || res.statusText}`);
