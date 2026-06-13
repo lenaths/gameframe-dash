@@ -15,6 +15,25 @@ export function getPanelBaseUrl() {
 
 type Json = Record<string, unknown>;
 
+function formatPteroError(status: number, path: string, body: string, statusText: string) {
+  let detail = body || statusText;
+  let code = "";
+  try {
+    const parsed = JSON.parse(body) as { errors?: Array<{ code?: string; detail?: string }> };
+    const first = parsed.errors?.[0];
+    detail = first?.detail || detail;
+    code = first?.code ? ` ${first.code}` : "";
+  } catch {
+    // Keep the raw response body when the panel does not return JSON.
+  }
+
+  if (status === 502 && detail.toLowerCase().includes("communicating with the machine")) {
+    detail = "The panel could not contact the Wings/node daemon while creating the server. Check the node is online, reachable from the panel, and has a valid allocation available.";
+  }
+
+  return `Pterodactyl ${status}${code} ${path}: ${detail}`;
+}
+
 interface PteroOptions extends Omit<RequestInit, "body"> {
   body?: BodyInit | null;
   raw?: boolean; // return raw text instead of JSON
@@ -41,7 +60,7 @@ async function pteroFetch(path: string, key: string, opts: PteroOptions = {}) {
 
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`Pterodactyl ${res.status} ${path}: ${text || res.statusText}`);
+    throw new Error(formatPteroError(res.status, path, text, res.statusText));
   }
   if (opts.raw) return text;
   if (!text) return null;
