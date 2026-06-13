@@ -175,6 +175,7 @@ function ConsoleTab({ orderId }: { orderId: string }) {
             } else if (msg.event === "token expiring" || msg.event === "token expired") {
               try {
                 const fresh = await fetchWs({ data: { orderId } });
+                if (!fresh.ok) throw new Error(fresh.error);
                 ws?.send(JSON.stringify({ event: "auth", args: [fresh.token] }));
               } catch (err) {
                 t.write(`\x1b[31m[token refresh failed: ${(err as Error).message}]\x1b[0m\r\n`);
