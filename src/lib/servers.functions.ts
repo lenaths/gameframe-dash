@@ -208,11 +208,15 @@ export const getServerWebsocket = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => orderInput.parse(d))
   .handler(async ({ data, context }) => {
-    const identifier = await loadIdentifier(context.supabase, data.orderId);
-    const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
-    assertPteroConfigured();
-    const res = (await ptero.client(`/servers/${identifier}/websocket`)) as { data: { token: string; socket: string } };
-    return res.data;
+    try {
+      const identifier = await loadIdentifier(context.supabase, data.orderId);
+      const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+      assertPteroConfigured();
+      const res = (await ptero.client(`/servers/${identifier}/websocket`)) as { data: { token: string; socket: string } };
+      return { ok: true as const, token: res.data.token, socket: res.data.socket };
+    } catch (e) {
+      return { ok: false as const, error: (e as Error).message };
+    }
   });
 
 /** Send a console command to a running server. */

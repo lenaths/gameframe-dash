@@ -157,6 +157,7 @@ function ConsoleTab({ orderId }: { orderId: string }) {
 
       const connect = async () => {
         const creds = await fetchWs({ data: { orderId } });
+        if (!creds.ok) throw new Error(creds.error);
         ws = new WebSocket(creds.socket);
         wsRef.current = ws;
         ws.onopen = () => {
@@ -172,8 +173,13 @@ function ConsoleTab({ orderId }: { orderId: string }) {
             } else if (msg.event === "status") {
               t.write(`\x1b[33m[status: ${msg.args?.[0]}]\x1b[0m\r\n`);
             } else if (msg.event === "token expiring" || msg.event === "token expired") {
-              const fresh = await fetchWs({ data: { orderId } });
-              ws?.send(JSON.stringify({ event: "auth", args: [fresh.token] }));
+              try {
+                const fresh = await fetchWs({ data: { orderId } });
+                if (!fresh.ok) throw new Error(fresh.error);
+                ws?.send(JSON.stringify({ event: "auth", args: [fresh.token] }));
+              } catch (err) {
+                t.write(`\x1b[31m[token refresh failed: ${(err as Error).message}]\x1b[0m\r\n`);
+              }
             } else if (msg.event === "jwt error" || msg.event === "auth error") {
               t.write(`\x1b[31m[auth error]\x1b[0m\r\n`);
             }
