@@ -31,6 +31,12 @@ function formatPteroError(status: number, path: string, body: string, statusText
     detail = "The panel could not contact the Wings/node daemon while creating the server. Check the node is online, reachable from the panel, and has a valid allocation available.";
   }
 
+  if (status === 401 && path.startsWith("/api/client/")) {
+    detail = "The Pterodactyl Client API key was rejected. Update PTERODACTYL_CLIENT_API_KEY with a valid Account API key from a panel user that can access this server.";
+  } else if (status === 401 && path.startsWith("/api/application/")) {
+    detail = "The Pterodactyl Application API key was rejected. Update PTERODACTYL_APP_API_KEY with a valid Application API key that has the required permissions.";
+  }
+
   return `Pterodactyl ${status}${code} ${path}: ${detail}`;
 }
 
