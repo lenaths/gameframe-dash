@@ -157,6 +157,7 @@ function ConsoleTab({ orderId }: { orderId: string }) {
 
       const connect = async () => {
         const creds = await fetchWs({ data: { orderId } });
+        if (!creds.ok) throw new Error(creds.error);
         ws = new WebSocket(creds.socket);
         wsRef.current = ws;
         ws.onopen = () => {
