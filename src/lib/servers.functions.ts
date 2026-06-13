@@ -238,10 +238,15 @@ export const listServerFiles = createServerFn({ method: "POST" })
     const identifier = await loadIdentifier(context.supabase, data.orderId);
     const { ptero, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroConfigured();
-    const res = (await ptero.client(`/servers/${identifier}/files/list?directory=${encodeURIComponent(data.directory)}`)) as {
-      data: Array<{ attributes: { name: string; mode: string; size: number; is_file: boolean; is_symlink: boolean; mimetype: string; modified_at: string } }>;
-    };
-    return { directory: data.directory, files: res.data.map((d) => d.attributes) };
+    try {
+      const res = (await ptero.client(`/servers/${identifier}/files/list?directory=${encodeURIComponent(data.directory)}`)) as {
+        data: Array<{ attributes: { name: string; mode: string; size: number; is_file: boolean; is_symlink: boolean; mimetype: string; modified_at: string } }>;
+      };
+      return { directory: data.directory, files: res.data.map((d) => d.attributes), error: null as string | null };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { directory: data.directory, files: [], error: msg };
+    }
   });
 
 /** Read a text file. */

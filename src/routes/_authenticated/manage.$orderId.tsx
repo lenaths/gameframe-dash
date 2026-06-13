@@ -320,6 +320,14 @@ function FilesTab({ orderId }: { orderId: string }) {
       <div className="divide-y divide-border/60">
         {list.isLoading ? (
           <div className="p-6 text-sm text-muted-foreground">Loading…</div>
+        ) : list.error || list.data?.error ? (
+          <div className="space-y-3 p-6">
+            <div className="text-sm font-medium text-destructive">File manager unavailable</div>
+            <div className="text-sm text-muted-foreground">{(list.error as Error | null)?.message ?? list.data?.error}</div>
+            <Button size="sm" variant="outline" onClick={() => list.refetch()}>
+              <RefreshCw className="h-4 w-4 mr-1" /> Retry
+            </Button>
+          </div>
         ) : (list.data?.files ?? []).length === 0 ? (
           <div className="p-6 text-sm text-muted-foreground">Empty directory.</div>
         ) : (
