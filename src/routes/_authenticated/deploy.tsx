@@ -52,7 +52,15 @@ function Deploy() {
 
   const deploy = useMutation({
     mutationFn: () => callDeploy({ data: { planId, serverName: name, variantIndex, environment: env } }),
-    onSuccess: () => { toast.success("Server provisioned!"); navigate({ to: "/dashboard" }); },
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(result.error);
+        navigate({ to: "/dashboard" });
+        return;
+      }
+      toast.success("Server provisioned!");
+      navigate({ to: "/dashboard" });
+    },
     onError: (e: Error) => toast.error(e.message),
   });
 
