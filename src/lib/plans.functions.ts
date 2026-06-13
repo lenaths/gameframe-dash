@@ -38,16 +38,35 @@ export const getDeployOptions = createServerFn({ method: "POST" })
 
     const variants = await Promise.all(
       variantsRaw.map(async (v, i) => {
-        const egg = await getEggDetails(v.nest_id, v.egg_id);
-        return {
-          index: i,
-          label: v.label || egg.name,
-          eggName: egg.name,
-          eggDescription: egg.description,
-          variables: egg.variables.filter((vv) => vv.user_viewable),
-        };
+        try {
+          const egg = await getEggDetails(v.nest_id, v.egg_id);
+          return {
+            index: i,
+            label: v.label || egg.name,
+            eggName: egg.name,
+            eggDescription: egg.description,
+            variables: egg.variables.filter((vv) => vv.user_viewable),
+            error: null as string | null,
+          };
+        } catch (e) {
+          const msg = (e as Error).message || "";
+          const friendly = /\b5\d\d\b/.test(msg)
+            ? "Pterodactyl panel is unreachable right now (HTTP error from the panel host). Check that the panel is online and that PTERODACTYL_PANEL_URL is correct."
+            : /\b404\b/.test(msg)
+              ? `Egg ${v.nest_id}/${v.egg_id} not found on the panel. Update the plan's nest/egg IDs in admin.`
+              : msg;
+          return {
+            index: i,
+            label: v.label || `Egg ${v.nest_id}/${v.egg_id}`,
+            eggName: "",
+            eggDescription: "",
+            variables: [] as Awaited<ReturnType<typeof getEggDetails>>["variables"],
+            error: friendly,
+          };
+        }
       }),
     );
+
 
     return {
       plan: {
