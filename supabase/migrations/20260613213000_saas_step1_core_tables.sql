@@ -1,4 +1,8 @@
 -- SaaS step 1: additive core tables.
+-- Security/safety note:
+-- - additive and non destructive migration
+-- - no table drops, data deletes, truncates, or column removals
+-- - policy/trigger drops below only replace objects created by this migration
 -- This migration is intentionally compatible with the current application:
 -- - existing plans and server_orders stay functional
 -- - new foreign keys are nullable
@@ -6,7 +10,13 @@
 
 do $$
 begin
-  if not exists (select 1 from pg_type where typname = 'saas_order_status') then
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'saas_order_status'
+  ) then
     create type public.saas_order_status as enum (
       'draft',
       'pending_payment',
@@ -20,7 +30,13 @@ begin
     );
   end if;
 
-  if not exists (select 1 from pg_type where typname = 'payment_status') then
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'payment_status'
+  ) then
     create type public.payment_status as enum (
       'pending',
       'requires_action',
@@ -33,7 +49,13 @@ begin
     );
   end if;
 
-  if not exists (select 1 from pg_type where typname = 'invoice_status') then
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'invoice_status'
+  ) then
     create type public.invoice_status as enum (
       'draft',
       'open',
@@ -44,7 +66,13 @@ begin
     );
   end if;
 
-  if not exists (select 1 from pg_type where typname = 'ticket_status') then
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'ticket_status'
+  ) then
     create type public.ticket_status as enum (
       'open',
       'pending',
@@ -54,7 +82,13 @@ begin
     );
   end if;
 
-  if not exists (select 1 from pg_type where typname = 'ticket_priority') then
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_namespace n on n.oid = t.typnamespace
+    where n.nspname = 'public'
+      and t.typname = 'ticket_priority'
+  ) then
     create type public.ticket_priority as enum (
       'low',
       'normal',
@@ -256,26 +290,31 @@ alter table public.ticket_messages enable row level security;
 alter table public.activity_logs enable row level security;
 alter table public.audit_logs enable row level security;
 
+drop policy if exists "public reads active products" on public.products;
 create policy "public reads active products"
 on public.products for select
 to anon, authenticated
 using (is_active = true or public.has_role(auth.uid(), 'admin'));
 
+drop policy if exists "users read own orders" on public.orders;
 create policy "users read own orders"
 on public.orders for select
 to authenticated
 using (auth.uid() = user_id or public.has_role(auth.uid(), 'admin'));
 
+drop policy if exists "users read own payments" on public.payments;
 create policy "users read own payments"
 on public.payments for select
 to authenticated
 using (auth.uid() = user_id or public.has_role(auth.uid(), 'admin'));
 
+drop policy if exists "users read own invoices" on public.invoices;
 create policy "users read own invoices"
 on public.invoices for select
 to authenticated
 using (auth.uid() = user_id or public.has_role(auth.uid(), 'admin'));
 
+drop policy if exists "users read own invoice items" on public.invoice_items;
 create policy "users read own invoice items"
 on public.invoice_items for select
 to authenticated
@@ -288,6 +327,7 @@ using (
   )
 );
 
+drop policy if exists "users read own tickets" on public.tickets;
 create policy "users read own tickets"
 on public.tickets for select
 to authenticated
@@ -297,6 +337,7 @@ using (
   or public.has_role(auth.uid(), 'admin')
 );
 
+drop policy if exists "users read visible ticket messages" on public.ticket_messages;
 create policy "users read visible ticket messages"
 on public.ticket_messages for select
 to authenticated
@@ -313,32 +354,39 @@ using (
   )
 );
 
+drop policy if exists "users read own activity logs" on public.activity_logs;
 create policy "users read own activity logs"
 on public.activity_logs for select
 to authenticated
 using (auth.uid() = user_id or public.has_role(auth.uid(), 'admin'));
 
+drop policy if exists "admins read audit logs" on public.audit_logs;
 create policy "admins read audit logs"
 on public.audit_logs for select
 to authenticated
 using (public.has_role(auth.uid(), 'admin'));
 
+drop trigger if exists trg_products_updated on public.products;
 create trigger trg_products_updated
 before update on public.products
 for each row execute function public.update_updated_at_column();
 
+drop trigger if exists trg_saas_orders_updated on public.orders;
 create trigger trg_saas_orders_updated
 before update on public.orders
 for each row execute function public.update_updated_at_column();
 
+drop trigger if exists trg_payments_updated on public.payments;
 create trigger trg_payments_updated
 before update on public.payments
 for each row execute function public.update_updated_at_column();
 
+drop trigger if exists trg_invoices_updated on public.invoices;
 create trigger trg_invoices_updated
 before update on public.invoices
 for each row execute function public.update_updated_at_column();
 
+drop trigger if exists trg_tickets_updated on public.tickets;
 create trigger trg_tickets_updated
 before update on public.tickets
 for each row execute function public.update_updated_at_column();
