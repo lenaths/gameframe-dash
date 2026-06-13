@@ -109,16 +109,21 @@ function Deploy() {
                       type="button"
                       key={v.index}
                       onClick={() => setVariantIndex(v.index)}
+                      disabled={!!v.error}
                       className={`text-left rounded-lg border p-3 transition-colors ${
+                        v.error ? "border-destructive/40 bg-destructive/5 cursor-not-allowed" :
                         variantIndex === v.index ? "border-primary bg-primary/5" : "border-border hover:border-border/80"
                       }`}
                     >
                       <div className="font-medium">{v.label}</div>
-                      <div className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{v.eggDescription || v.eggName}</div>
+                      <div className={`text-xs line-clamp-2 mt-0.5 ${v.error ? "text-destructive" : "text-muted-foreground"}`}>
+                        {v.error || v.eggDescription || v.eggName}
+                      </div>
                     </button>
                   ))}
                 </div>
               )}
+
             </div>
           )}
 
