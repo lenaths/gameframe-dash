@@ -50,11 +50,19 @@ export const getDeployOptions = createServerFn({ method: "POST" })
           };
         } catch (e) {
           const msg = (e as Error).message || "";
-          const friendly = /\b5\d\d\b/.test(msg)
-            ? "Pterodactyl panel is unreachable right now (HTTP error from the panel host). Check that the panel is online and that PTERODACTYL_PANEL_URL is correct."
-            : /\b404\b/.test(msg)
-              ? `Egg ${v.nest_id}/${v.egg_id} not found on the panel. Update the plan's nest/egg IDs in admin.`
-              : msg;
+          const cause = ((e as Error).cause as Error | undefined)?.message || "";
+          const combined = `${msg} ${cause}`.toLowerCase();
+          const isNetwork = /fetch failed|enotfound|econnrefused|etimedout|econnreset|network|getaddrinfo/.test(combined);
+          const friendly = isNetwork
+            ? "Can't reach the Pterodactyl panel (network/DNS error). Verify PTERODACTYL_PANEL_URL is correct and the panel is online."
+            : /\b5\d\d\b/.test(msg)
+              ? "Pterodactyl panel is unreachable right now (HTTP error from the panel host). Check that the panel is online."
+              : /\b404\b/.test(msg)
+                ? `Egg ${v.nest_id}/${v.egg_id} not found on the panel. Update the plan's nest/egg IDs in admin.`
+                : /\b401\b|\b403\b/.test(msg)
+                  ? "Pterodactyl rejected the API key. Check PTERODACTYL_APP_API_KEY permissions."
+                  : msg;
+
           return {
             index: i,
             label: v.label || `Egg ${v.nest_id}/${v.egg_id}`,
