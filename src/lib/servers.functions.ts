@@ -140,14 +140,14 @@ export const deployServer = createServerFn({ method: "POST" })
         .eq("id", order.id);
       if (updErr) throw new Error(updErr.message);
 
-      return { ok: true, orderId: order.id };
+      return { ok: true as const, orderId: order.id };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       await supabaseAdmin
         .from("server_orders")
         .update({ status: "failed", error_message: msg })
         .eq("id", order.id);
-      throw new Error(msg);
+      return { ok: false as const, orderId: order.id, error: msg };
     }
   });
 
