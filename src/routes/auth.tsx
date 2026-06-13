@@ -39,7 +39,10 @@ function Auth() {
         const { error } = await supabase.auth.signUp({
           email,
           password,
-          options: { data: { display_name: name || email.split("@")[0] }, emailRedirectTo: `${window.location.origin}/dashboard` },
+          options: {
+            data: { display_name: name || email.split("@")[0] },
+            emailRedirectTo: `${window.location.origin}/dashboard`,
+          },
         });
         if (error) throw error;
         toast.success("Account created. You're signed in!");
@@ -64,36 +67,67 @@ function Auth() {
           <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/15 text-primary">
             <Gamepad2 className="h-5 w-5" />
           </span>
-          <span className="font-display text-lg font-bold">XNT<span className="text-primary">SERVERS</span></span>
+          <span className="font-display text-lg font-bold">
+            XNT<span className="text-primary">SERVERS</span>
+          </span>
         </div>
-        <h1 className="font-display text-2xl font-bold">{mode === "signin" ? "Welcome back" : "Create your account"}</h1>
+        <h1 className="font-display text-2xl font-bold">
+          {mode === "signin" ? "Welcome back" : "Create your account"}
+        </h1>
         <p className="text-sm text-muted-foreground mt-1">
-          {mode === "signin" ? "Sign in to manage your servers." : "Deploy your first server in seconds."}
+          {mode === "signin"
+            ? "Sign in to manage your servers."
+            : "Deploy your first server in seconds."}
         </p>
 
         <form onSubmit={submit} className="mt-6 space-y-4">
           {mode === "signup" && (
             <div className="space-y-2">
               <Label htmlFor="name">Display name</Label>
-              <Input id="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Steve" />
+              <Input
+                id="name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Steve"
+              />
             </div>
           )}
           <div className="space-y-2">
             <Label htmlFor="email">Email</Label>
-            <Input id="email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
+            <Input
+              id="email"
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
           </div>
           <div className="space-y-2">
             <Label htmlFor="password">Password</Label>
-            <Input id="password" type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} />
+            <Input
+              id="password"
+              type="password"
+              required
+              minLength={8}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
           </div>
-          <Button type="submit" disabled={busy} className="w-full bg-primary text-primary-foreground hover:bg-primary/90 glow-primary">
+          <Button
+            type="submit"
+            disabled={busy}
+            className="w-full bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
+          >
             {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
           </Button>
         </form>
 
         <p className="mt-4 text-sm text-muted-foreground text-center">
           {mode === "signin" ? "New here?" : "Already have an account?"}{" "}
-          <button onClick={() => setMode(mode === "signin" ? "signup" : "signin")} className="text-primary hover:underline">
+          <button
+            onClick={() => setMode(mode === "signin" ? "signup" : "signin")}
+            className="text-primary hover:underline"
+          >
             {mode === "signin" ? "Create one" : "Sign in"}
           </button>
         </p>

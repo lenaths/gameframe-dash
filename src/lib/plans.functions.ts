@@ -13,7 +13,9 @@ export const listPlans = createServerFn({ method: "GET" }).handler(async () => {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { data, error } = await supabaseAdmin
     .from("plans")
-    .select("id, slug, game, name, description, price_monthly_cents, ram_mb, cpu_percent, disk_mb, sort_order, allowed_eggs")
+    .select(
+      "id, slug, game, name, description, price_monthly_cents, ram_mb, cpu_percent, disk_mb, sort_order, allowed_eggs",
+    )
     .eq("is_active", true)
     .order("sort_order", { ascending: true });
   if (error) throw new Error(error.message);
@@ -22,19 +24,30 @@ export const listPlans = createServerFn({ method: "GET" }).handler(async () => {
 
 /** Returns the plan plus its variants enriched with egg variables fetched live from the panel. */
 export const getDeployOptions = createServerFn({ method: "POST" })
-  .inputValidator((d: unknown) => z.object({ planId: z.string().uuid() }).parse(d))
+  .validator((d: unknown) => z.object({ planId: z.string().uuid() }).parse(d))
   .handler(async ({ data }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { getEggDetails, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
-    assertPteroConfigured();
+    const { getEggDetails, assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroAppConfigured();
 
     const { data: plan, error } = await supabaseAdmin
-      .from("plans").select("*").eq("id", data.planId).eq("is_active", true).single();
+      .from("plans")
+      .select("*")
+      .eq("id", data.planId)
+      .eq("is_active", true)
+      .single();
     if (error || !plan) throw new Error("Plan not found.");
 
-    const variantsRaw = Array.isArray(plan.allowed_eggs) && plan.allowed_eggs.length > 0
-      ? (plan.allowed_eggs as unknown as PlanVariant[])
-      : [{ nest_id: plan.pterodactyl_nest_id, egg_id: plan.pterodactyl_egg_id, label: plan.name } as PlanVariant];
+    const variantsRaw =
+      Array.isArray(plan.allowed_eggs) && plan.allowed_eggs.length > 0
+        ? (plan.allowed_eggs as unknown as PlanVariant[])
+        : [
+            {
+              nest_id: plan.pterodactyl_nest_id,
+              egg_id: plan.pterodactyl_egg_id,
+              label: plan.name,
+            } as PlanVariant,
+          ];
 
     const variants = await Promise.all(
       variantsRaw.map(async (v, i) => {
@@ -52,7 +65,10 @@ export const getDeployOptions = createServerFn({ method: "POST" })
           const msg = (e as Error).message || "";
           const cause = ((e as Error).cause as Error | undefined)?.message || "";
           const combined = `${msg} ${cause}`.toLowerCase();
-          const isNetwork = /fetch failed|enotfound|econnrefused|etimedout|econnreset|network|getaddrinfo/.test(combined);
+          const isNetwork =
+            /fetch failed|enotfound|econnrefused|etimedout|econnreset|network|getaddrinfo/.test(
+              combined,
+            );
           const friendly = isNetwork
             ? "Can't reach the Pterodactyl panel (network/DNS error). Verify PTERODACTYL_PANEL_URL is correct and the panel is online."
             : /\b5\d\d\b/.test(msg)
@@ -75,11 +91,15 @@ export const getDeployOptions = createServerFn({ method: "POST" })
       }),
     );
 
-
     return {
       plan: {
-        id: plan.id, slug: plan.slug, game: plan.game, name: plan.name,
-        ram_mb: plan.ram_mb, cpu_percent: plan.cpu_percent, disk_mb: plan.disk_mb,
+        id: plan.id,
+        slug: plan.slug,
+        game: plan.game,
+        name: plan.name,
+        ram_mb: plan.ram_mb,
+        cpu_percent: plan.cpu_percent,
+        disk_mb: plan.disk_mb,
         price_monthly_cents: plan.price_monthly_cents,
       },
       variants,

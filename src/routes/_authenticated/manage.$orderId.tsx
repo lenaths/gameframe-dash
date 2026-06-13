@@ -2,7 +2,19 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Play, RotateCw, Square, Folder, File as FileIcon, Trash2, FolderPlus, Save, RefreshCw, ChevronLeft } from "lucide-react";
+import {
+  ArrowLeft,
+  Play,
+  RotateCw,
+  Square,
+  Folder,
+  File as FileIcon,
+  Trash2,
+  FolderPlus,
+  Save,
+  RefreshCw,
+  ChevronLeft,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,11 +23,31 @@ import { Badge } from "@/components/ui/badge";
 import { SiteHeader } from "@/components/site-header";
 import { toast } from "sonner";
 import {
-  getServerDetail, getServerWebsocket, powerServer, sendServerCommand,
-  listServerFiles, readServerFile, writeServerFile, deleteServerFiles, createServerFolder,
-  getServerStartup, updateServerStartup,
+  getServerDetail,
+  getServerWebsocket,
+  powerServer,
+  sendServerCommand,
+  listServerFiles,
+  readServerFile,
+  writeServerFile,
+  deleteServerFiles,
+  createServerFolder,
+  getServerStartup,
+  updateServerStartup,
 } from "@/lib/servers.functions";
 import { EggVariablesForm } from "@/components/egg-variables-form";
+
+const MAX_EDITABLE_FILE_SIZE_BYTES = 1024 * 1024;
+const BLOCKED_EDITOR_EXTENSIONS = new Set([
+  ".jar",
+  ".zip",
+  ".tar",
+  ".gz",
+  ".exe",
+  ".bin",
+  ".sqlite",
+  ".db",
+]);
 
 export const Route = createFileRoute("/_authenticated/manage/$orderId")({
   head: () => ({ meta: [{ title: "Manage server · XntServers" }] }),
@@ -34,9 +66,32 @@ function ServerDetail() {
     refetchInterval: 5000,
   });
 
+  const waitForStateChange = async (previousState: string | null) => {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+      const next = await fetchDetail({ data: { orderId } });
+      const nextState = next.live?.state ?? null;
+      if (nextState && nextState !== previousState) return nextState;
+    }
+    return null;
+  };
+
   const power = useMutation({
-    mutationFn: (signal: "start" | "stop" | "restart") => sendPower({ data: { orderId, signal } }),
-    onSuccess: (_d, s) => { toast.success(`Sent ${s}`); qc.invalidateQueries({ queryKey: ["server-detail", orderId] }); },
+    mutationFn: async (signal: "start" | "stop" | "restart") => {
+      const previousState = live?.state ?? null;
+      await sendPower({ data: { orderId, signal } });
+      toast.info("Signal envoyé, attente du changement d’état…");
+      return { signal, previousState, nextState: await waitForStateChange(previousState) };
+    },
+    onSuccess: ({ signal, previousState, nextState }) => {
+      if (nextState) {
+        toast.success(`${signal} confirmé: ${previousState ?? "unknown"} → ${nextState}`);
+      } else {
+        toast.warning("Signal envoyé, mais aucun changement d’état détecté après 30 secondes.");
+      }
+      qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
+    },
     onError: (e: Error) => toast.error(e.message),
   });
 
@@ -48,7 +103,9 @@ function ServerDetail() {
       <SiteHeader />
       <div className="mx-auto max-w-6xl px-6 py-8">
         <Button asChild variant="ghost" size="sm" className="mb-4 -ml-2">
-          <Link to="/dashboard"><ArrowLeft className="h-4 w-4 mr-1.5" /> Back</Link>
+          <Link to="/dashboard">
+            <ArrowLeft className="h-4 w-4 mr-1.5" /> Back
+          </Link>
         </Button>
 
         {isLoading || !order ? (
@@ -63,10 +120,33 @@ function ServerDetail() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <Badge variant="outline" className="capitalize">{live?.state ?? order.status}</Badge>
-                <Button size="sm" variant="outline" onClick={() => power.mutate("start")}><Play className="h-4 w-4" /></Button>
-                <Button size="sm" variant="outline" onClick={() => power.mutate("restart")}><RotateCw className="h-4 w-4" /></Button>
-                <Button size="sm" variant="outline" onClick={() => power.mutate("stop")}><Square className="h-4 w-4" /></Button>
+                <Badge variant="outline" className="capitalize">
+                  {live?.state ?? order.status}
+                </Badge>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={power.isPending}
+                  onClick={() => power.mutate("start")}
+                >
+                  <Play className="h-4 w-4" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={power.isPending}
+                  onClick={() => power.mutate("restart")}
+                >
+                  <RotateCw className="h-4 w-4" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={power.isPending}
+                  onClick={() => power.mutate("stop")}
+                >
+                  <Square className="h-4 w-4" />
+                </Button>
               </div>
             </div>
 
@@ -76,6 +156,12 @@ function ServerDetail() {
               <Stat label="CPU" value={`${live?.cpu ?? 0}%`} />
               <Stat label="Disk" value={`${live?.diskMb ?? 0} MB`} />
             </div>
+
+            {data.warning && (
+              <div className="mb-6 rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">
+                {data.warning}
+              </div>
+            )}
 
             <Tabs defaultValue="console">
               <TabsList>
@@ -124,11 +210,16 @@ function ConsoleTab({ orderId }: { orderId: string }) {
   const wsRef = useRef<WebSocket | null>(null);
   const [command, setCommand] = useState("");
   const [connected, setConnected] = useState(false);
+  const [consoleError, setConsoleError] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     let ws: WebSocket | null = null;
     let xterm: { dispose: () => void } | null = null;
+    let ro: ResizeObserver | null = null;
+    setConnected(false);
+    setConsoleError(null);
 
     (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -152,13 +243,24 @@ function ConsoleTab({ orderId }: { orderId: string }) {
       xterm = t;
       termInstance.current = { write: (s) => t.write(s), clear: () => t.clear() };
 
-      const ro = new ResizeObserver(() => { try { fit.fit(); } catch { /* ignore */ } });
+      ro = new ResizeObserver(() => {
+        try {
+          fit.fit();
+        } catch {
+          /* ignore */
+        }
+      });
       ro.observe(termRef.current);
 
       const connect = async () => {
         const creds = await fetchWs({ data: { orderId } });
         if (!creds.ok) throw new Error(creds.error);
-        ws = new WebSocket(creds.socket);
+        try {
+          ws = new WebSocket(creds.socket);
+        } catch (error) {
+          console.error("[Pterodactyl WS] constructor failed", error);
+          throw new Error("Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.");
+        }
         wsRef.current = ws;
         ws.onopen = () => {
           ws?.send(JSON.stringify({ event: "auth", args: [creds.token] }));
@@ -183,25 +285,59 @@ function ConsoleTab({ orderId }: { orderId: string }) {
             } else if (msg.event === "jwt error" || msg.event === "auth error") {
               t.write(`\x1b[31m[auth error]\x1b[0m\r\n`);
             }
-          } catch { /* ignore */ }
+          } catch {
+            /* ignore */
+          }
         };
-        ws.onclose = () => { setConnected(false); t.write("\x1b[31m[disconnected]\x1b[0m\r\n"); };
-        ws.onerror = () => { t.write("\x1b[31m[ws error]\x1b[0m\r\n"); };
+        ws.onclose = (event) => {
+          console.warn("[Pterodactyl WS] closed", {
+            code: event.code,
+            reason: event.reason,
+            wasClean: event.wasClean,
+          });
+          setConnected(false);
+          t.write(
+            `\x1b[31m[disconnected code=${event.code} reason=${event.reason || "none"}]\x1b[0m\r\n`,
+          );
+        };
+        ws.onerror = (event) => {
+          console.error("[Pterodactyl WS] error", event);
+          setConsoleError("Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.");
+          setConnected(false);
+          t.write("\x1b[31m[ws error]\x1b[0m\r\n");
+        };
       };
 
-      try { await connect(); } catch (e) {
-        t.write(`\x1b[31m${(e as Error).message}\x1b[0m\r\n`);
+      try {
+        await connect();
+      } catch (e) {
+        const message =
+          (e as Error).message || "Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.";
+        console.error("[Pterodactyl WS] connect failed", e);
+        setConsoleError(
+          message.includes("WebSocket")
+            ? message
+            : "Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.",
+        );
+        t.write(`\x1b[31m${message}\x1b[0m\r\n`);
       }
-
-      return () => { ro.disconnect(); };
     })();
 
     return () => {
       cancelled = true;
-      try { wsRef.current?.close(); } catch { /* ignore */ }
-      try { xterm?.dispose(); } catch { /* ignore */ }
+      try {
+        wsRef.current?.close();
+      } catch {
+        /* ignore */
+      }
+      try {
+        xterm?.dispose();
+      } catch {
+        /* ignore */
+      }
+      ro?.disconnect();
     };
-  }, [orderId, fetchWs]);
+  }, [orderId, fetchWs, retryKey]);
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -209,11 +345,21 @@ function ConsoleTab({ orderId }: { orderId: string }) {
     try {
       await sendCmd({ data: { orderId, command } });
       setCommand("");
-    } catch (err) { toast.error((err as Error).message); }
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
   };
 
   return (
     <div className="rounded-xl border border-border/60 bg-[#0a0d12] overflow-hidden">
+      {consoleError && (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          <span>{consoleError}</span>
+          <Button size="sm" variant="outline" onClick={() => setRetryKey((key) => key + 1)}>
+            <RefreshCw className="h-4 w-4 mr-1" /> Retry
+          </Button>
+        </div>
+      )}
       <div ref={termRef} className="h-[420px] w-full px-3 py-2" />
       <form onSubmit={onSubmit} className="flex gap-2 border-t border-border/60 p-2 bg-surface">
         <Input
@@ -223,7 +369,9 @@ function ConsoleTab({ orderId }: { orderId: string }) {
           className="font-mono text-sm"
           disabled={!connected}
         />
-        <Button type="submit" disabled={!connected || !command.trim()}>Send</Button>
+        <Button type="submit" disabled={!connected || !command.trim()}>
+          Send
+        </Button>
       </form>
     </div>
   );
@@ -255,29 +403,44 @@ function FilesTab({ orderId }: { orderId: string }) {
     return idx <= 0 ? "/" : trimmed.slice(0, idx);
   }, [dir]);
 
-  const openFile = async (name: string) => {
-    const path = joinPath(dir, name);
+  const openFile = async (file: { name: string; size: number }) => {
+    if (file.size > MAX_EDITABLE_FILE_SIZE_BYTES || hasBlockedEditorExtension(file.name)) {
+      toast.warning("Ce fichier ne peut pas être ouvert dans l’éditeur.");
+      return;
+    }
+
+    const path = joinPath(dir, file.name);
     try {
       const res = await fetchFile({ data: { orderId, file: path } });
       setEditing({ path, contents: res.contents });
-    } catch (e) { toast.error((e as Error).message); }
+    } catch (e) {
+      toast.error((e as Error).message || "Impossible d’ouvrir ce fichier.");
+    }
   };
 
   const save = useMutation({
-    mutationFn: () => saveFile({ data: { orderId, file: editing!.path, contents: editing!.contents } }),
+    mutationFn: () =>
+      saveFile({ data: { orderId, file: editing!.path, contents: editing!.contents } }),
     onSuccess: () => toast.success("Saved"),
     onError: (e: Error) => toast.error(e.message),
   });
 
   const del = useMutation({
     mutationFn: (name: string) => removeFiles({ data: { orderId, root: dir, files: [name] } }),
-    onSuccess: () => { toast.success("Deleted"); qc.invalidateQueries({ queryKey: ["files", orderId, dir] }); },
+    onSuccess: () => {
+      toast.success("Deleted");
+      qc.invalidateQueries({ queryKey: ["files", orderId, dir] });
+    },
     onError: (e: Error) => toast.error(e.message),
   });
 
   const createFolder = useMutation({
     mutationFn: () => mkdir({ data: { orderId, root: dir, name: folderName } }),
-    onSuccess: () => { toast.success("Folder created"); setFolderName(""); qc.invalidateQueries({ queryKey: ["files", orderId, dir] }); },
+    onSuccess: () => {
+      toast.success("Folder created");
+      setFolderName("");
+      qc.invalidateQueries({ queryKey: ["files", orderId, dir] });
+    },
     onError: (e: Error) => toast.error(e.message),
   });
 
@@ -287,8 +450,15 @@ function FilesTab({ orderId }: { orderId: string }) {
         <div className="flex items-center justify-between mb-3 gap-2">
           <div className="font-mono text-sm truncate">{editing.path}</div>
           <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => setEditing(null)}>Close</Button>
-            <Button size="sm" onClick={() => save.mutate()} disabled={save.isPending} className="bg-primary text-primary-foreground hover:bg-primary/90">
+            <Button size="sm" variant="outline" onClick={() => setEditing(null)}>
+              Close
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => save.mutate()}
+              disabled={save.isPending}
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
               <Save className="h-4 w-4 mr-1.5" /> Save
             </Button>
           </div>
@@ -306,7 +476,12 @@ function FilesTab({ orderId }: { orderId: string }) {
   return (
     <div className="rounded-xl border border-border/60 bg-surface">
       <div className="flex flex-wrap items-center gap-2 p-3 border-b border-border/60">
-        <Button size="sm" variant="ghost" disabled={!parentDir} onClick={() => parentDir && setDir(parentDir)}>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={!parentDir}
+          onClick={() => parentDir && setDir(parentDir)}
+        >
           <ChevronLeft className="h-4 w-4 mr-1" /> Up
         </Button>
         <div className="font-mono text-sm text-muted-foreground truncate flex-1">{dir}</div>
@@ -319,7 +494,12 @@ function FilesTab({ orderId }: { orderId: string }) {
           placeholder="New folder name"
           className="h-8 w-44"
         />
-        <Button size="sm" variant="outline" onClick={() => createFolder.mutate()} disabled={!folderName.trim()}>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => createFolder.mutate()}
+          disabled={!folderName.trim()}
+        >
           <FolderPlus className="h-4 w-4 mr-1" /> Create
         </Button>
       </div>
@@ -329,7 +509,9 @@ function FilesTab({ orderId }: { orderId: string }) {
         ) : list.error || list.data?.error ? (
           <div className="space-y-3 p-6">
             <div className="text-sm font-medium text-destructive">File manager unavailable</div>
-            <div className="text-sm text-muted-foreground">{(list.error as Error | null)?.message ?? list.data?.error}</div>
+            <div className="text-sm text-muted-foreground">
+              {(list.error as Error | null)?.message ?? list.data?.error}
+            </div>
             <Button size="sm" variant="outline" onClick={() => list.refetch()}>
               <RefreshCw className="h-4 w-4 mr-1" /> Retry
             </Button>
@@ -342,16 +524,24 @@ function FilesTab({ orderId }: { orderId: string }) {
               <button
                 type="button"
                 className="flex items-center gap-2 flex-1 text-left truncate"
-                onClick={() => f.is_file ? openFile(f.name) : setDir(joinPath(dir, f.name))}
+                onClick={() => (f.is_file ? openFile(f) : setDir(joinPath(dir, f.name)))}
               >
-                {f.is_file ? <FileIcon className="h-4 w-4 text-muted-foreground shrink-0" /> : <Folder className="h-4 w-4 text-primary shrink-0" />}
+                {f.is_file ? (
+                  <FileIcon className="h-4 w-4 text-muted-foreground shrink-0" />
+                ) : (
+                  <Folder className="h-4 w-4 text-primary shrink-0" />
+                )}
                 <span className="font-mono text-sm truncate">{f.name}</span>
               </button>
-              <span className="text-xs text-muted-foreground w-24 text-right">{f.is_file ? formatSize(f.size) : "—"}</span>
+              <span className="text-xs text-muted-foreground w-24 text-right">
+                {f.is_file ? formatSize(f.size) : "—"}
+              </span>
               <Button
                 size="sm"
                 variant="ghost"
-                onClick={() => { if (confirm(`Delete ${f.name}?`)) del.mutate(f.name); }}
+                onClick={() => {
+                  if (confirm(`Delete ${f.name}?`)) del.mutate(f.name);
+                }}
               >
                 <Trash2 className="h-4 w-4 text-destructive" />
               </Button>
@@ -373,6 +563,10 @@ function formatSize(b: number) {
   if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
   return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
+function hasBlockedEditorExtension(name: string) {
+  const normalized = name.toLowerCase();
+  return [...BLOCKED_EDITOR_EXTENSIONS].some((extension) => normalized.endsWith(extension));
+}
 
 /* ---------------- Info ---------------- */
 
@@ -383,10 +577,15 @@ function InfoTab({ sftp }: { sftp: { ip: string; port: number } | null }) {
         <h3 className="font-display text-lg font-semibold mb-2">SFTP access</h3>
         {sftp ? (
           <div className="space-y-1 font-mono text-sm">
-            <div><span className="text-muted-foreground">Host:</span> {sftp.ip}</div>
-            <div><span className="text-muted-foreground">Port:</span> {sftp.port}</div>
+            <div>
+              <span className="text-muted-foreground">Host:</span> {sftp.ip}
+            </div>
+            <div>
+              <span className="text-muted-foreground">Port:</span> {sftp.port}
+            </div>
             <div className="text-xs text-muted-foreground mt-2">
-              Use your account email as username. SFTP password is set in your account settings on the panel.
+              Use your account email as username. SFTP password is set in your account settings on
+              the panel.
             </div>
           </div>
         ) : (
@@ -412,14 +611,35 @@ function StartupTab({ orderId }: { orderId: string }) {
   const [env, setEnv] = useState<Record<string, string>>({});
   const [reinstall, setReinstall] = useState(false);
 
+  const editableVariableNames = useMemo(
+    () =>
+      new Set(
+        (startup.data?.variables ?? [])
+          .filter((variable) => variable.user_editable)
+          .map((variable) => variable.env_variable),
+      ),
+    [startup.data?.variables],
+  );
+
   useEffect(() => {
     if (startup.data) setEnv({ ...startup.data.environment });
   }, [startup.data]);
 
   const save = useMutation({
-    mutationFn: () => saveStartup({ data: { orderId, environment: env, reinstall } }),
-    onSuccess: () => {
+    mutationFn: () => {
+      const ignored = Object.keys(env).filter((key) => !editableVariableNames.has(key));
+      const editableEnv = Object.fromEntries(
+        Object.entries(env).filter(([key]) => editableVariableNames.has(key)),
+      );
+      return saveStartup({ data: { orderId, environment: editableEnv, reinstall } }).then(() => ({
+        ignoredCount: ignored.length,
+      }));
+    },
+    onSuccess: ({ ignoredCount }) => {
       toast.success(reinstall ? "Saved — reinstalling…" : "Variables saved");
+      if (ignoredCount) {
+        toast.warning(`${ignoredCount} variable(s) non éditable(s) ignorée(s).`);
+      }
       setReinstall(false);
       qc.invalidateQueries({ queryKey: ["startup", orderId] });
       qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
@@ -428,7 +648,8 @@ function StartupTab({ orderId }: { orderId: string }) {
   });
 
   if (startup.isLoading) return <div className="text-sm text-muted-foreground">Loading…</div>;
-  if (startup.error) return <div className="text-sm text-destructive">{(startup.error as Error).message}</div>;
+  if (startup.error)
+    return <div className="text-sm text-destructive">{(startup.error as Error).message}</div>;
   if (!startup.data) return null;
 
   return (
@@ -436,7 +657,8 @@ function StartupTab({ orderId }: { orderId: string }) {
       <div>
         <h3 className="font-display text-lg font-semibold">Server variables</h3>
         <p className="text-xs text-muted-foreground mt-1">
-          Change version, mods, modpack ID, or any other option below. Changing the version or modpack usually requires a reinstall.
+          Change version, mods, modpack ID, or any other option below. Changing the version or
+          modpack usually requires a reinstall.
         </p>
       </div>
 
@@ -451,11 +673,19 @@ function StartupTab({ orderId }: { orderId: string }) {
             className="accent-[color:var(--primary)]"
           />
           Reinstall after save
-          <span className="text-xs text-muted-foreground">(wipes &amp; re-downloads files — use when changing version or modpack)</span>
+          <span className="text-xs text-muted-foreground">
+            (wipes &amp; re-downloads files — use when changing version or modpack)
+          </span>
         </label>
         <Button
           onClick={() => {
-            if (reinstall && !confirm("Reinstalling will wipe server files and re-run the install script. Continue?")) return;
+            if (
+              reinstall &&
+              !confirm(
+                "Reinstalling will wipe server files and re-run the install script. Continue?",
+              )
+            )
+              return;
             save.mutate();
           }}
           disabled={save.isPending}

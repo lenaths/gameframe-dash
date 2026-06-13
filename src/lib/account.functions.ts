@@ -10,7 +10,7 @@ export const ensureMyPanelAccount = createServerFn({ method: "POST" })
   .handler(async ({ context }) => {
     const { supabase, userId, claims } = context;
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { createPanelUser, assertPteroConfigured } = await import("@/lib/pterodactyl.server");
+    const { createPanelUser, assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
 
     const { data: profile } = await supabase
       .from("profiles")
@@ -22,7 +22,7 @@ export const ensureMyPanelAccount = createServerFn({ method: "POST" })
       return { pteroUserId: profile.pterodactyl_user_id };
     }
 
-    assertPteroConfigured();
+    assertPteroAppConfigured();
 
     const email = (profile?.email ?? claims?.email ?? "") as string;
     if (!email) throw new Error("Missing email for panel account creation.");

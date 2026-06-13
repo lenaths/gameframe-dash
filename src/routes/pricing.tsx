@@ -13,7 +13,11 @@ export const Route = createFileRoute("/pricing")({
   head: () => ({
     meta: [
       { title: "Pricing — XntServers game server hosting" },
-      { name: "description", content: "Transparent monthly pricing for Minecraft, ARK, Conan Exiles and Garry's Mod servers. Pick a plan and deploy." },
+      {
+        name: "description",
+        content:
+          "Transparent monthly pricing for Minecraft, ARK, Conan Exiles and Garry's Mod servers. Pick a plan and deploy.",
+      },
     ],
   }),
   component: Pricing,
@@ -26,7 +30,10 @@ function Pricing() {
   const { data, isLoading } = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
   const [game, setGame] = useState<string>("All");
 
-  const games = useMemo(() => ["All", ...Array.from(new Set((data?.plans ?? []).map((p) => p.game)))], [data]);
+  const games = useMemo(
+    () => ["All", ...Array.from(new Set((data?.plans ?? []).map((p) => p.game)))],
+    [data],
+  );
   const visible = (data?.plans ?? []).filter((p) => game === "All" || p.game === game);
 
   return (
@@ -36,7 +43,9 @@ function Pricing() {
         <div className="absolute inset-0 radial-glow opacity-60" />
         <div className="relative mx-auto max-w-6xl px-6 pt-16 pb-10">
           <h1 className="font-display text-4xl md:text-6xl font-bold">Pick your plan</h1>
-          <p className="text-muted-foreground mt-3 max-w-xl">Hardware-backed game servers. No setup fees, cancel anytime.</p>
+          <p className="text-muted-foreground mt-3 max-w-xl">
+            Hardware-backed game servers. No setup fees, cancel anytime.
+          </p>
           <div className="mt-8 flex flex-wrap gap-2">
             {games.map((g) => (
               <button
@@ -61,7 +70,10 @@ function Pricing() {
         ) : (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
             {visible.map((p) => (
-              <div key={p.id} className="rounded-xl border border-border/60 bg-surface p-6 flex flex-col">
+              <div
+                key={p.id}
+                className="rounded-xl border border-border/60 bg-surface p-6 flex flex-col"
+              >
                 <div className="text-xs uppercase tracking-wider text-primary">{p.game}</div>
                 <div className="font-display text-2xl font-bold mt-1">{p.name}</div>
                 <p className="text-sm text-muted-foreground mt-2 min-h-10">{p.description}</p>

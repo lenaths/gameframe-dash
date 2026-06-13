@@ -12,6 +12,7 @@ import { useEffect, type ReactNode } from "react";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { Toaster } from "@/components/ui/sonner";
+import { supabase } from "@/integrations/supabase/client";
 
 function NotFoundComponent() {
   return (
@@ -79,9 +80,16 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "XntServers — Game servers, instantly deployed" },
-      { name: "description", content: "Premium game server hosting for Minecraft, ARK, Conan Exiles & Garry's Mod. Deploy in seconds, manage from one dashboard." },
+      {
+        name: "description",
+        content:
+          "Premium game server hosting for Minecraft, ARK, Conan Exiles & Garry's Mod. Deploy in seconds, manage from one dashboard.",
+      },
       { property: "og:title", content: "XntServers — Game servers, instantly deployed" },
-      { property: "og:description", content: "Deploy Minecraft, ARK, Conan & Garry's Mod servers in seconds." },
+      {
+        property: "og:description",
+        content: "Deploy Minecraft, ARK, Conan & Garry's Mod servers in seconds.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
       { name: "twitter:site", content: "@Lovable" },
@@ -105,7 +113,10 @@ function RootShell({ children }: { children: ReactNode }) {
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" />
+        <link
+          rel="stylesheet"
+          href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap"
+        />
         <HeadContent />
       </head>
       <body>
@@ -121,20 +132,13 @@ function RootComponent() {
   const router = useRouter();
 
   useEffect(() => {
-    let cancelled = false;
-    void import("@/integrations/supabase/client").then(({ supabase }) => {
-      if (cancelled) return;
-      const { data: sub } = supabase.auth.onAuthStateChange((event) => {
-        if (event !== "SIGNED_IN" && event !== "SIGNED_OUT" && event !== "USER_UPDATED") return;
-        router.invalidate();
-        if (event !== "SIGNED_OUT") queryClient.invalidateQueries();
-      });
-      (RootComponent as unknown as { _sub?: { unsubscribe: () => void } })._sub = sub.subscription;
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event !== "SIGNED_IN" && event !== "SIGNED_OUT" && event !== "USER_UPDATED") return;
+      router.invalidate();
+      if (event !== "SIGNED_OUT") queryClient.invalidateQueries();
     });
     return () => {
-      cancelled = true;
-      const sub = (RootComponent as unknown as { _sub?: { unsubscribe: () => void } })._sub;
-      sub?.unsubscribe();
+      sub.subscription.unsubscribe();
     };
   }, [queryClient, router]);
 

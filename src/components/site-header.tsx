@@ -17,10 +17,29 @@ export function SiteHeader() {
           </span>
         </Link>
         <nav className="hidden items-center gap-7 text-sm md:flex">
-          <Link to="/" className="text-muted-foreground hover:text-foreground transition-colors" activeOptions={{ exact: true }} activeProps={{ className: "text-foreground" }}>Home</Link>
-          <Link to="/pricing" className="text-muted-foreground hover:text-foreground transition-colors" activeProps={{ className: "text-foreground" }}>Pricing</Link>
+          <Link
+            to="/"
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            activeOptions={{ exact: true }}
+            activeProps={{ className: "text-foreground" }}
+          >
+            Home
+          </Link>
+          <Link
+            to="/pricing"
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            activeProps={{ className: "text-foreground" }}
+          >
+            Pricing
+          </Link>
           {user && (
-            <Link to="/dashboard" className="text-muted-foreground hover:text-foreground transition-colors" activeProps={{ className: "text-foreground" }}>Dashboard</Link>
+            <Link
+              to="/dashboard"
+              className="text-muted-foreground hover:text-foreground transition-colors"
+              activeProps={{ className: "text-foreground" }}
+            >
+              Dashboard
+            </Link>
           )}
         </nav>
         <div className="flex items-center gap-2">
@@ -38,7 +57,11 @@ export function SiteHeader() {
               <Button asChild variant="ghost" size="sm">
                 <Link to="/auth">Sign in</Link>
               </Button>
-              <Button asChild size="sm" className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary">
+              <Button
+                asChild
+                size="sm"
+                className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
+              >
                 <Link to="/pricing">Get a server</Link>
               </Button>
             </>

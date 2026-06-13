@@ -12,7 +12,11 @@ export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
       { title: "XntServers — Game servers, instantly deployed" },
-      { name: "description", content: "Premium hosting for Minecraft, ARK, Conan Exiles & Garry's Mod. NVMe SSD, DDoS protection, 99.9% uptime." },
+      {
+        name: "description",
+        content:
+          "Premium hosting for Minecraft, ARK, Conan Exiles & Garry's Mod. NVMe SSD, DDoS protection, 99.9% uptime.",
+      },
     ],
   }),
   component: Home,
@@ -39,19 +43,32 @@ function Home() {
         <div className="absolute inset-0 grid-bg opacity-40" />
         <div className="absolute inset-0 radial-glow" />
         <div className="relative mx-auto max-w-6xl px-6 pt-20 pb-28">
-          <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }} className="max-w-3xl">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="max-w-3xl"
+          >
             <div className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary mb-6">
-              <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" /> Live deployment in under 60 seconds
+              <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" /> Live deployment
+              in under 60 seconds
             </div>
             <h1 className="font-display text-5xl md:text-7xl font-bold leading-[1.05]">
               Spin up game servers <span className="text-primary">at light speed</span>.
             </h1>
             <p className="mt-6 max-w-xl text-lg text-muted-foreground">
-              Minecraft, ARK, Conan Exiles, Garry's Mod — pick a plan, name your server, and play. We handle the infrastructure.
+              Minecraft, ARK, Conan Exiles, Garry's Mod — pick a plan, name your server, and play.
+              We handle the infrastructure.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
-              <Button asChild size="lg" className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary h-12 px-6">
-                <Link to="/pricing">Browse plans <ArrowRight className="ml-2 h-4 w-4" /></Link>
+              <Button
+                asChild
+                size="lg"
+                className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary h-12 px-6"
+              >
+                <Link to="/pricing">
+                  Browse plans <ArrowRight className="ml-2 h-4 w-4" />
+                </Link>
               </Button>
               <Button asChild size="lg" variant="outline" className="h-12 px-6">
                 <Link to="/auth">Sign in</Link>
@@ -83,7 +100,10 @@ function Home() {
             <h2 className="font-display text-3xl md:text-4xl font-bold">Supported games</h2>
             <p className="text-muted-foreground mt-2">More titles added every month.</p>
           </div>
-          <Link to="/pricing" className="hidden md:inline-flex items-center text-sm text-primary hover:underline">
+          <Link
+            to="/pricing"
+            className="hidden md:inline-flex items-center text-sm text-primary hover:underline"
+          >
             All plans <ChevronRight className="h-4 w-4" />
           </Link>
         </div>
@@ -94,7 +114,9 @@ function Home() {
               whileHover={{ y: -4 }}
               className="group relative overflow-hidden rounded-xl border border-border/60 bg-surface p-6 cursor-default"
             >
-              <div className={`absolute inset-0 bg-gradient-to-br ${g.color} opacity-0 group-hover:opacity-100 transition-opacity`} />
+              <div
+                className={`absolute inset-0 bg-gradient-to-br ${g.color} opacity-0 group-hover:opacity-100 transition-opacity`}
+              />
               <div className="relative">
                 <div className="font-display text-xl font-bold">{g.name}</div>
                 <div className="text-sm text-muted-foreground mt-1">{g.tag}</div>
@@ -108,12 +130,36 @@ function Home() {
       <section className="mx-auto max-w-6xl px-6 py-20">
         <div className="grid md:grid-cols-3 gap-4">
           {[
-            { icon: Zap, title: "Instant deploy", body: "Provisioned via Pterodactyl. Live the moment payment clears." },
-            { icon: Shield, title: "DDoS protected", body: "Always-on mitigation at the edge — no extra config." },
-            { icon: Cpu, title: "Ryzen 7950X", body: "Dedicated cores, NVMe storage, DDR5 memory." },
-            { icon: Gauge, title: "Full panel", body: "Console, files, backups, schedulers — your own dashboard." },
-            { icon: Shield, title: "Auto backups", body: "Daily snapshots retained for 7 days on every plan." },
-            { icon: Zap, title: "Cancel anytime", body: "Month-to-month, no contracts, no nonsense." },
+            {
+              icon: Zap,
+              title: "Instant deploy",
+              body: "Provisioned via Pterodactyl. Live the moment payment clears.",
+            },
+            {
+              icon: Shield,
+              title: "DDoS protected",
+              body: "Always-on mitigation at the edge — no extra config.",
+            },
+            {
+              icon: Cpu,
+              title: "Ryzen 7950X",
+              body: "Dedicated cores, NVMe storage, DDR5 memory.",
+            },
+            {
+              icon: Gauge,
+              title: "Full panel",
+              body: "Console, files, backups, schedulers — your own dashboard.",
+            },
+            {
+              icon: Shield,
+              title: "Auto backups",
+              body: "Daily snapshots retained for 7 days on every plan.",
+            },
+            {
+              icon: Zap,
+              title: "Cancel anytime",
+              body: "Month-to-month, no contracts, no nonsense.",
+            },
           ].map((f) => (
             <div key={f.title} className="rounded-xl border border-border/60 bg-surface p-6">
               <f.icon className="h-5 w-5 text-primary" />
@@ -133,13 +179,21 @@ function Home() {
               <div key={p.id} className="rounded-xl border border-border/60 bg-surface p-6">
                 <div className="text-xs uppercase tracking-wider text-primary">{p.game}</div>
                 <div className="font-display text-2xl font-bold mt-1">{p.name}</div>
-                <div className="font-display text-3xl mt-4">${(p.price_monthly_cents / 100).toFixed(2)}<span className="text-sm text-muted-foreground font-sans">/mo</span></div>
-                <div className="text-sm text-muted-foreground mt-3">{(p.ram_mb / 1024).toFixed(0)} GB RAM · {p.cpu_percent}% CPU · {(p.disk_mb / 1024).toFixed(0)} GB SSD</div>
+                <div className="font-display text-3xl mt-4">
+                  ${(p.price_monthly_cents / 100).toFixed(2)}
+                  <span className="text-sm text-muted-foreground font-sans">/mo</span>
+                </div>
+                <div className="text-sm text-muted-foreground mt-3">
+                  {(p.ram_mb / 1024).toFixed(0)} GB RAM · {p.cpu_percent}% CPU ·{" "}
+                  {(p.disk_mb / 1024).toFixed(0)} GB SSD
+                </div>
               </div>
             ))}
           </div>
           <div className="mt-8">
-            <Button asChild variant="outline"><Link to="/pricing">View all plans</Link></Button>
+            <Button asChild variant="outline">
+              <Link to="/pricing">View all plans</Link>
+            </Button>
           </div>
         </section>
       )}

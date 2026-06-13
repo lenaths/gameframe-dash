@@ -15,6 +15,39 @@ export function getPanelBaseUrl() {
 
 type Json = Record<string, unknown>;
 
+type PteroApiKind = "Application" | "Client";
+
+export class PterodactylConfigError extends Error {
+  constructor(apiKind: PteroApiKind, missing: string[]) {
+    super(
+      `Pterodactyl ${apiKind} API is not configured. Missing ${missing.join(
+        ", ",
+      )}. Update your environment variables and restart the server.`,
+    );
+    this.name = "PterodactylConfigError";
+  }
+}
+
+function requirePanel(apiKind: PteroApiKind) {
+  if (!PANEL()) throw new PterodactylConfigError(apiKind, ["PTERODACTYL_PANEL_URL"]);
+}
+
+export function assertPteroAppConfigured() {
+  const missing = [
+    ...(!PANEL() ? ["PTERODACTYL_PANEL_URL"] : []),
+    ...(!APP_KEY() ? ["PTERODACTYL_APP_API_KEY"] : []),
+  ];
+  if (missing.length) throw new PterodactylConfigError("Application", missing);
+}
+
+export function assertPteroClientConfigured() {
+  const missing = [
+    ...(!PANEL() ? ["PTERODACTYL_PANEL_URL"] : []),
+    ...(!CLIENT_KEY() ? ["PTERODACTYL_CLIENT_API_KEY"] : []),
+  ];
+  if (missing.length) throw new PterodactylConfigError("Client", missing);
+}
+
 function formatPteroError(status: number, path: string, body: string, statusText: string) {
   let detail = body || statusText;
   let code = "";
@@ -28,13 +61,16 @@ function formatPteroError(status: number, path: string, body: string, statusText
   }
 
   if (status === 502 && detail.toLowerCase().includes("communicating with the machine")) {
-    detail = "The panel could not contact the Wings/node daemon while creating the server. Check the node is online, reachable from the panel, and has a valid allocation available.";
+    detail =
+      "The panel could not contact the Wings/node daemon while creating the server. Check the node is online, reachable from the panel, and has a valid allocation available.";
   }
 
   if (status === 401 && path.startsWith("/api/client/")) {
-    detail = "The Pterodactyl Client API key was rejected. Update PTERODACTYL_CLIENT_API_KEY with a valid Account API key from a panel user that can access this server.";
+    detail =
+      "The Pterodactyl Client API key was rejected. Update PTERODACTYL_CLIENT_API_KEY with a valid Account API key from a panel user that can access this server.";
   } else if (status === 401 && path.startsWith("/api/application/")) {
-    detail = "The Pterodactyl Application API key was rejected. Update PTERODACTYL_APP_API_KEY with a valid Application API key that has the required permissions.";
+    detail =
+      "The Pterodactyl Application API key was rejected. Update PTERODACTYL_APP_API_KEY with a valid Application API key that has the required permissions.";
   }
 
   return `Pterodactyl ${status}${code} ${path}: ${detail}`;
@@ -47,6 +83,18 @@ interface PteroOptions extends Omit<RequestInit, "body"> {
 }
 
 async function pteroFetch(path: string, key: string, opts: PteroOptions = {}) {
+  requirePanel(path.startsWith("/api/application/") ? "Application" : "Client");
+  if (!key) {
+    throw new PterodactylConfigError(
+      path.startsWith("/api/application/") ? "Application" : "Client",
+      [
+        path.startsWith("/api/application/")
+          ? "PTERODACTYL_APP_API_KEY"
+          : "PTERODACTYL_CLIENT_API_KEY",
+      ],
+    );
+  }
+
   const url = `${PANEL()}${path}`;
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -70,18 +118,27 @@ async function pteroFetch(path: string, key: string, opts: PteroOptions = {}) {
   }
   if (opts.raw) return text;
   if (!text) return null;
-  try { return JSON.parse(text) as Json; } catch { return text; }
+  try {
+    return JSON.parse(text) as Json;
+  } catch {
+    return text;
+  }
 }
 
 export const ptero = {
-  app: (path: string, opts?: PteroOptions) => pteroFetch(`/api/application${path}`, APP_KEY(), opts),
-  client: (path: string, opts?: PteroOptions) => pteroFetch(`/api/client${path}`, CLIENT_KEY(), opts),
+  app: (path: string, opts?: PteroOptions) =>
+    pteroFetch(`/api/application${path}`, APP_KEY(), opts),
+  client: (path: string, opts?: PteroOptions) =>
+    pteroFetch(`/api/client${path}`, CLIENT_KEY(), opts),
 };
 
 export function assertPteroConfigured() {
-  if (!PANEL() || !APP_KEY() || !CLIENT_KEY()) {
-    throw new Error("Pterodactyl is not fully configured. Set PTERODACTYL_PANEL_URL, PTERODACTYL_APP_API_KEY, and PTERODACTYL_CLIENT_API_KEY.");
-  }
+  const missing = [
+    ...(!PANEL() ? ["PTERODACTYL_PANEL_URL"] : []),
+    ...(!APP_KEY() ? ["PTERODACTYL_APP_API_KEY"] : []),
+    ...(!CLIENT_KEY() ? ["PTERODACTYL_CLIENT_API_KEY"] : []),
+  ];
+  if (missing.length) throw new PterodactylConfigError("Application", missing);
 }
 
 export async function getDefaultLocationId(): Promise<number> {
@@ -89,6 +146,39 @@ export async function getDefaultLocationId(): Promise<number> {
   const first = list.data?.[0]?.attributes?.id;
   if (!first) throw new Error("No locations configured on the Pterodactyl panel.");
   return first;
+}
+
+export type PterodactylAllocation = {
+  id: number;
+  ip: string;
+  port: number;
+  nodeId: number;
+};
+
+export async function getFirstFreeAllocation(): Promise<PterodactylAllocation> {
+  const nodes = (await ptero.app("/nodes")) as {
+    data?: Array<{ attributes: { id: number; name: string } }>;
+  };
+
+  for (const node of nodes.data ?? []) {
+    const allocations = (await ptero.app(`/nodes/${node.attributes.id}/allocations`)) as {
+      data?: Array<{
+        attributes: {
+          id: number;
+          ip: string;
+          port: number;
+          assigned?: boolean | null;
+        };
+      }>;
+    };
+
+    const free = allocations.data
+      ?.map((allocation) => allocation.attributes)
+      .find((allocation) => allocation.assigned === false || allocation.assigned == null);
+    if (free) return { id: free.id, ip: free.ip, port: free.port, nodeId: node.attributes.id };
+  }
+
+  throw new Error("Aucune allocation disponible sur ce node");
 }
 
 export type EggVariable = {
@@ -132,7 +222,10 @@ export async function getEggDetails(nestId: number, eggId: number): Promise<EggD
   };
 }
 
-export async function getEggDefaultEnvironment(nestId: number, eggId: number): Promise<Record<string, string>> {
+export async function getEggDefaultEnvironment(
+  nestId: number,
+  eggId: number,
+): Promise<Record<string, string>> {
   const details = await getEggDetails(nestId, eggId);
   const env: Record<string, string> = {};
   for (const v of details.variables) env[v.env_variable] = v.default_value ?? "";
@@ -142,7 +235,13 @@ export async function getEggDefaultEnvironment(nestId: number, eggId: number): P
 /** Update an existing server's startup (env vars, egg, image). */
 export async function updateServerStartupApp(
   serverId: number,
-  payload: { environment: Record<string, string>; startup: string; egg: number; image: string; skip_scripts?: boolean },
+  payload: {
+    environment: Record<string, string>;
+    startup: string;
+    egg: number;
+    image: string;
+    skip_scripts?: boolean;
+  },
 ) {
   await ptero.app(`/servers/${serverId}/startup`, {
     method: "PATCH",
@@ -175,12 +274,21 @@ export async function getServerStartupApp(serverId: number) {
 }
 
 /** Create a Pterodactyl panel user. Returns the user id. */
-export async function createPanelUser(input: { email: string; username: string; firstName: string; lastName: string }): Promise<number> {
+export async function createPanelUser(input: {
+  email: string;
+  username: string;
+  firstName: string;
+  lastName: string;
+}): Promise<number> {
   const res = (await ptero.app("/users", {
     method: "POST",
     body: JSON.stringify({
       email: input.email,
-      username: input.username.toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 32) || `user${Date.now()}`,
+      username:
+        input.username
+          .toLowerCase()
+          .replace(/[^a-z0-9._-]/g, "")
+          .slice(0, 32) || `user${Date.now()}`,
       first_name: input.firstName || "Player",
       last_name: input.lastName || "User",
     }),

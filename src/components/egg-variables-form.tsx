@@ -1,6 +1,12 @@
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
 export type EggVar = {
@@ -17,7 +23,10 @@ export type EggVar = {
 function parseChoices(rules: string): string[] | null {
   const m = rules.match(/(?:^|\|)in:([^|]+)/i);
   if (!m) return null;
-  return m[1].split(",").map((s) => s.trim()).filter(Boolean);
+  return m[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 function isNumeric(rules: string) {
   return /(?:^|\|)(?:numeric|integer)(?:\||$)/i.test(rules);
@@ -38,7 +47,9 @@ export function EggVariablesForm({
   disabled?: boolean;
 }) {
   if (variables.length === 0) {
-    return <p className="text-sm text-muted-foreground">This server has no configurable variables.</p>;
+    return (
+      <p className="text-sm text-muted-foreground">This server has no configurable variables.</p>
+    );
   }
 
   const set = (k: string, v: string) => onChange({ ...values, [k]: v });
@@ -59,10 +70,20 @@ export function EggVariablesForm({
               {!editable && <span className="text-[10px] text-muted-foreground">(read-only)</span>}
             </Label>
             {choices ? (
-              <Select value={value} onValueChange={(val) => set(v.env_variable, val)} disabled={!editable}>
-                <SelectTrigger id={id}><SelectValue placeholder="Choose…" /></SelectTrigger>
+              <Select
+                value={value}
+                onValueChange={(val) => set(v.env_variable, val)}
+                disabled={!editable}
+              >
+                <SelectTrigger id={id}>
+                  <SelectValue placeholder="Choose…" />
+                </SelectTrigger>
                 <SelectContent>
-                  {choices.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  {choices.map((c) => (
+                    <SelectItem key={c} value={c}>
+                      {c}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             ) : isLongText(v.env_variable) ? (
@@ -84,9 +105,7 @@ export function EggVariablesForm({
                 placeholder={v.default_value}
               />
             )}
-            {v.description && (
-              <p className="text-xs text-muted-foreground">{v.description}</p>
-            )}
+            {v.description && <p className="text-xs text-muted-foreground">{v.description}</p>}
           </div>
         );
       })}

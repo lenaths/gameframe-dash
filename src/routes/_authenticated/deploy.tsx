@@ -41,7 +41,9 @@ function Deploy() {
   });
 
   // Reset variant + env when plan changes; seed env defaults when variant changes.
-  useEffect(() => { setVariantIndex(0); }, [planId]);
+  useEffect(() => {
+    setVariantIndex(0);
+  }, [planId]);
   const currentVariant = opts.data?.variants[variantIndex];
   useEffect(() => {
     if (!currentVariant) return;
@@ -51,14 +53,15 @@ function Deploy() {
   }, [currentVariant]);
 
   const deploy = useMutation({
-    mutationFn: () => callDeploy({ data: { planId, serverName: name, variantIndex, environment: env } }),
+    mutationFn: () =>
+      callDeploy({ data: { planId, serverName: name, variantIndex, environment: env } }),
     onSuccess: (result) => {
       if (!result.ok) {
         toast.error(result.error);
         navigate({ to: "/dashboard" });
         return;
       }
-      toast.success("Server provisioned!");
+      toast.success(result.status === "active" ? "Server provisioned!" : "Server is provisioning.");
       navigate({ to: "/dashboard" });
     },
     onError: (e: Error) => toast.error(e.message),
@@ -71,15 +74,27 @@ function Deploy() {
       <SiteHeader />
       <div className="mx-auto max-w-3xl px-6 py-12">
         <h1 className="font-display text-4xl font-bold">Deploy a new server</h1>
-        <p className="text-muted-foreground mt-2">Pick a plan, a flavor, and configure your version/mods.</p>
+        <p className="text-muted-foreground mt-2">
+          Pick a plan, a flavor, and configure your version/mods.
+        </p>
 
         <form
-          onSubmit={(e) => { e.preventDefault(); if (planId && name) deploy.mutate(); }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (planId && name) deploy.mutate();
+          }}
           className="mt-8 space-y-6 rounded-2xl border border-border/60 bg-surface p-6"
         >
           <div className="space-y-2">
             <Label htmlFor="name">Server name</Label>
-            <Input id="name" required maxLength={40} value={name} onChange={(e) => setName(e.target.value)} placeholder="The Adventurer's Guild" />
+            <Input
+              id="name"
+              required
+              maxLength={40}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="The Adventurer's Guild"
+            />
           </div>
 
           <div className="space-y-2">
@@ -89,17 +104,33 @@ function Deploy() {
                 <label
                   key={p.id}
                   className={`cursor-pointer rounded-lg border p-4 flex items-center justify-between transition-colors ${
-                    planId === p.id ? "border-primary bg-primary/5" : "border-border hover:border-border/80"
+                    planId === p.id
+                      ? "border-primary bg-primary/5"
+                      : "border-border hover:border-border/80"
                   }`}
                 >
                   <div className="flex items-center gap-3">
-                    <input type="radio" name="plan" checked={planId === p.id} onChange={() => setPlanId(p.id)} className="accent-[color:var(--primary)]" />
+                    <input
+                      type="radio"
+                      name="plan"
+                      checked={planId === p.id}
+                      onChange={() => setPlanId(p.id)}
+                      className="accent-[color:var(--primary)]"
+                    />
                     <div>
-                      <div className="font-medium">{p.game} — {p.name}</div>
-                      <div className="text-xs text-muted-foreground">{(p.ram_mb / 1024).toFixed(0)} GB RAM · {p.cpu_percent}% CPU · {(p.disk_mb / 1024).toFixed(0)} GB SSD</div>
+                      <div className="font-medium">
+                        {p.game} — {p.name}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {(p.ram_mb / 1024).toFixed(0)} GB RAM · {p.cpu_percent}% CPU ·{" "}
+                        {(p.disk_mb / 1024).toFixed(0)} GB SSD
+                      </div>
                     </div>
                   </div>
-                  <div className="font-display text-lg">${(p.price_monthly_cents / 100).toFixed(2)}<span className="text-xs text-muted-foreground font-sans">/mo</span></div>
+                  <div className="font-display text-lg">
+                    ${(p.price_monthly_cents / 100).toFixed(2)}
+                    <span className="text-xs text-muted-foreground font-sans">/mo</span>
+                  </div>
                 </label>
               ))}
             </div>
@@ -108,8 +139,12 @@ function Deploy() {
           {planId && (
             <div className="space-y-3">
               <Label>Server flavor</Label>
-              {opts.isLoading && <div className="text-sm text-muted-foreground">Loading options…</div>}
-              {opts.error && <div className="text-sm text-destructive">{(opts.error as Error).message}</div>}
+              {opts.isLoading && (
+                <div className="text-sm text-muted-foreground">Loading options…</div>
+              )}
+              {opts.error && (
+                <div className="text-sm text-destructive">{(opts.error as Error).message}</div>
+              )}
               {variants.length > 0 && (
                 <div className="grid sm:grid-cols-2 gap-2">
                   {variants.map((v) => (
@@ -119,19 +154,23 @@ function Deploy() {
                       onClick={() => setVariantIndex(v.index)}
                       disabled={!!v.error}
                       className={`text-left rounded-lg border p-3 transition-colors ${
-                        v.error ? "border-destructive/40 bg-destructive/5 cursor-not-allowed" :
-                        variantIndex === v.index ? "border-primary bg-primary/5" : "border-border hover:border-border/80"
+                        v.error
+                          ? "border-destructive/40 bg-destructive/5 cursor-not-allowed"
+                          : variantIndex === v.index
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:border-border/80"
                       }`}
                     >
                       <div className="font-medium">{v.label}</div>
-                      <div className={`text-xs line-clamp-2 mt-0.5 ${v.error ? "text-destructive" : "text-muted-foreground"}`}>
+                      <div
+                        className={`text-xs line-clamp-2 mt-0.5 ${v.error ? "text-destructive" : "text-muted-foreground"}`}
+                      >
                         {v.error || v.eggDescription || v.eggName}
                       </div>
                     </button>
                   ))}
                 </div>
               )}
-
             </div>
           )}
 
@@ -139,7 +178,11 @@ function Deploy() {
             <div className="space-y-3">
               <Label>Configuration</Label>
               <div className="rounded-lg border border-border/60 bg-background/40 p-4">
-                <EggVariablesForm variables={currentVariant.variables} values={env} onChange={setEnv} />
+                <EggVariablesForm
+                  variables={currentVariant.variables}
+                  values={env}
+                  onChange={setEnv}
+                />
               </div>
             </div>
           )}
