@@ -15,6 +15,17 @@ const powerInput = z.object({
 });
 
 const orderInput = z.object({ orderId: z.string().uuid() });
+const MAX_FILE_CONTENT_BYTES = 1024 * 1024;
+const BLOCKED_FILE_EXTENSIONS = new Set([
+  ".jar",
+  ".zip",
+  ".tar",
+  ".gz",
+  ".exe",
+  ".bin",
+  ".sqlite",
+  ".db",
+]);
 
 const planVariantSchema = z.object({
   nest_id: z.number().int().positive(),
@@ -84,20 +95,102 @@ function filterEnvironmentForEgg(
   return env;
 }
 
-/** Resolve a server identifier owned by the current user (or admin). */
-async function loadIdentifier(
+function byteLength(value: string) {
+  return new TextEncoder().encode(value).length;
+}
+
+function hasBlockedExtension(path: string) {
+  const lower = path.toLowerCase();
+  return [...BLOCKED_FILE_EXTENSIONS].some((extension) => lower.endsWith(extension));
+}
+
+function normalizeServerPath(input: string, fallback = "/") {
+  const raw = (input || fallback).trim().replace(/\\/g, "/");
+  const prefixed = raw.startsWith("/") ? raw : `/${raw}`;
+  const parts = prefixed.split("/");
+  const clean: string[] = [];
+
+  for (const part of parts) {
+    if (!part || part === ".") continue;
+    if (part === "..") throw new Error("Chemin de fichier non autorisé.");
+    clean.push(part);
+  }
+
+  return `/${clean.join("/")}`;
+}
+
+function basename(path: string) {
+  const normalized = normalizeServerPath(path);
+  return normalized.split("/").pop() ?? "";
+}
+
+function dirname(path: string) {
+  const normalized = normalizeServerPath(path);
+  const index = normalized.lastIndexOf("/");
+  return index <= 0 ? "/" : normalized.slice(0, index);
+}
+
+function assertEditableFilePath(path: string) {
+  const normalized = normalizeServerPath(path);
+  if (hasBlockedExtension(normalized)) {
+    throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
+  }
+  return normalized;
+}
+
+async function assertFileSizeAllowed(identifier: string, file: string) {
+  const { ptero } = await import("@/lib/pterodactyl.server");
+  const directory = dirname(file);
+  const name = basename(file);
+  const res = (await ptero.client(
+    `/servers/${identifier}/files/list?directory=${encodeURIComponent(directory)}`,
+  )) as {
+    data?: Array<{
+      attributes: {
+        name: string;
+        size: number;
+        is_file: boolean;
+      };
+    }>;
+  };
+  const entry = res.data?.find((item) => item.attributes.name === name)?.attributes;
+  if (!entry || !entry.is_file) throw new Error("Fichier introuvable.");
+  if (entry.size > MAX_FILE_CONTENT_BYTES) {
+    throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
+  }
+}
+
+async function loadOwnedOrder(
   supabase: import("@supabase/supabase-js").SupabaseClient,
   orderId: string,
-): Promise<string> {
+  userId: string,
+): Promise<{
+  pterodactyl_server_identifier: string | null;
+  pterodactyl_server_id: number | null;
+}> {
   const { data, error } = await supabase
     .from("server_orders")
-    .select("pterodactyl_server_identifier")
+    .select("pterodactyl_server_identifier, pterodactyl_server_id")
     .eq("id", orderId)
+    .eq("user_id", userId)
     .single();
-  if (error || !data?.pterodactyl_server_identifier) {
+  if (error || !data) {
     throw new Error("Server not found or access denied.");
   }
-  return data.pterodactyl_server_identifier as string;
+  return data;
+}
+
+/** Resolve a server identifier owned by the current authenticated user. */
+async function loadOwnedIdentifier(
+  supabase: import("@supabase/supabase-js").SupabaseClient,
+  orderId: string,
+  userId: string,
+): Promise<string> {
+  const order = await loadOwnedOrder(supabase, orderId, userId);
+  if (!order.pterodactyl_server_identifier) {
+    throw new Error("Server not found or access denied.");
+  }
+  return order.pterodactyl_server_identifier;
 }
 
 export const listMyServers = createServerFn({ method: "GET" })
@@ -109,6 +202,7 @@ export const listMyServers = createServerFn({ method: "GET" })
       .select(
         "id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
       )
+      .eq("user_id", context.userId)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
     return { servers: data ?? [] };
@@ -265,7 +359,7 @@ export const powerServer = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d: unknown) => powerInput.parse(d))
   .handler(async ({ data, context }) => {
-    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
     await ptero.client(`/servers/${identifier}/power`, {
@@ -285,6 +379,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
         "id, server_name, status, pterodactyl_server_identifier, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
       )
       .eq("id", data.orderId)
+      .eq("user_id", context.userId)
       .single();
     if (error || !order) throw new Error("Server not found.");
     if (!order.pterodactyl_server_identifier) return { order, live: null };
@@ -336,7 +431,7 @@ export const getServerWebsocket = createServerFn({ method: "POST" })
   .validator((d: unknown) => orderInput.parse(d))
   .handler(async ({ data, context }) => {
     try {
-      const identifier = await loadIdentifier(context.supabase, data.orderId);
+      const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
       const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
       assertPteroClientConfigured();
       const res = (await ptero.client(`/servers/${identifier}/websocket`)) as {
@@ -355,7 +450,7 @@ export const sendServerCommand = createServerFn({ method: "POST" })
     z.object({ orderId: z.string().uuid(), command: z.string().min(1).max(2000) }).parse(d),
   )
   .handler(async ({ data, context }) => {
-    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
     await ptero.client(`/servers/${identifier}/command`, {
@@ -373,11 +468,12 @@ export const listServerFiles = createServerFn({ method: "POST" })
   )
   .handler(async ({ data, context }) => {
     try {
-      const identifier = await loadIdentifier(context.supabase, data.orderId);
+      const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
       const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
       assertPteroClientConfigured();
+      const directory = normalizeServerPath(data.directory);
       const res = (await ptero.client(
-        `/servers/${identifier}/files/list?directory=${encodeURIComponent(data.directory)}`,
+        `/servers/${identifier}/files/list?directory=${encodeURIComponent(directory)}`,
       )) as {
         data: Array<{
           attributes: {
@@ -392,7 +488,7 @@ export const listServerFiles = createServerFn({ method: "POST" })
         }>;
       };
       return {
-        directory: data.directory,
+        directory,
         files: res.data.map((d) => d.attributes),
         error: null as string | null,
       };
@@ -409,11 +505,13 @@ export const readServerFile = createServerFn({ method: "POST" })
     z.object({ orderId: z.string().uuid(), file: z.string().min(1) }).parse(d),
   )
   .handler(async ({ data, context }) => {
-    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
+    const file = assertEditableFilePath(data.file);
+    await assertFileSizeAllowed(identifier, file);
     const text = (await ptero.client(
-      `/servers/${identifier}/files/contents?file=${encodeURIComponent(data.file)}`,
+      `/servers/${identifier}/files/contents?file=${encodeURIComponent(file)}`,
       { raw: true },
     )) as string;
     return { contents: text };
@@ -427,15 +525,19 @@ export const writeServerFile = createServerFn({ method: "POST" })
       .object({
         orderId: z.string().uuid(),
         file: z.string().min(1),
-        contents: z.string().max(5_000_000),
+        contents: z.string(),
       })
       .parse(d),
   )
   .handler(async ({ data, context }) => {
-    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
-    await ptero.client(`/servers/${identifier}/files/write?file=${encodeURIComponent(data.file)}`, {
+    const file = assertEditableFilePath(data.file);
+    if (byteLength(data.contents) > MAX_FILE_CONTENT_BYTES) {
+      throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
+    }
+    await ptero.client(`/servers/${identifier}/files/write?file=${encodeURIComponent(file)}`, {
       method: "POST",
       body: data.contents,
       contentType: "text/plain",
@@ -456,12 +558,22 @@ export const deleteServerFiles = createServerFn({ method: "POST" })
       .parse(d),
   )
   .handler(async ({ data, context }) => {
-    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
+    const root = normalizeServerPath(data.root);
+    const files = data.files.map((file) => {
+      if (file.includes("/") || file.includes("\\") || file === "." || file === "..") {
+        throw new Error("Chemin de fichier non autorisé.");
+      }
+      if (hasBlockedExtension(file)) {
+        throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
+      }
+      return file;
+    });
     await ptero.client(`/servers/${identifier}/files/delete`, {
       method: "POST",
-      body: JSON.stringify({ root: data.root, files: data.files }),
+      body: JSON.stringify({ root, files }),
     });
     return { ok: true };
   });
@@ -479,12 +591,24 @@ export const createServerFolder = createServerFn({ method: "POST" })
       .parse(d),
   )
   .handler(async ({ data, context }) => {
-    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
+    const root = normalizeServerPath(data.root);
+    if (
+      data.name.includes("/") ||
+      data.name.includes("\\") ||
+      data.name === "." ||
+      data.name === ".."
+    ) {
+      throw new Error("Chemin de fichier non autorisé.");
+    }
+    if (hasBlockedExtension(data.name)) {
+      throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
+    }
     await ptero.client(`/servers/${identifier}/files/create-folder`, {
       method: "POST",
-      body: JSON.stringify({ root: data.root, name: data.name }),
+      body: JSON.stringify({ root, name: data.name }),
     });
     return { ok: true };
   });
@@ -503,12 +627,21 @@ export const renameServerFile = createServerFn({ method: "POST" })
       .parse(d),
   )
   .handler(async ({ data, context }) => {
-    const identifier = await loadIdentifier(context.supabase, data.orderId);
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
+    const root = normalizeServerPath(data.root);
+    for (const file of [data.from, data.to]) {
+      if (file.includes("/") || file.includes("\\") || file === "." || file === "..") {
+        throw new Error("Chemin de fichier non autorisé.");
+      }
+      if (hasBlockedExtension(file)) {
+        throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
+      }
+    }
     await ptero.client(`/servers/${identifier}/files/rename`, {
       method: "PUT",
-      body: JSON.stringify({ root: data.root, files: [{ from: data.from, to: data.to }] }),
+      body: JSON.stringify({ root, files: [{ from: data.from, to: data.to }] }),
     });
     return { ok: true };
   });
@@ -522,6 +655,7 @@ export const getServerStartup = createServerFn({ method: "POST" })
       .from("server_orders")
       .select("id, pterodactyl_server_id, plan_id")
       .eq("id", data.orderId)
+      .eq("user_id", context.userId)
       .single();
     if (error || !order?.pterodactyl_server_id) throw new Error("Server not found.");
 
@@ -556,6 +690,7 @@ export const updateServerStartup = createServerFn({ method: "POST" })
       .from("server_orders")
       .select("id, pterodactyl_server_id")
       .eq("id", data.orderId)
+      .eq("user_id", context.userId)
       .single();
     if (error || !order?.pterodactyl_server_id) throw new Error("Server not found.");
 
