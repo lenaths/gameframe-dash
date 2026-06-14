@@ -10,7 +10,7 @@ import { Label } from "@/components/ui/label";
 import { SiteHeader } from "@/components/site-header";
 import { EggVariablesForm } from "@/components/egg-variables-form";
 import { listPlans, getDeployOptions } from "@/lib/plans.functions";
-import { deployServer } from "@/lib/servers.functions";
+import { createCheckoutSession } from "@/lib/stripe.functions";
 import { toast } from "sonner";
 
 const searchSchema = z.object({ plan: z.string().optional() });
@@ -26,7 +26,7 @@ function Deploy() {
   const navigate = useNavigate();
   const fetchPlans = useServerFn(listPlans);
   const fetchOptions = useServerFn(getDeployOptions);
-  const callDeploy = useServerFn(deployServer);
+  const startCheckout = useServerFn(createCheckoutSession);
 
   const { data: plansData } = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
   const [planId, setPlanId] = useState<string>(preselected ?? "");
@@ -52,17 +52,10 @@ function Deploy() {
     setEnv(seed);
   }, [currentVariant]);
 
-  const deploy = useMutation({
-    mutationFn: () =>
-      callDeploy({ data: { planId, serverName: name, variantIndex, environment: env } }),
-    onSuccess: (result) => {
-      if (!result.ok) {
-        toast.error(result.error);
-        navigate({ to: "/dashboard" });
-        return;
-      }
-      toast.success(result.status === "active" ? "Server provisioned!" : "Server is provisioning.");
-      navigate({ to: "/dashboard" });
+  const checkout = useMutation({
+    mutationFn: () => startCheckout({ data: { planId } }),
+    onSuccess: ({ url }) => {
+      window.location.assign(url);
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -81,7 +74,7 @@ function Deploy() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (planId && name) deploy.mutate();
+            if (planId) checkout.mutate();
           }}
           className="mt-8 space-y-6 rounded-2xl border border-border/60 bg-surface p-6"
         >
@@ -89,7 +82,6 @@ function Deploy() {
             <Label htmlFor="name">Server name</Label>
             <Input
               id="name"
-              required
               maxLength={40}
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -189,11 +181,11 @@ function Deploy() {
 
           <Button
             type="submit"
-            disabled={!planId || !name || deploy.isPending || opts.isLoading}
+            disabled={!planId || checkout.isPending || opts.isLoading}
             className="w-full bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
           >
             <Rocket className="mr-2 h-4 w-4" />
-            {deploy.isPending ? "Provisioning…" : "Deploy server"}
+            {checkout.isPending ? "Redirecting…" : "Payer avec Stripe"}
           </Button>
         </form>
       </div>

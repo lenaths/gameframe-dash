@@ -1,13 +1,15 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
 import { listPlans } from "@/lib/plans.functions";
+import { createCheckoutSession } from "@/lib/stripe.functions";
 import { useAuth } from "@/hooks/use-auth";
+import { toast } from "sonner";
 
 export const Route = createFileRoute("/pricing")({
   head: () => ({
@@ -25,10 +27,18 @@ export const Route = createFileRoute("/pricing")({
 
 function Pricing() {
   const fetchPlans = useServerFn(listPlans);
+  const startCheckout = useServerFn(createCheckoutSession);
   const { user } = useAuth();
   const navigate = useNavigate();
   const { data, isLoading } = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
   const [game, setGame] = useState<string>("All");
+  const checkout = useMutation({
+    mutationFn: (planId: string) => startCheckout({ data: { planId } }),
+    onSuccess: ({ url }) => {
+      window.location.assign(url);
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
 
   const games = useMemo(
     () => ["All", ...Array.from(new Set((data?.plans ?? []).map((p) => p.game)))],
@@ -97,12 +107,13 @@ function Pricing() {
                 </ul>
                 <Button
                   className="mt-6 bg-primary text-primary-foreground hover:bg-primary/90"
+                  disabled={checkout.isPending}
                   onClick={() => {
-                    if (!user) navigate({ to: "/auth", search: { redirect: "/deploy" } as never });
-                    else navigate({ to: "/deploy", search: { plan: p.id } as never });
+                    if (!user) navigate({ to: "/auth", search: { redirect: "/pricing" } as never });
+                    else checkout.mutate(p.id);
                   }}
                 >
-                  Deploy {p.name}
+                  {checkout.isPending ? "Redirecting…" : `Commander ${p.name}`}
                 </Button>
               </div>
             ))}
