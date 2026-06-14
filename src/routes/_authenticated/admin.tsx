@@ -2,9 +2,11 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useState } from "react";
-import { Users, Server, Package, Plus, Trash2 } from "lucide-react";
+import { LifeBuoy, Users, Server, Package, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -15,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { SiteHeader } from "@/components/site-header";
 import { adminListAll, adminListPlans, adminUpdatePlanEggs } from "@/lib/admin.functions";
+import { adminListTickets, adminReplyToTicket } from "@/lib/support.functions";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/admin")({
@@ -25,12 +28,18 @@ export const Route = createFileRoute("/_authenticated/admin")({
 function Admin() {
   const fetchAll = useServerFn(adminListAll);
   const fetchPlans = useServerFn(adminListPlans);
+  const fetchTickets = useServerFn(adminListTickets);
   const { data, isLoading, error } = useQuery({
     queryKey: ["admin-all"],
     queryFn: () => fetchAll(),
     retry: false,
   });
   const plansQ = useQuery({ queryKey: ["admin-plans"], queryFn: () => fetchPlans(), retry: false });
+  const ticketsQ = useQuery({
+    queryKey: ["admin-tickets"],
+    queryFn: () => fetchTickets(),
+    retry: false,
+  });
 
   return (
     <div className="min-h-screen">
@@ -169,10 +178,121 @@ function Admin() {
                 </table>
               </div>
             </section>
+
+            <AdminTicketsSection tickets={(ticketsQ.data?.tickets ?? []) as AdminTicket[]} />
           </div>
         )}
       </div>
     </div>
+  );
+}
+
+type AdminTicketMessage = {
+  id: string;
+  user_id: string;
+  is_staff: boolean;
+  body: string;
+  created_at: string;
+};
+
+type AdminTicket = {
+  id: string;
+  user_id: string;
+  subject: string;
+  status: string;
+  priority: string;
+  category: string | null;
+  created_at: string;
+  updated_at: string;
+  ticket_messages?: AdminTicketMessage[];
+};
+
+function AdminTicketsSection({ tickets }: { tickets: AdminTicket[] }) {
+  const qc = useQueryClient();
+  const replyFn = useServerFn(adminReplyToTicket);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  const reply = useMutation({
+    mutationFn: (ticketId: string) => replyFn({ data: { ticketId, body: drafts[ticketId] ?? "" } }),
+    onSuccess: (_result, ticketId) => {
+      toast.success("Staff reply sent");
+      setDrafts((current) => ({ ...current, [ticketId]: "" }));
+      qc.invalidateQueries({ queryKey: ["admin-tickets"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-4">
+        <LifeBuoy className="h-5 w-5 text-primary" />
+        <h2 className="font-display text-xl font-semibold">Support tickets ({tickets.length})</h2>
+      </div>
+      {tickets.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border bg-surface p-8 text-sm text-muted-foreground">
+          No tickets yet.
+        </div>
+      ) : (
+        <div className="grid gap-4">
+          {tickets.map((ticket) => (
+            <article key={ticket.id} className="rounded-xl border border-border/60 bg-surface">
+              <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 p-4">
+                <div>
+                  <h3 className="font-display text-lg font-semibold">{ticket.subject}</h3>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    User {ticket.user_id.slice(0, 8)} ·{" "}
+                    {new Date(ticket.created_at).toLocaleString()}
+                  </div>
+                </div>
+                <Badge variant="outline" className="capitalize">
+                  {ticket.status}
+                </Badge>
+              </div>
+              <div className="space-y-3 p-4">
+                {(ticket.ticket_messages ?? []).map((message) => (
+                  <div
+                    key={message.id}
+                    className={`rounded-lg border p-3 ${
+                      message.is_staff
+                        ? "border-primary/30 bg-primary/10"
+                        : "border-border/60 bg-background/40"
+                    }`}
+                  >
+                    <div className="mb-1 text-xs text-muted-foreground">
+                      {message.is_staff ? "Staff" : "Customer"} ·{" "}
+                      {new Date(message.created_at).toLocaleString()}
+                    </div>
+                    <p className="whitespace-pre-wrap text-sm">{message.body}</p>
+                  </div>
+                ))}
+                <form
+                  className="space-y-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    reply.mutate(ticket.id);
+                  }}
+                >
+                  <Textarea
+                    value={drafts[ticket.id] ?? ""}
+                    onChange={(e) =>
+                      setDrafts((current) => ({ ...current, [ticket.id]: e.target.value }))
+                    }
+                    placeholder="Staff reply…"
+                    className="min-h-[90px]"
+                  />
+                  <Button
+                    type="submit"
+                    disabled={reply.isPending || !(drafts[ticket.id] ?? "").trim()}
+                  >
+                    Reply as staff
+                  </Button>
+                </form>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

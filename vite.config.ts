@@ -7,14 +7,11 @@ export default defineConfig({
     },
   },
 
-  server: {
-    host: "0.0.0.0",
-    port: 8081,
-    allowedHosts: [
-      "dev.xntservers.com",
-      "localhost",
-      "127.0.0.1",
-      "192.168.0.15",
-    ],
+  vite: {
+    server: {
+      host: "0.0.0.0",
+      port: 8081,
+      allowedHosts: ["dev.xntservers.com", "localhost", "127.0.0.1", "192.168.0.15"],
+    },
   },
 });

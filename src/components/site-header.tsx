@@ -41,6 +41,24 @@ export function SiteHeader() {
               Dashboard
             </Link>
           )}
+          {user && (
+            <Link
+              to="/billing"
+              className="text-muted-foreground hover:text-foreground transition-colors"
+              activeProps={{ className: "text-foreground" }}
+            >
+              Billing
+            </Link>
+          )}
+          {user && (
+            <Link
+              to="/support"
+              className="text-muted-foreground hover:text-foreground transition-colors"
+              activeProps={{ className: "text-foreground" }}
+            >
+              Support
+            </Link>
+          )}
         </nav>
         <div className="flex items-center gap-2">
           {user ? (
