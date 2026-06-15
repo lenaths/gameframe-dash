@@ -159,5 +159,8 @@ export const adminRetryProvisioning = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await assertAdmin(context.userId);
     const { provisionPaidOrder } = await import("@/lib/provisioning.server");
-    return provisionPaidOrder(data.orderId);
+    return provisionPaidOrder(data.orderId, {
+      actorUserId: context.userId,
+      source: "admin_retry",
+    });
   });

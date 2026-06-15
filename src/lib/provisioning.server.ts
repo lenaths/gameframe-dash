@@ -61,6 +61,11 @@ type ExistingServerOrder = {
   pterodactyl_server_identifier: string | null;
 };
 
+type ProvisionPaidOrderOptions = {
+  actorUserId?: string | null;
+  source?: string;
+};
+
 export function cleanProvisioningError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/\s+/g, " ").trim().slice(0, 1000);
@@ -156,6 +161,52 @@ async function ensurePanelUser(input: {
   return pteroUserId;
 }
 
+async function writeActivityLog(
+  db: SupabaseAny,
+  values: {
+    userId?: string | null;
+    orderId?: string | null;
+    serverOrderId?: string | null;
+    action: string;
+    description: string;
+    metadata?: Record<string, unknown>;
+  },
+) {
+  const { error } = await db.from("activity_logs").insert({
+    user_id: values.userId ?? null,
+    order_id: values.orderId ?? null,
+    server_order_id: values.serverOrderId ?? null,
+    action: values.action,
+    description: values.description,
+    metadata: values.metadata ?? {},
+  });
+  if (error) console.warn(`[Activity] Failed to write ${values.action}: ${error.message}`);
+}
+
+async function writeAuditLog(
+  db: SupabaseAny,
+  values: {
+    actorUserId?: string | null;
+    targetUserId?: string | null;
+    entityType: string;
+    entityId?: string | null;
+    action: string;
+    before?: Record<string, unknown> | null;
+    after?: Record<string, unknown> | null;
+  },
+) {
+  const { error } = await db.from("audit_logs").insert({
+    actor_user_id: values.actorUserId ?? null,
+    target_user_id: values.targetUserId ?? null,
+    entity_type: values.entityType,
+    entity_id: values.entityId ?? null,
+    action: values.action,
+    before: values.before ?? null,
+    after: values.after ?? null,
+  });
+  if (error) console.warn(`[Audit] Failed to write ${values.action}: ${error.message}`);
+}
+
 export async function provisionServerOrder(input: ProvisionServerOrderInput) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { ptero, getEggDetails, getFirstFreeAllocation, assertPteroAppConfigured } =
@@ -202,12 +253,39 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
       reused: true,
     };
   }
+  if (existing.status === "provisioning") {
+    console.info(
+      `[Provisioning] Server order ${input.serverOrderId} is already provisioning; skipping duplicate launch.`,
+    );
+    return {
+      ok: true as const,
+      serverOrderId: input.serverOrderId,
+      status: "provisioning" as const,
+      pterodactylServerId: null,
+      pterodactylServerIdentifier: null,
+      reused: true,
+    };
+  }
 
   const { error: markProvisioningError } = await db
     .from("server_orders")
     .update({ status: "provisioning", error_message: null })
     .eq("id", input.serverOrderId);
   if (markProvisioningError) throw new Error(markProvisioningError.message);
+  await writeActivityLog(db, {
+    userId: input.userId,
+    serverOrderId: input.serverOrderId,
+    action: "provisioning_started",
+    description: "Provisioning Pterodactyl server.",
+    metadata: { planId: input.planId },
+  });
+  await writeAuditLog(db, {
+    targetUserId: input.userId,
+    entityType: "server_order",
+    entityId: input.serverOrderId,
+    action: "provisioning_started",
+    after: { planId: input.planId },
+  });
 
   const planResult = await db
     .from("plans")
@@ -302,6 +380,31 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
       })
       .eq("id", input.serverOrderId);
     if (updateError) throw new Error(updateError.message);
+    await writeActivityLog(db, {
+      userId: input.userId,
+      serverOrderId: input.serverOrderId,
+      action: nextStatus === "failed" ? "provisioning_failed" : "provisioning_succeeded",
+      description:
+        nextStatus === "failed"
+          ? "Pterodactyl server provisioning failed."
+          : "Pterodactyl server provisioning completed.",
+      metadata: {
+        pterodactylServerId: created.attributes.id,
+        pterodactylServerIdentifier: created.attributes.identifier,
+        status: nextStatus,
+      },
+    });
+    await writeAuditLog(db, {
+      targetUserId: input.userId,
+      entityType: "server_order",
+      entityId: input.serverOrderId,
+      action: nextStatus === "failed" ? "provisioning_failed" : "provisioning_succeeded",
+      after: {
+        pterodactylServerId: created.attributes.id,
+        pterodactylServerIdentifier: created.attributes.identifier,
+        status: nextStatus,
+      },
+    });
 
     return {
       ok: nextStatus !== "failed",
@@ -319,6 +422,20 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
       .from("server_orders")
       .update({ status: "failed", error_message: message })
       .eq("id", input.serverOrderId);
+    await writeActivityLog(db, {
+      userId: input.userId,
+      serverOrderId: input.serverOrderId,
+      action: "provisioning_failed",
+      description: "Pterodactyl server provisioning failed.",
+      metadata: { error: message },
+    });
+    await writeAuditLog(db, {
+      targetUserId: input.userId,
+      entityType: "server_order",
+      entityId: input.serverOrderId,
+      action: "provisioning_failed",
+      after: { error: message },
+    });
     return {
       ok: false as const,
       serverOrderId: input.serverOrderId,
@@ -329,7 +446,7 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
   }
 }
 
-export async function provisionPaidOrder(orderId: string) {
+export async function provisionPaidOrder(orderId: string, options: ProvisionPaidOrderOptions = {}) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const db = supabaseAdmin as unknown as SupabaseAny;
 
@@ -388,9 +505,40 @@ export async function provisionPaidOrder(orderId: string) {
       .single();
     const created = createdResult.data as { id: string } | null;
     if (createdResult.error || !created) {
-      throw new Error(createdResult.error?.message ?? "Could not create server_order.");
+      if (createdResult.error?.code === "23505") {
+        console.warn(
+          `[Provisioning] server_order already exists for order=${order.id}; reloading.`,
+        );
+        const reloadedResult = await db
+          .from("server_orders")
+          .select("id")
+          .eq("order_id", order.id)
+          .maybeSingle();
+        const reloaded = reloadedResult.data as { id: string } | null;
+        if (reloadedResult.error || !reloaded) {
+          throw new Error(
+            reloadedResult.error?.message ??
+              "Unique server_order exists but could not be reloaded.",
+          );
+        }
+        serverOrderId = reloaded.id;
+      } else {
+        throw new Error(createdResult.error?.message ?? "Could not create server_order.");
+      }
+    } else {
+      serverOrderId = created.id;
     }
-    serverOrderId = created.id;
+  }
+
+  if (options.source === "admin_retry") {
+    await writeAuditLog(db, {
+      actorUserId: options.actorUserId ?? null,
+      targetUserId: order.user_id,
+      entityType: "order",
+      entityId: order.id,
+      action: "admin_retry_provisioning",
+      after: { serverOrderId },
+    });
   }
 
   const result = await provisionServerOrder({
@@ -400,7 +548,7 @@ export async function provisionPaidOrder(orderId: string) {
     serverName,
   });
 
-  if (result.ok) {
+  if (result.ok && (result.pterodactylServerId || result.pterodactylServerIdentifier)) {
     await db
       .from("orders")
       .update({ status: "active", updated_at: new Date().toISOString() })

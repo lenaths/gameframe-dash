@@ -25,6 +25,10 @@ jobs:
       PTERODACTYL_PANEL_URL: ${{ secrets.PTERODACTYL_PANEL_URL }}
       PTERODACTYL_APP_API_KEY: ${{ secrets.PTERODACTYL_APP_API_KEY }}
       PTERODACTYL_CLIENT_API_KEY: ${{ secrets.PTERODACTYL_CLIENT_API_KEY }}
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_SECRET_KEY }}
+      STRIPE_WEBHOOK_SECRET: ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+      STRIPE_SUCCESS_URL: ${{ secrets.STRIPE_SUCCESS_URL }}
+      STRIPE_CANCEL_URL: ${{ secrets.STRIPE_CANCEL_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4

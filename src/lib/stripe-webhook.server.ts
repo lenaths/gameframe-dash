@@ -20,6 +20,11 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   update: (values: Record<string, unknown>) => SupabaseQuery<T>;
 };
 
+type StripeEventRow = {
+  stripe_event_id: string;
+  processed_at: string | null;
+};
+
 type OrderRow = {
   id: string;
   user_id: string;
@@ -52,18 +57,37 @@ export async function handleStripeWebhookRequest(request: Request) {
 
   if (eventInsertError) {
     if (eventInsertError.code === "23505") {
-      return Response.json({ received: true, duplicate: true });
+      const existingResult = await db
+        .from("stripe_events")
+        .select("stripe_event_id, processed_at")
+        .eq("stripe_event_id", event.id)
+        .maybeSingle();
+      const existing = existingResult.data as StripeEventRow | null;
+      if (existingResult.error) {
+        console.error("[Stripe] Failed to load duplicate event state", existingResult.error);
+        return Response.json({ error: "Could not load Stripe event state." }, { status: 500 });
+      }
+      if (existing?.processed_at) {
+        console.info(`[Stripe] Event ${event.id} already processed at ${existing.processed_at}.`);
+        return Response.json({ received: true, duplicate: true, processed: true });
+      }
+      console.warn(`[Stripe] Retrying previously unprocessed event ${event.id} (${event.type}).`);
+    } else {
+      console.error("[Stripe] Failed to record event", eventInsertError);
+      return Response.json({ error: "Could not record Stripe event." }, { status: 500 });
     }
-    console.error("[Stripe] Failed to record event", eventInsertError);
-    return Response.json({ error: "Could not record Stripe event." }, { status: 500 });
   }
 
   try {
     await handleStripeEvent(db, event);
-    await db
+    const { error: processedError } = await db
       .from("stripe_events")
       .update({ processed_at: new Date().toISOString() })
       .eq("stripe_event_id", event.id);
+    if (processedError) {
+      console.error(`[Stripe] Failed to mark event ${event.id} as processed`, processedError);
+      return Response.json({ error: "Could not mark Stripe event as processed." }, { status: 500 });
+    }
     return Response.json({ received: true });
   } catch (error) {
     console.error("[Stripe] Webhook processing failed", error);
@@ -289,6 +313,16 @@ async function handleInvoicePaid(db: SupabaseAny, invoice: Stripe.Invoice, event
   const { error: orderError } = await db.from("orders").update(orderUpdate).eq("id", order.id);
   if (orderError) throw new Error(orderError.message);
 
+  await writePaymentReceivedLogs(db, {
+    userId: order.user_id,
+    orderId: order.id,
+    paymentId,
+    invoiceId,
+    amountPaid,
+    currency,
+    eventId,
+  });
+
   try {
     const { provisionPaidOrder } = await import("@/lib/provisioning.server");
     const result = await provisionPaidOrder(order.id);
@@ -405,6 +439,51 @@ async function handleInvoicePaymentFailed(
     .update({ status: "suspended", updated_at: now })
     .eq("id", order.id);
   if (orderError) throw new Error(orderError.message);
+}
+
+async function writePaymentReceivedLogs(
+  db: SupabaseAny,
+  values: {
+    userId: string;
+    orderId: string;
+    paymentId: string | null;
+    invoiceId: string;
+    amountPaid: number;
+    currency: string;
+    eventId: string;
+  },
+) {
+  const metadata = {
+    paymentId: values.paymentId,
+    stripeInvoiceId: values.invoiceId,
+    amountPaid: values.amountPaid,
+    currency: values.currency,
+    stripeEventId: values.eventId,
+  };
+  const [{ error: activityError }, { error: auditError }] = await Promise.all([
+    db.from("activity_logs").insert({
+      user_id: values.userId,
+      order_id: values.orderId,
+      action: "payment_received",
+      description: "Stripe payment received.",
+      metadata,
+    }),
+    db.from("audit_logs").insert({
+      actor_user_id: null,
+      target_user_id: values.userId,
+      entity_type: "order",
+      entity_id: values.orderId,
+      action: "payment_received",
+      before: null,
+      after: metadata,
+    }),
+  ]);
+  if (activityError) {
+    console.warn(`[Stripe] Failed to write payment activity log: ${activityError.message}`);
+  }
+  if (auditError) {
+    console.warn(`[Stripe] Failed to write payment audit log: ${auditError.message}`);
+  }
 }
 
 type StripeInvoicePayment = {
