@@ -16,35 +16,131 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
 };
 
+type BillingOrder = {
+  id: string;
+  status: string;
+  currency: string;
+  total_cents: number;
+  current_period_end: string | null;
+  renews_at: string | null;
+  stripe_subscription_id: string | null;
+  created_at: string;
+  plans?: { name?: string | null; game?: string | null } | null;
+  server_order?: {
+    id: string;
+    server_name: string | null;
+    status: string;
+    pterodactyl_server_identifier: string | null;
+  } | null;
+};
+
+type BillingServerOrder = {
+  id: string;
+  order_id: string | null;
+  server_name: string | null;
+  status: string;
+  pterodactyl_server_identifier: string | null;
+};
+
+type BillingInvoice = {
+  id: string;
+  invoice_number: string;
+  status: string;
+  currency: string;
+  subtotal_cents: number;
+  tax_cents: number;
+  total_cents: number;
+  due_at: string | null;
+  paid_at: string | null;
+  created_at: string;
+  order_id: string | null;
+  stripe_invoice_id?: string | null;
+  stripe_hosted_invoice_url?: string | null;
+  stripe_invoice_pdf?: string | null;
+  invoice_items?: Array<{
+    id: string;
+    description: string;
+    quantity: number;
+    unit_amount_cents: number;
+    total_cents: number;
+  }>;
+};
+
+type BillingPayment = {
+  id: string;
+  provider: string;
+  provider_payment_id: string | null;
+  status: string;
+  currency: string;
+  amount_cents: number;
+  refunded_cents: number;
+  paid_at: string | null;
+  failed_at: string | null;
+  created_at: string;
+  order_id: string | null;
+  stripe_payment_intent_id?: string | null;
+  stripe_charge_id?: string | null;
+  stripe_invoice_id?: string | null;
+};
+
 export const listMyBilling = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const db = supabaseAdmin as unknown as SupabaseAny;
 
-    const [{ data: invoices, error: invoicesError }, { data: payments, error: paymentsError }] =
-      await Promise.all([
-        db
-          .from("invoices")
-          .select(
-            "id, invoice_number, status, currency, subtotal_cents, tax_cents, total_cents, due_at, paid_at, created_at, order_id, invoice_items(id, description, quantity, unit_amount_cents, total_cents)",
-          )
-          .eq("user_id", context.userId)
-          .order("created_at", { ascending: false }),
-        db
-          .from("payments")
-          .select(
-            "id, provider, provider_payment_id, status, currency, amount_cents, refunded_cents, paid_at, failed_at, created_at, order_id",
-          )
-          .eq("user_id", context.userId)
-          .order("created_at", { ascending: false }),
-      ]);
+    const [
+      { data: invoices, error: invoicesError },
+      { data: payments, error: paymentsError },
+      { data: orders, error: ordersError },
+      { data: servers, error: serversError },
+    ] = await Promise.all([
+      db
+        .from("invoices")
+        .select(
+          "id, invoice_number, status, currency, subtotal_cents, tax_cents, total_cents, due_at, paid_at, created_at, order_id, stripe_invoice_id, stripe_hosted_invoice_url, stripe_invoice_pdf, invoice_items(id, description, quantity, unit_amount_cents, total_cents)",
+        )
+        .eq("user_id", context.userId)
+        .order("created_at", { ascending: false }),
+      db
+        .from("payments")
+        .select(
+          "id, provider, provider_payment_id, status, currency, amount_cents, refunded_cents, paid_at, failed_at, created_at, order_id, stripe_payment_intent_id, stripe_charge_id, stripe_invoice_id",
+        )
+        .eq("user_id", context.userId)
+        .order("created_at", { ascending: false }),
+      db
+        .from("orders")
+        .select(
+          "id, status, currency, total_cents, current_period_end, renews_at, stripe_subscription_id, created_at, plans(name, game)",
+        )
+        .eq("user_id", context.userId)
+        .order("created_at", { ascending: false }),
+      db
+        .from("server_orders")
+        .select("id, order_id, server_name, status, pterodactyl_server_identifier")
+        .eq("user_id", context.userId)
+        .order("created_at", { ascending: false }),
+    ]);
 
     if (invoicesError) throw new Error(invoicesError.message);
     if (paymentsError) throw new Error(paymentsError.message);
+    if (ordersError) throw new Error(ordersError.message);
+    if (serversError) throw new Error(serversError.message);
+
+    const serversByOrderId = new Map(
+      ((servers ?? []) as BillingServerOrder[])
+        .filter((server) => server.order_id)
+        .map((server) => [server.order_id as string, server]),
+    );
+    const enrichedOrders = ((orders ?? []) as BillingOrder[]).map((order) => ({
+      ...order,
+      server_order: serversByOrderId.get(order.id) ?? null,
+    }));
 
     return {
-      invoices: invoices ?? [],
-      payments: payments ?? [],
+      invoices: (invoices ?? []) as BillingInvoice[],
+      payments: (payments ?? []) as BillingPayment[],
+      orders: enrichedOrders,
     };
   });

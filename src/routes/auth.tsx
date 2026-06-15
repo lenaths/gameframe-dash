@@ -1,13 +1,13 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { Gamepad2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/use-auth";
+import { XntLogo } from "@/components/xnt-logo";
 
 const searchSchema = z.object({ redirect: z.string().optional() });
 
@@ -59,17 +59,12 @@ function Auth() {
   }
 
   return (
-    <div className="min-h-screen grid place-items-center px-6 relative overflow-hidden">
+    <div className="xnt-page relative grid min-h-screen place-items-center overflow-hidden px-6">
       <div className="absolute inset-0 radial-glow opacity-70" />
       <div className="absolute inset-0 grid-bg opacity-30" />
-      <div className="relative w-full max-w-md rounded-2xl border border-border/60 bg-surface/80 backdrop-blur p-8">
+      <div className="xnt-card relative w-full max-w-md rounded-2xl p-8 backdrop-blur">
         <div className="flex items-center gap-2 mb-6">
-          <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/15 text-primary">
-            <Gamepad2 className="h-5 w-5" />
-          </span>
-          <span className="font-display text-lg font-bold">
-            XNT<span className="text-primary">SERVERS</span>
-          </span>
+          <XntLogo />
         </div>
         <h1 className="font-display text-2xl font-bold">
           {mode === "signin" ? "Welcome back" : "Create your account"}
@@ -116,7 +111,7 @@ function Auth() {
           <Button
             type="submit"
             disabled={busy}
-            className="w-full bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
+            className="w-full bg-primary text-primary-foreground shadow-[0_0_28px_rgba(0,191,255,0.25)] hover:bg-primary/90"
           >
             {busy ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
           </Button>

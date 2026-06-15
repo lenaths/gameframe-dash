@@ -1,20 +1,17 @@
 import { Link } from "@tanstack/react-router";
-import { Gamepad2, LogOut } from "lucide-react";
+import { LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/use-auth";
+import { XntLogo } from "@/components/xnt-logo";
 
 export function SiteHeader() {
   const { user, signOut } = useAuth();
   return (
-    <header className="sticky top-0 z-50 border-b border-border/60 bg-background/70 backdrop-blur-xl">
-      <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+    <header className="sticky top-0 z-50 border-b border-primary/15 bg-background/78 shadow-[0_8px_40px_rgba(0,0,0,0.28)] backdrop-blur-xl">
+      <div className="xnt-neon-line absolute inset-x-0 bottom-0" />
+      <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         <Link to="/" className="flex items-center gap-2">
-          <span className="grid h-9 w-9 place-items-center rounded-md bg-primary/15 text-primary">
-            <Gamepad2 className="h-5 w-5" />
-          </span>
-          <span className="font-display text-lg font-bold tracking-tight">
-            XNT<span className="text-primary">SERVERS</span>
-          </span>
+          <XntLogo />
         </Link>
         <nav className="hidden items-center gap-7 text-sm md:flex">
           <Link
@@ -78,7 +75,7 @@ export function SiteHeader() {
               <Button
                 asChild
                 size="sm"
-                className="bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
+                className="bg-primary text-primary-foreground shadow-[0_0_28px_rgba(0,191,255,0.25)] hover:bg-primary/90"
               >
                 <Link to="/pricing">Get a server</Link>
               </Button>

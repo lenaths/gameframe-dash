@@ -1,8 +1,8 @@
 export function SiteFooter() {
   return (
-    <footer className="border-t border-border/60 py-10 mt-24">
-      <div className="mx-auto max-w-6xl px-6 text-sm text-muted-foreground flex flex-col md:flex-row gap-3 justify-between">
-        <p>© {new Date().getFullYear()} XntServers — game servers, instant deploy.</p>
+    <footer className="mt-24 border-t border-primary/15 py-10">
+      <div className="mx-auto flex max-w-7xl flex-col justify-between gap-3 px-4 text-sm text-muted-foreground sm:px-6 md:flex-row lg:px-8">
+        <p>© {new Date().getFullYear()} XNT Servers — premium game server hosting.</p>
         <p>Powered by Pterodactyl · 99.9% uptime · NVMe storage</p>
       </div>
     </footer>

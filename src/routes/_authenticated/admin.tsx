@@ -103,10 +103,13 @@ function Admin() {
     ticketsQ.error;
 
   return (
-    <div className="min-h-screen">
+    <div className="xnt-page min-h-screen">
       <SiteHeader />
       <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <div>
+          <div className="mb-3 inline-flex rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
+            Beta operations monitor
+          </div>
           <h1 className="font-display text-3xl font-bold sm:text-4xl">Admin</h1>
           <p className="mt-2 text-sm text-muted-foreground">
             Suivi beta des commandes, serveurs, paiements, logs, plans et tickets.
@@ -810,7 +813,7 @@ function AdminTicketsSection({ tickets }: { tickets: AdminTicket[] }) {
       ) : (
         <div className="grid gap-4">
           {tickets.map((ticket) => (
-            <article key={ticket.id} className="rounded-lg border border-border/60 bg-surface">
+            <article key={ticket.id} className="xnt-card rounded-lg">
               <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 p-4">
                 <div>
                   <h3 className="font-display text-lg font-semibold">{ticket.subject}</h3>
@@ -928,7 +931,7 @@ function EditEggsDialog({ plan }: { plan: { id: string; name: string; allowed_eg
           {rows.map((row, index) => (
             <div
               key={`${row.nest_id}-${row.egg_id}-${index}`}
-              className="space-y-2 rounded-lg border border-border/60 p-3"
+              className="space-y-2 rounded-lg border border-primary/15 bg-background/25 p-3"
             >
               <div className="grid gap-2 sm:grid-cols-3">
                 <Field label="Label">
@@ -1011,12 +1014,12 @@ function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string })
 
 function TableShell({ children, empty }: { children: React.ReactNode; empty: string | null }) {
   if (empty) return <EmptyState label={empty} />;
-  return <div className="overflow-hidden rounded-lg border border-border/60">{children}</div>;
+  return <div className="xnt-card overflow-hidden rounded-lg">{children}</div>;
 }
 
 function EmptyState({ label }: { label: string }) {
   return (
-    <div className="rounded-lg border border-dashed border-border bg-surface p-6 text-sm text-muted-foreground">
+    <div className="xnt-card rounded-lg border-dashed p-6 text-sm text-muted-foreground">
       {label}
     </div>
   );
@@ -1032,9 +1035,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const variant = status.includes("fail") || status === "cancelled" ? "destructive" : "outline";
   return (
-    <Badge variant={variant} className="capitalize">
+    <Badge variant="outline" className={`capitalize xnt-status-${status}`}>
       {status.replaceAll("_", " ")}
     </Badge>
   );

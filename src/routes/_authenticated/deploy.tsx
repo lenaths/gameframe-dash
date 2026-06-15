@@ -63,9 +63,12 @@ function Deploy() {
   const variants = opts.data?.variants ?? [];
 
   return (
-    <div className="min-h-screen">
+    <div className="xnt-page min-h-screen">
       <SiteHeader />
-      <div className="mx-auto max-w-3xl px-6 py-12">
+      <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6 lg:px-8">
+        <div className="mb-6 inline-flex rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
+          Checkout powered by Stripe
+        </div>
         <h1 className="font-display text-4xl font-bold">Deploy a new server</h1>
         <p className="text-muted-foreground mt-2">
           Pick a plan, a flavor, and configure your version/mods.
@@ -76,7 +79,7 @@ function Deploy() {
             e.preventDefault();
             if (planId) checkout.mutate();
           }}
-          className="mt-8 space-y-6 rounded-2xl border border-border/60 bg-surface p-6"
+          className="xnt-card mt-8 space-y-6 rounded-2xl p-6"
         >
           <div className="space-y-2">
             <Label htmlFor="name">Server name</Label>
@@ -97,8 +100,8 @@ function Deploy() {
                   key={p.id}
                   className={`cursor-pointer rounded-lg border p-4 flex items-center justify-between transition-colors ${
                     planId === p.id
-                      ? "border-primary bg-primary/5"
-                      : "border-border hover:border-border/80"
+                      ? "border-primary bg-primary/10 shadow-[0_0_24px_rgba(0,191,255,0.12)]"
+                      : "border-border/70 bg-background/20 hover:border-primary/40"
                   }`}
                 >
                   <div className="flex items-center gap-3">
@@ -147,10 +150,10 @@ function Deploy() {
                       disabled={!!v.error}
                       className={`text-left rounded-lg border p-3 transition-colors ${
                         v.error
-                          ? "border-destructive/40 bg-destructive/5 cursor-not-allowed"
+                          ? "border-destructive/40 bg-destructive/10 cursor-not-allowed"
                           : variantIndex === v.index
-                            ? "border-primary bg-primary/5"
-                            : "border-border hover:border-border/80"
+                            ? "border-primary bg-primary/10"
+                            : "border-border/70 bg-background/20 hover:border-primary/40"
                       }`}
                     >
                       <div className="font-medium">{v.label}</div>
@@ -169,7 +172,7 @@ function Deploy() {
           {currentVariant && currentVariant.variables.length > 0 && (
             <div className="space-y-3">
               <Label>Configuration</Label>
-              <div className="rounded-lg border border-border/60 bg-background/40 p-4">
+              <div className="rounded-lg border border-primary/15 bg-background/40 p-4">
                 <EggVariablesForm
                   variables={currentVariant.variables}
                   values={env}
@@ -182,7 +185,7 @@ function Deploy() {
           <Button
             type="submit"
             disabled={!planId || checkout.isPending || opts.isLoading}
-            className="w-full bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
+            className="w-full bg-primary text-primary-foreground shadow-[0_0_30px_rgba(0,191,255,0.24)] hover:bg-primary/90"
           >
             <Rocket className="mr-2 h-4 w-4" />
             {checkout.isPending ? "Redirecting…" : "Payer avec Stripe"}

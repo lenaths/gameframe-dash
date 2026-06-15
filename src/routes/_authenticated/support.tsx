@@ -2,7 +2,8 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { LifeBuoy, MessageSquare, RefreshCw, Send } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -11,7 +12,13 @@ import { SiteHeader } from "@/components/site-header";
 import { createTicket, listMyTickets, replyToTicket } from "@/lib/support.functions";
 import { toast } from "sonner";
 
+const supportSearchSchema = z.object({
+  subject: z.string().optional(),
+  orderId: z.string().optional(),
+});
+
 export const Route = createFileRoute("/_authenticated/support")({
+  validateSearch: supportSearchSchema,
   head: () => ({ meta: [{ title: "Support · XntServers" }] }),
   component: Support,
 });
@@ -36,6 +43,7 @@ type Ticket = {
 };
 
 function Support() {
+  const search = Route.useSearch();
   const fetchTickets = useServerFn(listMyTickets);
   const createTicketFn = useServerFn(createTicket);
   const replyTicketFn = useServerFn(replyToTicket);
@@ -45,6 +53,13 @@ function Support() {
   const [category, setCategory] = useState("");
   const [body, setBody] = useState("");
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (search.subject) setSubject(search.subject);
+    if (search.orderId && !body) {
+      setBody(`Bonjour,\n\nJ'ai besoin d'aide pour le serveur/order ${search.orderId}.\n`);
+    }
+  }, [body, search.orderId, search.subject]);
 
   const ticketsQuery = useQuery({
     queryKey: ["my-tickets"],
@@ -84,11 +99,14 @@ function Support() {
   });
 
   return (
-    <div className="min-h-screen">
+    <div className="xnt-page min-h-screen">
       <SiteHeader />
-      <div className="mx-auto max-w-6xl px-6 py-10">
+      <div className="mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
         <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
           <div>
+            <div className="mb-3 inline-flex rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
+              Private beta support
+            </div>
             <h1 className="font-display text-4xl font-bold">Support</h1>
             <p className="mt-1 text-muted-foreground">Open a ticket and follow staff replies.</p>
           </div>
@@ -98,7 +116,7 @@ function Support() {
         </div>
 
         <div className="grid gap-8 lg:grid-cols-[380px_1fr]">
-          <section className="rounded-xl border border-border/60 bg-surface p-5">
+          <section className="xnt-card rounded-xl p-5">
             <div className="mb-4 flex items-center gap-2">
               <LifeBuoy className="h-5 w-5 text-primary" />
               <h2 className="font-display text-xl font-semibold">New ticket</h2>
@@ -133,7 +151,7 @@ function Support() {
               <Button
                 type="submit"
                 disabled={create.isPending || subject.trim().length < 3 || body.trim().length < 3}
-                className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
+                className="w-full bg-primary text-primary-foreground shadow-[0_0_26px_rgba(0,191,255,0.2)] hover:bg-primary/90"
               >
                 <Send className="mr-1.5 h-4 w-4" />
                 {create.isPending ? "Creating…" : "Create ticket"}
@@ -154,12 +172,12 @@ function Support() {
                 {(ticketsQuery.error as Error).message}
               </div>
             ) : tickets.length === 0 ? (
-              <div className="rounded-xl border border-dashed border-border bg-surface p-8 text-sm text-muted-foreground">
+              <div className="xnt-card rounded-xl border-dashed p-8 text-sm text-muted-foreground">
                 No support tickets yet.
               </div>
             ) : (
               tickets.map((ticket) => (
-                <article key={ticket.id} className="rounded-xl border border-border/60 bg-surface">
+                <article key={ticket.id} className="xnt-card rounded-xl">
                   <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 p-4">
                     <div>
                       <h3 className="font-display text-lg font-semibold">{ticket.subject}</h3>
@@ -167,7 +185,7 @@ function Support() {
                         Created {formatDate(ticket.created_at)}
                       </div>
                     </div>
-                    <Badge variant="outline" className="capitalize">
+                    <Badge variant="outline" className={`capitalize xnt-status-${ticket.status}`}>
                       {ticket.status}
                     </Badge>
                   </div>
@@ -177,7 +195,7 @@ function Support() {
                         key={message.id}
                         className={`rounded-lg border p-3 ${
                           message.is_staff
-                            ? "border-primary/30 bg-primary/10"
+                            ? "border-primary/30 bg-primary/10 shadow-[0_0_20px_rgba(0,191,255,0.08)]"
                             : "border-border/60 bg-background/40"
                         }`}
                       >

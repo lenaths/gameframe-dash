@@ -27,6 +27,69 @@ const BLOCKED_FILE_EXTENSIONS = new Set([
   ".db",
 ]);
 
+type PteroAllocation = {
+  attributes?: {
+    ip?: string | null;
+    ip_alias?: string | null;
+    port?: number | null;
+    is_default?: boolean | null;
+  };
+};
+
+function isPrivateIPv4(host: string) {
+  const match = host.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!match) return false;
+  const [, aRaw, bRaw] = match;
+  const a = Number(aRaw);
+  const b = Number(bRaw);
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 192 && b === 168) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 169 && b === 254) ||
+    a === 0
+  );
+}
+
+function publicHost(host: string | null | undefined) {
+  const normalized = host?.trim();
+  if (!normalized || normalized === "localhost" || isPrivateIPv4(normalized)) return null;
+  return normalized;
+}
+
+function getDefaultAllocation(allocations: PteroAllocation[]) {
+  return (
+    allocations.find((allocation) => allocation.attributes?.is_default) ?? allocations[0] ?? null
+  );
+}
+
+function buildConnectionInfo(meta: {
+  attributes: {
+    identifier?: string | null;
+    sftp_details?: { ip?: string | null; port?: number | null; username?: string | null };
+    relationships?: { allocations?: { data?: PteroAllocation[] } };
+  };
+}) {
+  const allocation = getDefaultAllocation(meta.attributes.relationships?.allocations?.data ?? []);
+  const address =
+    publicHost(allocation?.attributes?.ip_alias) ?? publicHost(allocation?.attributes?.ip);
+  const sftpHost = publicHost(meta.attributes.sftp_details?.ip);
+
+  return {
+    address,
+    port: allocation?.attributes?.port ?? null,
+    sftpHost,
+    sftpPort: meta.attributes.sftp_details?.port ?? null,
+    sftpUsername: meta.attributes.sftp_details?.username ?? null,
+    identifier: meta.attributes.identifier ?? null,
+    unavailableReason:
+      address || sftpHost
+        ? null
+        : "Informations de connexion indisponibles ou adresse privée masquée.",
+  };
+}
+
 function byteLength(value: string) {
   return new TextEncoder().encode(value).length;
 }
@@ -230,9 +293,16 @@ export const getServerDetail = createServerFn({ method: "POST" })
           };
         };
       };
-      const meta = (await ptero.client(`/servers/${order.pterodactyl_server_identifier}`)) as {
-        attributes: { sftp_details?: { ip: string; port: number }; relationships?: unknown };
+      const meta = (await ptero.client(
+        `/servers/${order.pterodactyl_server_identifier}?include=allocations`,
+      )) as {
+        attributes: {
+          identifier?: string | null;
+          sftp_details?: { ip?: string | null; port?: number | null; username?: string | null };
+          relationships?: { allocations?: { data?: PteroAllocation[] } };
+        };
       };
+      const connection = buildConnectionInfo(meta);
       return {
         order,
         live: {
@@ -242,7 +312,10 @@ export const getServerDetail = createServerFn({ method: "POST" })
           diskMb: Math.round(res.attributes.resources.disk_bytes / 1024 / 1024),
           rxMb: Math.round(res.attributes.resources.network_rx_bytes / 1024 / 1024),
           txMb: Math.round(res.attributes.resources.network_tx_bytes / 1024 / 1024),
-          sftp: meta.attributes.sftp_details ?? null,
+          sftp: connection.sftpHost
+            ? { ip: connection.sftpHost, port: connection.sftpPort ?? 2022 }
+            : null,
+          connection,
         },
       };
     } catch (err) {

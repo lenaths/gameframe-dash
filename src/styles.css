@@ -42,49 +42,48 @@
 :root {
   --radius: 0.625rem;
 
-  /* Dark gamer palette: deep slate base, electric green primary, cyan accent */
-  --background: oklch(0.16 0.02 250);
-  --foreground: oklch(0.97 0.01 250);
+  --background: #050816;
+  --foreground: #edf7ff;
 
-  --surface: oklch(0.2 0.02 250);
-  --surface-2: oklch(0.24 0.025 250);
+  --surface: #0b1220;
+  --surface-2: #111a2e;
 
-  --card: oklch(0.2 0.02 250);
-  --card-foreground: oklch(0.97 0.01 250);
-  --popover: oklch(0.2 0.02 250);
-  --popover-foreground: oklch(0.97 0.01 250);
+  --card: #0b1220;
+  --card-foreground: #edf7ff;
+  --popover: #0b1220;
+  --popover-foreground: #edf7ff;
 
-  --primary: oklch(0.84 0.21 145); /* electric green */
-  --primary-foreground: oklch(0.15 0.03 145);
-  --primary-glow: oklch(0.9 0.22 145);
+  --primary: #00bfff;
+  --primary-foreground: #02111a;
+  --primary-glow: #7ddcff;
 
-  --secondary: oklch(0.28 0.03 250);
-  --secondary-foreground: oklch(0.97 0.01 250);
+  --secondary: #4f46e5;
+  --secondary-foreground: #f5f7ff;
 
-  --muted: oklch(0.24 0.02 250);
-  --muted-foreground: oklch(0.7 0.02 250);
+  --muted: #101827;
+  --muted-foreground: #95a4bd;
 
-  --accent: oklch(0.78 0.16 210); /* cyan */
-  --accent-foreground: oklch(0.15 0.03 210);
+  --accent: #8b5cf6;
+  --accent-foreground: #fbfaff;
 
-  --destructive: oklch(0.65 0.22 25);
+  --destructive: #ef4444;
   --destructive-foreground: oklch(0.98 0 0);
 
-  --success: oklch(0.78 0.18 150);
-  --success-foreground: oklch(0.15 0.03 150);
+  --success: #22c55e;
+  --success-foreground: #04140a;
 
-  --border: oklch(0.3 0.02 250);
-  --input: oklch(0.26 0.02 250);
-  --ring: oklch(0.84 0.21 145);
+  --border: #1f2a44;
+  --input: #172238;
+  --ring: #00bfff;
 
-  --sidebar: oklch(0.18 0.02 250);
-  --sidebar-foreground: oklch(0.97 0.01 250);
-  --sidebar-primary: oklch(0.84 0.21 145);
-  --sidebar-primary-foreground: oklch(0.15 0.03 145);
-  --sidebar-accent: oklch(0.24 0.02 250);
-  --sidebar-accent-foreground: oklch(0.97 0.01 250);
-  --sidebar-border: oklch(0.3 0.02 250);
-  --sidebar-ring: oklch(0.84 0.21 145);
+  --sidebar: #080d19;
+  --sidebar-foreground: #edf7ff;
+  --sidebar-primary: #00bfff;
+  --sidebar-primary-foreground: #02111a;
+  --sidebar-accent: #111a2e;
+  --sidebar-accent-foreground: #edf7ff;
+  --sidebar-border: #1f2a44;
+  --sidebar-ring: #00bfff;
 }
 
 @theme inline {
@@ -110,6 +109,19 @@
   body {
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
+    background:
+      radial-gradient(
+        circle at 15% -10%,
+        color-mix(in srgb, var(--primary) 18%, transparent),
+        transparent 30rem
+      ),
+      radial-gradient(
+        circle at 85% 0%,
+        color-mix(in srgb, var(--accent) 15%, transparent),
+        transparent 28rem
+      ),
+      linear-gradient(180deg, #050816 0%, #070b17 44%, #050816 100%);
+    min-height: 100vh;
   }
   h1,
   h2,
@@ -117,7 +129,7 @@
   h4,
   .font-display {
     font-family: var(--font-display);
-    letter-spacing: -0.02em;
+    letter-spacing: 0;
   }
 }
 
@@ -146,12 +158,177 @@
   background:
     radial-gradient(
       800px 400px at 20% 0%,
-      color-mix(in oklab, var(--primary) 18%, transparent),
+      color-mix(in srgb, var(--primary) 20%, transparent),
       transparent 60%
     ),
     radial-gradient(
       600px 400px at 90% 10%,
-      color-mix(in oklab, var(--accent) 14%, transparent),
+      color-mix(in srgb, var(--accent) 18%, transparent),
       transparent 60%
     );
+}
+
+@layer components {
+  .xnt-page {
+    min-height: 100vh;
+    background:
+      radial-gradient(
+        circle at 18% 0%,
+        color-mix(in srgb, var(--primary) 12%, transparent),
+        transparent 32rem
+      ),
+      radial-gradient(
+        circle at 82% 8%,
+        color-mix(in srgb, var(--accent) 13%, transparent),
+        transparent 30rem
+      );
+  }
+
+  .xnt-panel {
+    border: 1px solid color-mix(in srgb, var(--primary) 16%, var(--border));
+    background:
+      linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--surface) 92%, var(--primary) 8%),
+        var(--surface)
+      ),
+      var(--surface);
+    box-shadow:
+      0 0 0 1px rgb(255 255 255 / 0.02) inset,
+      0 18px 55px rgb(0 0 0 / 0.34);
+  }
+
+  .xnt-card {
+    border: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border));
+    background:
+      linear-gradient(145deg, rgb(255 255 255 / 0.045), rgb(255 255 255 / 0.012)), var(--surface);
+    box-shadow:
+      0 0 0 1px rgb(255 255 255 / 0.025) inset,
+      0 24px 70px rgb(0 0 0 / 0.28);
+  }
+
+  .xnt-card-hover {
+    transition:
+      border-color 180ms ease,
+      transform 180ms ease,
+      box-shadow 180ms ease;
+  }
+
+  .xnt-card-hover:hover {
+    border-color: color-mix(in srgb, var(--primary) 55%, var(--border));
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--primary) 20%, transparent) inset,
+      0 0 34px color-mix(in srgb, var(--primary) 12%, transparent),
+      0 26px 80px rgb(0 0 0 / 0.34);
+    transform: translateY(-2px);
+  }
+
+  .xnt-text-glow {
+    color: var(--primary);
+    text-shadow: 0 0 22px color-mix(in srgb, var(--primary) 70%, transparent);
+  }
+
+  .xnt-neon-line {
+    background: linear-gradient(90deg, transparent, var(--primary), var(--accent), transparent);
+    height: 1px;
+    opacity: 0.75;
+  }
+
+  .xnt-hero-visual {
+    position: relative;
+    min-height: 420px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--primary) 24%, var(--border));
+    background:
+      linear-gradient(180deg, rgb(0 191 255 / 0.08), transparent 48%),
+      radial-gradient(circle at 50% 20%, rgb(139 92 246 / 0.28), transparent 34%),
+      linear-gradient(135deg, #071022, #0b1220 56%, #090b1c);
+    box-shadow:
+      0 0 70px rgb(0 191 255 / 0.12),
+      0 30px 90px rgb(0 0 0 / 0.38);
+  }
+
+  .xnt-hero-visual::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(
+        90deg,
+        transparent 0 10%,
+        rgb(0 191 255 / 0.12) 10.4% 10.7%,
+        transparent 11% 22%,
+        rgb(139 92 246 / 0.13) 22.4% 22.7%,
+        transparent 23% 36%,
+        rgb(0 191 255 / 0.1) 36.3% 36.6%,
+        transparent 37% 49%,
+        rgb(79 70 229 / 0.13) 49.3% 49.6%,
+        transparent 50% 63%,
+        rgb(0 191 255 / 0.12) 63.4% 63.7%,
+        transparent 64% 76%,
+        rgb(139 92 246 / 0.13) 76.3% 76.6%,
+        transparent 77%
+      ),
+      repeating-linear-gradient(0deg, rgb(255 255 255 / 0.04) 0 1px, transparent 1px 28px);
+    mask-image: linear-gradient(180deg, transparent, black 18%, black 82%, transparent);
+  }
+
+  .xnt-rack {
+    position: absolute;
+    bottom: 46px;
+    width: 17%;
+    min-width: 72px;
+    height: 62%;
+    border: 1px solid rgb(0 191 255 / 0.24);
+    background:
+      repeating-linear-gradient(180deg, rgb(255 255 255 / 0.075) 0 2px, transparent 2px 30px),
+      linear-gradient(180deg, rgb(255 255 255 / 0.08), rgb(255 255 255 / 0.02));
+    box-shadow: 0 0 24px rgb(0 191 255 / 0.11);
+  }
+
+  .xnt-rack:nth-child(1) {
+    left: 9%;
+    height: 55%;
+  }
+
+  .xnt-rack:nth-child(2) {
+    left: 29%;
+    height: 70%;
+  }
+
+  .xnt-rack:nth-child(3) {
+    right: 29%;
+    height: 66%;
+  }
+
+  .xnt-rack:nth-child(4) {
+    right: 9%;
+    height: 54%;
+  }
+
+  .xnt-status-active,
+  .xnt-status-paid,
+  .xnt-status-succeeded {
+    border-color: color-mix(in srgb, var(--success) 35%, transparent);
+    background: color-mix(in srgb, var(--success) 12%, transparent);
+    color: var(--success);
+  }
+
+  .xnt-status-provisioning,
+  .xnt-status-installing,
+  .xnt-status-pending,
+  .xnt-status-pending_payment {
+    border-color: color-mix(in srgb, var(--primary) 35%, transparent);
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+    color: var(--primary);
+  }
+
+  .xnt-status-failed,
+  .xnt-status-provisioning_failed,
+  .xnt-status-payment_failed,
+  .xnt-status-cancelled {
+    border-color: color-mix(in srgb, var(--destructive) 35%, transparent);
+    background: color-mix(in srgb, var(--destructive) 12%, transparent);
+    color: var(--destructive);
+  }
 }

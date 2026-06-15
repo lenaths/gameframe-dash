@@ -97,11 +97,12 @@ function ServerDetail() {
 
   const order = data?.order;
   const live = data?.live;
+  const connection = live?.connection;
 
   return (
-    <div className="min-h-screen">
+    <div className="xnt-page min-h-screen">
       <SiteHeader />
-      <div className="mx-auto max-w-6xl px-6 py-8">
+      <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
         <Button asChild variant="ghost" size="sm" className="mb-4 -ml-2">
           <Link to="/dashboard">
             <ArrowLeft className="h-4 w-4 mr-1.5" /> Back
@@ -109,48 +110,80 @@ function ServerDetail() {
         </Button>
 
         {isLoading || !order ? (
-          <div className="text-muted-foreground">Loading…</div>
+          <div className="xnt-card rounded-xl p-8 text-muted-foreground">Loading server data…</div>
         ) : (
           <>
-            <div className="flex flex-wrap items-end justify-between gap-4 mb-6">
-              <div>
-                <h1 className="font-display text-3xl font-bold">{order.server_name}</h1>
-                <div className="text-sm text-muted-foreground mt-1">
-                  {order.plans?.game} · {order.plans?.name}
+            <div className="xnt-card mb-6 rounded-2xl p-6">
+              <div className="flex flex-wrap items-end justify-between gap-4">
+                <div>
+                  <div className="mb-3 inline-flex rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
+                    Server control room
+                  </div>
+                  <h1 className="font-display text-3xl font-bold">{order.server_name}</h1>
+                  <div className="text-sm text-muted-foreground mt-1">
+                    {order.plans?.game} · {order.plans?.name}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={`capitalize xnt-status-${live?.state ?? order.status}`}
+                  >
+                    {live?.state ?? order.status}
+                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={power.isPending}
+                    onClick={() => power.mutate("start")}
+                  >
+                    <Play className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={power.isPending}
+                    onClick={() => power.mutate("restart")}
+                  >
+                    <RotateCw className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={power.isPending}
+                    onClick={() => power.mutate("stop")}
+                  >
+                    <Square className="h-4 w-4" />
+                  </Button>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Badge variant="outline" className="capitalize">
-                  {live?.state ?? order.status}
-                </Badge>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={power.isPending}
-                  onClick={() => power.mutate("start")}
-                >
-                  <Play className="h-4 w-4" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={power.isPending}
-                  onClick={() => power.mutate("restart")}
-                >
-                  <RotateCw className="h-4 w-4" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={power.isPending}
-                  onClick={() => power.mutate("stop")}
-                >
-                  <Square className="h-4 w-4" />
-                </Button>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                <NetworkStat
+                  label="IP publique"
+                  value={connection?.address ?? "Adresse publique indisponible"}
+                />
+                <NetworkStat label="Port serveur" value={connection?.port ?? "Port indisponible"} />
+                <NetworkStat
+                  label="Adresse SFTP"
+                  value={connection?.sftpHost ?? "SFTP indisponible"}
+                />
+                <NetworkStat
+                  label="Port SFTP"
+                  value={connection?.sftpPort ?? "Port SFTP indisponible"}
+                />
+                <NetworkStat
+                  label="Utilisateur SFTP"
+                  value={connection?.sftpUsername ?? "Utilisateur SFTP indisponible"}
+                />
               </div>
+              {connection?.unavailableReason && (
+                <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm text-accent">
+                  {connection.unavailableReason}
+                </div>
+              )}
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+            <div className="grid grid-cols-2 gap-3 mb-6 md:grid-cols-4">
               <Stat label="State" value={live?.state ?? "—"} />
               <Stat label="RAM" value={`${live?.memoryMb ?? 0} / ${order.plans?.ram_mb ?? 0} MB`} />
               <Stat label="CPU" value={`${live?.cpu ?? 0}%`} />
@@ -181,7 +214,19 @@ function ServerDetail() {
                 <StartupTab orderId={orderId} />
               </TabsContent>
               <TabsContent value="info" className="mt-4">
-                <InfoTab sftp={live?.sftp ?? null} />
+                <InfoTab
+                  connection={
+                    connection ?? {
+                      address: null,
+                      port: null,
+                      sftpHost: null,
+                      sftpPort: null,
+                      sftpUsername: null,
+                      identifier: order.pterodactyl_server_identifier ?? null,
+                      unavailableReason: "Informations de connexion indisponibles.",
+                    }
+                  }
+                />
               </TabsContent>
             </Tabs>
           </>
@@ -193,9 +238,18 @@ function ServerDetail() {
 
 function Stat({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="rounded-lg border border-border/60 bg-surface p-4">
+    <div className="xnt-panel rounded-lg p-4">
       <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
       <div className="font-display text-lg font-semibold mt-1">{value}</div>
+    </div>
+  );
+}
+
+function NetworkStat({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="rounded-lg border border-primary/15 bg-background/35 p-4">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 truncate font-mono text-sm text-primary">{value}</div>
     </div>
   );
 }
@@ -351,7 +405,7 @@ function ConsoleTab({ orderId }: { orderId: string }) {
   };
 
   return (
-    <div className="rounded-xl border border-border/60 bg-[#0a0d12] overflow-hidden">
+    <div className="overflow-hidden rounded-xl border border-primary/20 bg-[#050816] shadow-[0_0_35px_rgba(0,191,255,0.08)]">
       {consoleError && (
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           <span>{consoleError}</span>
@@ -361,7 +415,7 @@ function ConsoleTab({ orderId }: { orderId: string }) {
         </div>
       )}
       <div ref={termRef} className="h-[420px] w-full px-3 py-2" />
-      <form onSubmit={onSubmit} className="flex gap-2 border-t border-border/60 p-2 bg-surface">
+      <form onSubmit={onSubmit} className="flex gap-2 border-t border-primary/15 bg-surface p-2">
         <Input
           value={command}
           onChange={(e) => setCommand(e.target.value)}
@@ -446,7 +500,7 @@ function FilesTab({ orderId }: { orderId: string }) {
 
   if (editing) {
     return (
-      <div className="rounded-xl border border-border/60 bg-surface p-4">
+      <div className="xnt-card rounded-xl p-4">
         <div className="flex items-center justify-between mb-3 gap-2">
           <div className="font-mono text-sm truncate">{editing.path}</div>
           <div className="flex gap-2">
@@ -466,7 +520,7 @@ function FilesTab({ orderId }: { orderId: string }) {
         <Textarea
           value={editing.contents}
           onChange={(e) => setEditing({ ...editing, contents: e.target.value })}
-          className="font-mono text-sm h-[500px] bg-[#0a0d12]"
+          className="h-[500px] bg-[#050816] font-mono text-sm"
           spellCheck={false}
         />
       </div>
@@ -474,8 +528,8 @@ function FilesTab({ orderId }: { orderId: string }) {
   }
 
   return (
-    <div className="rounded-xl border border-border/60 bg-surface">
-      <div className="flex flex-wrap items-center gap-2 p-3 border-b border-border/60">
+    <div className="xnt-card rounded-xl">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border/60 p-3">
         <Button
           size="sm"
           variant="ghost"
@@ -570,28 +624,50 @@ function hasBlockedEditorExtension(name: string) {
 
 /* ---------------- Info ---------------- */
 
-function InfoTab({ sftp }: { sftp: { ip: string; port: number } | null }) {
+type ConnectionInfo = {
+  address: string | null;
+  port: number | null;
+  sftpHost: string | null;
+  sftpPort: number | null;
+  sftpUsername: string | null;
+  identifier: string | null;
+  unavailableReason: string | null;
+};
+
+function InfoTab({ connection }: { connection: ConnectionInfo }) {
   return (
-    <div className="rounded-xl border border-border/60 bg-surface p-6 space-y-4">
+    <div className="xnt-card space-y-4 rounded-xl p-6">
       <div>
-        <h3 className="font-display text-lg font-semibold mb-2">SFTP access</h3>
-        {sftp ? (
-          <div className="space-y-1 font-mono text-sm">
-            <div>
-              <span className="text-muted-foreground">Host:</span> {sftp.ip}
-            </div>
-            <div>
-              <span className="text-muted-foreground">Port:</span> {sftp.port}
-            </div>
-            <div className="text-xs text-muted-foreground mt-2">
-              Use your account email as username. SFTP password is set in your account settings on
-              the panel.
-            </div>
+        <h3 className="font-display text-lg font-semibold mb-2">Connexion serveur</h3>
+        <div className="grid gap-3 md:grid-cols-2">
+          <InfoLine
+            label="Adresse publique"
+            value={connection.address ?? "Adresse publique indisponible"}
+          />
+          <InfoLine label="Port serveur" value={connection.port ?? "Port indisponible"} />
+          <InfoLine label="Hôte SFTP public" value={connection.sftpHost ?? "SFTP indisponible"} />
+          <InfoLine label="Port SFTP" value={connection.sftpPort ?? "Port SFTP indisponible"} />
+          <InfoLine
+            label="Utilisateur SFTP"
+            value={connection.sftpUsername ?? "Utilisateur SFTP indisponible"}
+          />
+          <InfoLine label="Identifier Pterodactyl" value={connection.identifier ?? "—"} />
+        </div>
+        {connection.unavailableReason && (
+          <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm text-accent">
+            {connection.unavailableReason}
           </div>
-        ) : (
-          <div className="text-sm text-muted-foreground">SFTP details unavailable.</div>
         )}
       </div>
+    </div>
+  );
+}
+
+function InfoLine({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 break-all font-mono text-sm text-primary">{value}</div>
     </div>
   );
 }
@@ -653,7 +729,7 @@ function StartupTab({ orderId }: { orderId: string }) {
   if (!startup.data) return null;
 
   return (
-    <div className="rounded-xl border border-border/60 bg-surface p-6 space-y-6">
+    <div className="xnt-card space-y-6 rounded-xl p-6">
       <div>
         <h3 className="font-display text-lg font-semibold">Server variables</h3>
         <p className="text-xs text-muted-foreground mt-1">

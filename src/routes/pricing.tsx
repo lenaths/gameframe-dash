@@ -47,14 +47,21 @@ function Pricing() {
   const visible = (data?.plans ?? []).filter((p) => game === "All" || p.game === game);
 
   return (
-    <div className="min-h-screen">
+    <div className="xnt-page min-h-screen">
       <SiteHeader />
       <section className="relative overflow-hidden">
-        <div className="absolute inset-0 radial-glow opacity-60" />
-        <div className="relative mx-auto max-w-6xl px-6 pt-16 pb-10">
-          <h1 className="font-display text-4xl md:text-6xl font-bold">Pick your plan</h1>
+        <div className="absolute inset-0 grid-bg opacity-20" />
+        <div className="absolute inset-0 radial-glow opacity-70" />
+        <div className="relative mx-auto max-w-7xl px-4 pb-10 pt-16 sm:px-6 lg:px-8">
+          <div className="mb-4 inline-flex rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
+            Plans beta XNT Servers
+          </div>
+          <h1 className="font-display text-4xl font-bold md:text-6xl">
+            Pick your <span className="xnt-text-glow">neon stack</span>.
+          </h1>
           <p className="text-muted-foreground mt-3 max-w-xl">
-            Hardware-backed game servers. No setup fees, cancel anytime.
+            Hardware-backed game servers with Stripe checkout and automatic Pterodactyl
+            provisioning.
           </p>
           <div className="mt-8 flex flex-wrap gap-2">
             {games.map((g) => (
@@ -63,8 +70,8 @@ function Pricing() {
                 onClick={() => setGame(g)}
                 className={`px-4 py-2 rounded-full text-sm border transition-colors ${
                   game === g
-                    ? "bg-primary text-primary-foreground border-primary"
-                    : "border-border bg-surface text-muted-foreground hover:text-foreground"
+                    ? "border-primary bg-primary text-primary-foreground shadow-[0_0_24px_rgba(0,191,255,0.18)]"
+                    : "border-primary/15 bg-surface/80 text-muted-foreground hover:border-primary/40 hover:text-foreground"
                 }`}
               >
                 {g}
@@ -74,21 +81,18 @@ function Pricing() {
         </div>
       </section>
 
-      <section className="mx-auto max-w-6xl px-6 pb-24">
+      <section className="mx-auto max-w-7xl px-4 pb-24 sm:px-6 lg:px-8">
         {isLoading ? (
           <div className="text-muted-foreground">Loading plans…</div>
         ) : (
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {visible.map((p) => (
-              <div
-                key={p.id}
-                className="rounded-xl border border-border/60 bg-surface p-6 flex flex-col"
-              >
+              <div key={p.id} className="xnt-card xnt-card-hover flex flex-col rounded-xl p-6">
                 <div className="text-xs uppercase tracking-wider text-primary">{p.game}</div>
                 <div className="font-display text-2xl font-bold mt-1">{p.name}</div>
                 <p className="text-sm text-muted-foreground mt-2 min-h-10">{p.description}</p>
                 <div className="font-display text-4xl mt-6">
-                  ${(p.price_monthly_cents / 100).toFixed(2)}
+                  <span className="xnt-text-glow">${(p.price_monthly_cents / 100).toFixed(2)}</span>
                   <span className="text-sm text-muted-foreground font-sans">/mo</span>
                 </div>
                 <ul className="mt-6 space-y-2 text-sm">
@@ -106,7 +110,7 @@ function Pricing() {
                   ))}
                 </ul>
                 <Button
-                  className="mt-6 bg-primary text-primary-foreground hover:bg-primary/90"
+                  className="mt-6 bg-primary text-primary-foreground shadow-[0_0_28px_rgba(0,191,255,0.22)] hover:bg-primary/90"
                   disabled={checkout.isPending}
                   onClick={() => {
                     if (!user) navigate({ to: "/auth", search: { redirect: "/pricing" } as never });
