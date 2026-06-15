@@ -72,15 +72,26 @@ export async function handleStripeWebhookRequest(request: Request) {
 }
 
 async function handleStripeEvent(db: SupabaseAny, event: Stripe.Event) {
-  switch (event.type) {
+  const eventType = event.type as string;
+  switch (eventType) {
     case "checkout.session.completed":
       await handleCheckoutCompleted(db, event.data.object as Stripe.Checkout.Session);
       break;
     case "invoice.paid":
       await handleInvoicePaid(db, event.data.object as Stripe.Invoice, event.id);
       break;
+    case "invoice.payment_succeeded":
+    case "invoice.payment_paid":
+      await handleInvoicePaid(db, event.data.object as Stripe.Invoice, event.id);
+      break;
+    case "invoice_payment.paid":
+      await handleInvoicePaymentPaid(db, event.data.object as StripeInvoicePayment, event.id);
+      break;
     case "invoice.payment_failed":
       await handleInvoicePaymentFailed(db, event.data.object as Stripe.Invoice, event.id);
+      break;
+    case "charge.succeeded":
+      await handleChargeSucceeded(db, event.data.object as Stripe.Charge);
       break;
     case "customer.subscription.deleted":
       await handleSubscriptionDeleted(db, event.data.object as Stripe.Subscription);
@@ -119,7 +130,10 @@ async function handleCheckoutCompleted(db: SupabaseAny, session: Stripe.Checkout
 async function handleInvoicePaid(db: SupabaseAny, invoice: Stripe.Invoice, eventId: string) {
   const subscriptionId = getInvoiceSubscriptionId(invoice);
   const order = await findOrderForInvoice(db, invoice);
-  if (!order) return;
+  if (!order) {
+    logUnlinkedInvoice(invoice, "paid invoice");
+    return;
+  }
 
   const now = new Date().toISOString();
   const amountPaid = invoice.amount_paid ?? invoice.total ?? order.total_cents;
@@ -159,7 +173,17 @@ async function handleInvoicePaid(db: SupabaseAny, invoice: Stripe.Invoice, event
           updated_at: now,
         })
         .eq("id", paymentId);
-      if (error) throw new Error(error.message);
+      if (error) {
+        logSupabaseWriteError("payments.update.paid", error, {
+          paymentId,
+          invoiceId,
+          paymentIntentId,
+          chargeId,
+          orderId: order.id,
+          eventId,
+        });
+        throw new Error(error.message);
+      }
     } else {
       const paymentResult = await db
         .from("payments")
@@ -182,6 +206,16 @@ async function handleInvoicePaid(db: SupabaseAny, invoice: Stripe.Invoice, event
         .single();
       const payment = paymentResult.data as { id: string } | null;
       if (paymentResult.error || !payment) {
+        logSupabaseWriteError("payments.insert.paid", paymentResult.error, {
+          invoiceId,
+          paymentIntentId,
+          chargeId,
+          orderId: order.id,
+          userId: order.user_id,
+          eventId,
+          amountPaid,
+          currency,
+        });
         throw new Error(paymentResult.error?.message ?? "Could not create payment.");
       }
       paymentId = payment.id;
@@ -219,10 +253,28 @@ async function handleInvoicePaid(db: SupabaseAny, invoice: Stripe.Invoice, event
 
   if (existingInvoice?.id) {
     const { error } = await db.from("invoices").update(invoicePayload).eq("id", existingInvoice.id);
-    if (error) throw new Error(error.message);
+    if (error) {
+      logSupabaseWriteError("invoices.update.paid", error, {
+        invoiceId,
+        existingInvoiceId: existingInvoice.id,
+        orderId: order.id,
+        paymentId,
+      });
+      throw new Error(error.message);
+    }
   } else {
     const { error } = await db.from("invoices").insert(invoicePayload);
-    if (error) throw new Error(error.message);
+    if (error) {
+      logSupabaseWriteError("invoices.insert.paid", error, {
+        invoiceId,
+        invoiceNumber,
+        orderId: order.id,
+        userId: order.user_id,
+        paymentId,
+        totalCents: invoicePayload.total_cents,
+      });
+      throw new Error(error.message);
+    }
   }
 
   const orderUpdate: Record<string, unknown> = {
@@ -236,6 +288,25 @@ async function handleInvoicePaid(db: SupabaseAny, invoice: Stripe.Invoice, event
 
   const { error: orderError } = await db.from("orders").update(orderUpdate).eq("id", order.id);
   if (orderError) throw new Error(orderError.message);
+
+  try {
+    const { provisionPaidOrder } = await import("@/lib/provisioning.server");
+    const result = await provisionPaidOrder(order.id);
+    if (!result.ok) {
+      console.error(
+        `[Stripe] Provisioning failed after paid invoice ${invoiceId} for order=${order.id}: ${result.error}`,
+      );
+    } else {
+      console.info(
+        `[Stripe] Provisioning completed after paid invoice ${invoiceId} for order=${order.id}`,
+      );
+    }
+  } catch (error) {
+    console.error(
+      `[Stripe] Provisioning threw after paid invoice ${invoiceId} for order=${order.id}`,
+      error,
+    );
+  }
 }
 
 async function handleInvoicePaymentFailed(
@@ -244,7 +315,10 @@ async function handleInvoicePaymentFailed(
   eventId: string,
 ) {
   const order = await findOrderForInvoice(db, invoice);
-  if (!order) return;
+  if (!order) {
+    logUnlinkedInvoice(invoice, "failed invoice");
+    return;
+  }
 
   const now = new Date().toISOString();
   const invoiceId = invoice.id;
@@ -265,7 +339,17 @@ async function handleInvoicePaymentFailed(
     raw_provider_payload: invoice as unknown as Record<string, unknown>,
     failed_at: now,
   });
-  if (paymentError && paymentError.code !== "23505") throw new Error(paymentError.message);
+  if (paymentError && paymentError.code !== "23505") {
+    logSupabaseWriteError("payments.insert.failed", paymentError, {
+      invoiceId,
+      orderId: order.id,
+      userId: order.user_id,
+      eventId,
+      amountDue,
+      currency,
+    });
+    throw new Error(paymentError.message);
+  }
 
   const existingInvoiceResult = await db
     .from("invoices")
@@ -295,10 +379,25 @@ async function handleInvoicePaymentFailed(
 
   if (existingInvoice?.id) {
     const { error } = await db.from("invoices").update(invoicePayload).eq("id", existingInvoice.id);
-    if (error) throw new Error(error.message);
+    if (error) {
+      logSupabaseWriteError("invoices.update.failed", error, {
+        invoiceId,
+        existingInvoiceId: existingInvoice.id,
+        orderId: order.id,
+      });
+      throw new Error(error.message);
+    }
   } else {
     const { error } = await db.from("invoices").insert(invoicePayload);
-    if (error) throw new Error(error.message);
+    if (error) {
+      logSupabaseWriteError("invoices.insert.failed", error, {
+        invoiceId,
+        orderId: order.id,
+        userId: order.user_id,
+        totalCents: invoicePayload.total_cents,
+      });
+      throw new Error(error.message);
+    }
   }
 
   const { error: orderError } = await db
@@ -306,6 +405,83 @@ async function handleInvoicePaymentFailed(
     .update({ status: "suspended", updated_at: now })
     .eq("id", order.id);
   if (orderError) throw new Error(orderError.message);
+}
+
+type StripeInvoicePayment = {
+  id: string;
+  invoice?: string | Stripe.Invoice | null;
+  payment?: {
+    type?: string;
+    payment_intent?: string | Stripe.PaymentIntent | null;
+  } | null;
+};
+
+async function handleInvoicePaymentPaid(
+  db: SupabaseAny,
+  invoicePayment: StripeInvoicePayment,
+  eventId: string,
+) {
+  const invoiceId =
+    typeof invoicePayment.invoice === "string"
+      ? invoicePayment.invoice
+      : (invoicePayment.invoice?.id ?? null);
+
+  if (!invoiceId) {
+    console.warn(`[Stripe] invoice_payment.paid ${invoicePayment.id} has no invoice link.`);
+    return;
+  }
+
+  const { getStripe } = await import("@/lib/stripe.server");
+  const invoice = await getStripe().invoices.retrieve(invoiceId);
+  await handleInvoicePaid(db, invoice, eventId);
+}
+
+async function handleChargeSucceeded(db: SupabaseAny, charge: Stripe.Charge) {
+  const chargeId = charge.id;
+  const paymentIntentId = getChargePaymentIntentId(charge);
+  const invoiceId = getChargeInvoiceId(charge);
+
+  if (!paymentIntentId && !invoiceId) {
+    console.warn(`[Stripe] charge.succeeded ${chargeId} has no payment_intent or invoice link.`);
+    return;
+  }
+
+  const existingPaymentResult = await db
+    .from("payments")
+    .select("id")
+    .eq(
+      paymentIntentId ? "stripe_payment_intent_id" : "stripe_invoice_id",
+      paymentIntentId ?? invoiceId,
+    )
+    .maybeSingle();
+  const existingPayment = existingPaymentResult.data as { id: string } | null;
+
+  if (!existingPayment?.id) {
+    console.warn(
+      `[Stripe] charge.succeeded ${chargeId} could not be linked to an existing payment. payment_intent=${paymentIntentId ?? "none"} invoice=${invoiceId ?? "none"}`,
+    );
+    return;
+  }
+
+  const { error } = await db
+    .from("payments")
+    .update({
+      stripe_payment_intent_id: paymentIntentId,
+      stripe_charge_id: chargeId,
+      provider_payment_id: paymentIntentId ?? chargeId,
+      raw_provider_payload: charge as unknown as Record<string, unknown>,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", existingPayment.id);
+  if (error) {
+    logSupabaseWriteError("payments.update.charge_succeeded", error, {
+      paymentId: existingPayment.id,
+      chargeId,
+      paymentIntentId,
+      invoiceId,
+    });
+    throw new Error(error.message);
+  }
 }
 
 async function handleSubscriptionDeleted(db: SupabaseAny, subscription: Stripe.Subscription) {
@@ -324,7 +500,7 @@ async function handleSubscriptionDeleted(db: SupabaseAny, subscription: Stripe.S
 
 async function findOrderForInvoice(db: SupabaseAny, invoice: Stripe.Invoice) {
   const subscriptionId = getInvoiceSubscriptionId(invoice);
-  const orderId = invoice.metadata?.order_id;
+  const orderId = getInvoiceOrderId(invoice);
 
   if (orderId) {
     const orderResult = await db
@@ -346,12 +522,39 @@ async function findOrderForInvoice(db: SupabaseAny, invoice: Stripe.Invoice) {
   return (orderResult.data as OrderRow | null) ?? null;
 }
 
+function getInvoiceOrderId(invoice: Stripe.Invoice) {
+  return invoice.metadata?.order_id ?? getInvoiceParentMetadata(invoice).order_id ?? null;
+}
+
 function getInvoiceSubscriptionId(invoice: Stripe.Invoice) {
   const invoiceWithSubscription = invoice as Stripe.Invoice & {
     subscription?: string | Stripe.Subscription | null;
+    parent?: {
+      subscription_details?: {
+        subscription?: string | Stripe.Subscription | null;
+      } | null;
+    } | null;
   };
   const subscription = invoiceWithSubscription.subscription;
-  return typeof subscription === "string" ? subscription : (subscription?.id ?? null);
+  if (typeof subscription === "string") return subscription;
+  if (subscription?.id) return subscription.id;
+
+  const parentSubscription = invoiceWithSubscription.parent?.subscription_details?.subscription;
+  return typeof parentSubscription === "string"
+    ? parentSubscription
+    : (parentSubscription?.id ?? null);
+}
+
+function getInvoiceParentMetadata(invoice: Stripe.Invoice) {
+  const invoiceWithParent = invoice as Stripe.Invoice & {
+    parent?: {
+      subscription_details?: {
+        metadata?: Record<string, string> | null;
+      } | null;
+    } | null;
+  };
+
+  return invoiceWithParent.parent?.subscription_details?.metadata ?? {};
 }
 
 function getInvoicePaymentIntentId(invoice: Stripe.Invoice) {
@@ -368,6 +571,19 @@ function getInvoiceChargeId(invoice: Stripe.Invoice) {
   };
   const charge = invoiceWithCharge.charge;
   return typeof charge === "string" ? charge : (charge?.id ?? null);
+}
+
+function getChargePaymentIntentId(charge: Stripe.Charge) {
+  const paymentIntent = charge.payment_intent;
+  return typeof paymentIntent === "string" ? paymentIntent : (paymentIntent?.id ?? null);
+}
+
+function getChargeInvoiceId(charge: Stripe.Charge) {
+  const chargeWithInvoice = charge as Stripe.Charge & {
+    invoice?: string | Stripe.Invoice | null;
+  };
+  const invoice = chargeWithInvoice.invoice;
+  return typeof invoice === "string" ? invoice : (invoice?.id ?? null);
 }
 
 function invoiceTaxAmount(invoice: Stripe.Invoice) {
@@ -393,4 +609,41 @@ function subscriptionPeriodFields(subscription: Stripe.Subscription) {
 
 function timestampToIso(timestamp: number | null | undefined) {
   return timestamp ? new Date(timestamp * 1000).toISOString() : null;
+}
+
+function logUnlinkedInvoice(invoice: Stripe.Invoice, context: string) {
+  console.warn(
+    [
+      `[Stripe] Unable to link ${context} ${invoice.id} to an order.`,
+      `metadata.order_id=${invoice.metadata?.order_id ?? "none"}`,
+      `parent.metadata.order_id=${getInvoiceParentMetadata(invoice).order_id ?? "none"}`,
+      `subscription=${getInvoiceSubscriptionId(invoice) ?? "none"}`,
+      `customer=${typeof invoice.customer === "string" ? invoice.customer : (invoice.customer?.id ?? "none")}`,
+    ].join(" "),
+  );
+}
+
+function logSupabaseWriteError(
+  operation: string,
+  error: { message: string; code?: string; details?: string; hint?: string } | null,
+  context: Record<string, unknown>,
+) {
+  console.error(
+    `[Stripe] Supabase ${operation} failed`,
+    JSON.stringify(
+      {
+        error: error
+          ? {
+              message: error.message,
+              code: error.code,
+              details: error.details,
+              hint: error.hint,
+            }
+          : null,
+        context,
+      },
+      null,
+      2,
+    ),
+  );
 }

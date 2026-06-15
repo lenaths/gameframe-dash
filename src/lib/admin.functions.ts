@@ -1,6 +1,22 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
+type SupabaseAny = {
+  from: (table: string) => SupabaseQuery;
+};
+
+type SupabaseResult<T = unknown> = {
+  data: T | null;
+  error: { message: string; code?: string } | null;
+};
+
+type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
+  select: (columns: string) => SupabaseQuery<T>;
+  eq: (column: string, value: unknown) => SupabaseQuery<T>;
+  in: (column: string, values: unknown[]) => SupabaseQuery<T>;
+  order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
+};
+
 async function assertAdmin(userId: string) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { data } = await supabaseAdmin
@@ -90,4 +106,58 @@ export const adminUpdatePlanEggs = createServerFn({ method: "POST" })
       .eq("id", data.planId);
     if (error) throw new Error(error.message);
     return { ok: true };
+  });
+
+export const adminListProvisioningQueue = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const [{ data: orders, error: ordersError }, { data: serverOrders, error: serversError }] =
+      await Promise.all([
+        db
+          .from("orders")
+          .select(
+            "id, user_id, plan_id, status, total_cents, currency, created_at, plans(name, game)",
+          )
+          .in("status", ["paid", "active"])
+          .order("created_at", { ascending: false }),
+        db
+          .from("server_orders")
+          .select("id, order_id, status, error_message, pterodactyl_server_id"),
+      ]);
+
+    if (ordersError) throw new Error(ordersError.message);
+    if (serversError) throw new Error(serversError.message);
+
+    const serverRows = (serverOrders ?? []) as Array<{
+      id: string;
+      order_id: string | null;
+      status: string;
+      error_message: string | null;
+      pterodactyl_server_id: number | null;
+    }>;
+    const orderRows = (orders ?? []) as Array<{ id: string } & Record<string, unknown>>;
+
+    const serversByOrder = new Map(
+      serverRows
+        .filter((server) => server.order_id)
+        .map((server) => [server.order_id as string, server]),
+    );
+
+    const queue = orderRows
+      .map((order) => ({ ...order, server_order: serversByOrder.get(order.id) ?? null }))
+      .filter((order) => !order.server_order?.pterodactyl_server_id);
+
+    return { orders: queue };
+  });
+
+export const adminRetryProvisioning = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => z.object({ orderId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { provisionPaidOrder } = await import("@/lib/provisioning.server");
+    return provisionPaidOrder(data.orderId);
   });

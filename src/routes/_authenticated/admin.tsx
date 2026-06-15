@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { useEffect, useState } from "react";
-import { LifeBuoy, Users, Server, Package, Plus, Trash2 } from "lucide-react";
+import { LifeBuoy, Users, Server, Package, Plus, Trash2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,7 +16,13 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { SiteHeader } from "@/components/site-header";
-import { adminListAll, adminListPlans, adminUpdatePlanEggs } from "@/lib/admin.functions";
+import {
+  adminListAll,
+  adminListPlans,
+  adminListProvisioningQueue,
+  adminRetryProvisioning,
+  adminUpdatePlanEggs,
+} from "@/lib/admin.functions";
 import { adminListTickets, adminReplyToTicket } from "@/lib/support.functions";
 import { toast } from "sonner";
 
@@ -28,6 +34,7 @@ export const Route = createFileRoute("/_authenticated/admin")({
 function Admin() {
   const fetchAll = useServerFn(adminListAll);
   const fetchPlans = useServerFn(adminListPlans);
+  const fetchProvisioningQueue = useServerFn(adminListProvisioningQueue);
   const fetchTickets = useServerFn(adminListTickets);
   const { data, isLoading, error } = useQuery({
     queryKey: ["admin-all"],
@@ -38,6 +45,11 @@ function Admin() {
   const ticketsQ = useQuery({
     queryKey: ["admin-tickets"],
     queryFn: () => fetchTickets(),
+    retry: false,
+  });
+  const provisioningQ = useQuery({
+    queryKey: ["admin-provisioning-queue"],
+    queryFn: () => fetchProvisioningQueue(),
     retry: false,
   });
 
@@ -100,6 +112,10 @@ function Admin() {
                 </table>
               </div>
             </section>
+
+            <AdminProvisioningQueueSection
+              orders={(provisioningQ.data?.orders ?? []) as ProvisioningQueueOrder[]}
+            />
 
             <section>
               <div className="flex items-center gap-2 mb-4">
@@ -194,6 +210,104 @@ type AdminTicketMessage = {
   body: string;
   created_at: string;
 };
+
+type ProvisioningQueueOrder = {
+  id: string;
+  user_id: string;
+  status: string;
+  total_cents: number;
+  currency: string;
+  created_at: string;
+  plans?: { name?: string; game?: string } | null;
+  server_order?: {
+    id: string;
+    status: string;
+    error_message: string | null;
+    pterodactyl_server_id: number | null;
+  } | null;
+};
+
+function AdminProvisioningQueueSection({ orders }: { orders: ProvisioningQueueOrder[] }) {
+  const qc = useQueryClient();
+  const retryFn = useServerFn(adminRetryProvisioning);
+  const retry = useMutation({
+    mutationFn: (orderId: string) => retryFn({ data: { orderId } }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.warning(result.error ?? "Provisioning failed");
+      } else {
+        toast.success("Provisioning launched");
+      }
+      qc.invalidateQueries({ queryKey: ["admin-provisioning-queue"] });
+      qc.invalidateQueries({ queryKey: ["admin-all"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <section>
+      <div className="flex items-center gap-2 mb-4">
+        <RefreshCw className="h-5 w-5 text-primary" />
+        <h2 className="font-display text-xl font-semibold">
+          Paid orders pending server ({orders.length})
+        </h2>
+      </div>
+      {orders.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border bg-surface p-6 text-sm text-muted-foreground">
+          No paid orders waiting for provisioning.
+        </div>
+      ) : (
+        <div className="rounded-xl border border-border/60 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-surface-2 text-muted-foreground text-left">
+              <tr>
+                <th className="p-3">Order</th>
+                <th className="p-3">Plan</th>
+                <th className="p-3">Server state</th>
+                <th className="p-3">Error</th>
+                <th className="p-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {orders.map((order) => (
+                <tr key={order.id} className="border-t border-border/60">
+                  <td className="p-3">
+                    <div className="font-medium">{order.id.slice(0, 8)}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {(order.total_cents / 100).toFixed(2)} {order.currency}
+                    </div>
+                  </td>
+                  <td className="p-3 text-muted-foreground">
+                    {order.plans?.game} — {order.plans?.name}
+                  </td>
+                  <td className="p-3">
+                    <Badge variant="outline" className="capitalize">
+                      {order.server_order?.status ?? "missing"}
+                    </Badge>
+                  </td>
+                  <td className="p-3 max-w-xs truncate text-muted-foreground">
+                    {order.server_order?.error_message ?? "—"}
+                  </td>
+                  <td className="p-3 text-right">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={retry.isPending}
+                      onClick={() => retry.mutate(order.id)}
+                    >
+                      <RefreshCw className="mr-2 h-4 w-4" />
+                      Retry
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
 
 type AdminTicket = {
   id: string;

@@ -27,74 +27,6 @@ const BLOCKED_FILE_EXTENSIONS = new Set([
   ".db",
 ]);
 
-const planVariantSchema = z.object({
-  nest_id: z.number().int().positive(),
-  egg_id: z.number().int().positive(),
-  label: z.string().optional(),
-  docker_image: z.string().trim().min(1).optional(),
-  startup: z.string().trim().min(1).optional(),
-});
-
-type ServerOrderStatus =
-  | "pending"
-  | "provisioning"
-  | "active"
-  | "suspended"
-  | "failed"
-  | "cancelled";
-
-function cleanError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\s+/g, " ").trim().slice(0, 1000);
-}
-
-function mapPterodactylInstallStatus(status: unknown): ServerOrderStatus {
-  if (status === null) return "active";
-  if (status === "suspended") return "suspended";
-  if (status === "install_failed" || status === "restore_failed") return "failed";
-  return "provisioning";
-}
-
-function normalizeEnvironment(input: Record<string, unknown>) {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(input)) {
-    if (!key.trim()) continue;
-    if (value == null) {
-      env[key] = "";
-    } else if (typeof value === "string") {
-      env[key] = value;
-    } else if (typeof value === "number" || typeof value === "boolean") {
-      env[key] = String(value);
-    }
-  }
-  return env;
-}
-
-function filterEnvironmentForEgg(
-  input: Record<string, string>,
-  allowedVariables: Set<string>,
-  context: string,
-) {
-  const env: Record<string, string> = {};
-  const ignored: string[] = [];
-
-  for (const [key, value] of Object.entries(input)) {
-    if (allowedVariables.has(key)) {
-      env[key] = value;
-    } else {
-      ignored.push(key);
-    }
-  }
-
-  if (ignored.length > 0) {
-    console.warn(
-      `[Pterodactyl] Ignored unknown environment variables for ${context}: ${ignored.join(", ")}`,
-    );
-  }
-
-  return env;
-}
-
 function byteLength(value: string) {
   return new TextEncoder().encode(value).length;
 }
@@ -214,14 +146,6 @@ export const deployServer = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { supabase, userId, claims } = context;
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const {
-      ptero,
-      getEggDetails,
-      getFirstFreeAllocation,
-      createPanelUser,
-      assertPteroAppConfigured,
-    } = await import("@/lib/pterodactyl.server");
-    assertPteroAppConfigured();
 
     const { data: plan, error: planErr } = await supabaseAdmin
       .from("plans")
@@ -230,43 +154,6 @@ export const deployServer = createServerFn({ method: "POST" })
       .eq("is_active", true)
       .single();
     if (planErr || !plan) throw new Error("Plan not found.");
-
-    // Resolve the chosen variant (or fall back to the plan's single egg).
-    const variantsRaw =
-      Array.isArray(plan.allowed_eggs) && plan.allowed_eggs.length > 0
-        ? plan.allowed_eggs
-        : [{ nest_id: plan.pterodactyl_nest_id, egg_id: plan.pterodactyl_egg_id }];
-    const variant = variantsRaw[data.variantIndex] ?? variantsRaw[0];
-    const parsedVariant = planVariantSchema.parse(variant);
-    const egg = await getEggDetails(parsedVariant.nest_id, parsedVariant.egg_id);
-    const dockerImage = parsedVariant.docker_image || egg.docker_image;
-    const startup = parsedVariant.startup || egg.startup;
-    if (!dockerImage) throw new Error("The selected Pterodactyl egg has no Docker image.");
-    if (!startup) throw new Error("The selected Pterodactyl egg has no startup command.");
-
-    // Ensure the user has a panel account.
-    const { data: profile } = await supabaseAdmin
-      .from("profiles")
-      .select("id, email, display_name, pterodactyl_user_id")
-      .eq("id", userId)
-      .maybeSingle();
-
-    let pteroUserId = profile?.pterodactyl_user_id ?? null;
-    if (!pteroUserId) {
-      const email = (profile?.email ?? claims?.email ?? "") as string;
-      if (!email) throw new Error("Missing email for panel account creation.");
-      const display = (profile?.display_name ?? email.split("@")[0]) as string;
-      pteroUserId = await createPanelUser({
-        email,
-        username: email.split("@")[0],
-        firstName: display.split(" ")[0] || "Player",
-        lastName: display.split(" ").slice(1).join(" ") || "User",
-      });
-      await supabaseAdmin
-        .from("profiles")
-        .update({ pterodactyl_user_id: pteroUserId })
-        .eq("id", userId);
-    }
 
     const { data: order, error: orderErr } = await supabase
       .from("server_orders")
@@ -280,79 +167,21 @@ export const deployServer = createServerFn({ method: "POST" })
       .single();
     if (orderErr || !order) throw new Error(orderErr?.message ?? "Could not create order.");
 
-    try {
-      const allocation = await getFirstFreeAllocation();
-      // Defaults from the egg, overlaid with known plan/user variables only.
-      const eggDefaults: Record<string, string> = {};
-      for (const v of egg.variables) eggDefaults[v.env_variable] = v.default_value ?? "";
-      const allowedVariables = new Set(egg.variables.map((v) => v.env_variable));
-      const planEnv = filterEnvironmentForEgg(
-        normalizeEnvironment((plan.environment as Record<string, unknown>) ?? {}),
-        allowedVariables,
-        `plan ${String(plan.slug ?? plan.id)}`,
-      );
-      const userEnv = filterEnvironmentForEgg(
-        normalizeEnvironment(data.environment),
-        allowedVariables,
-        `server ${data.serverName}`,
-      );
-      const env = normalizeEnvironment({ ...eggDefaults, ...planEnv, ...userEnv });
+    const { provisionServerOrder } = await import("@/lib/provisioning.server");
+    const result = await provisionServerOrder({
+      serverOrderId: order.id,
+      userId,
+      planId: plan.id,
+      serverName: data.serverName,
+      variantIndex: data.variantIndex,
+      environment: data.environment,
+      fallbackEmail: (claims?.email as string | undefined) ?? null,
+    });
 
-      const payload = {
-        name: data.serverName,
-        user: pteroUserId,
-        egg: parsedVariant.egg_id,
-        docker_image: dockerImage,
-        startup,
-        environment: env,
-        limits: {
-          memory: plan.ram_mb,
-          swap: plan.swap_mb,
-          disk: plan.disk_mb,
-          io: plan.io_weight,
-          cpu: plan.cpu_percent,
-        },
-        feature_limits: { databases: 1, allocations: 1, backups: 2 },
-        allocation: { default: allocation.id },
-        skip_scripts: false,
-        start_on_completion: true,
-      };
-
-      const created = (await ptero.app("/servers", {
-        method: "POST",
-        body: JSON.stringify(payload),
-      })) as { attributes: { id: number; identifier: string; status?: string | null } };
-
-      const createdStatus = created.attributes.status;
-      const nextStatus = mapPterodactylInstallStatus(createdStatus);
-      const installError =
-        nextStatus === "failed"
-          ? `Pterodactyl reported server install status "${String(createdStatus)}".`
-          : null;
-
-      const { error: updErr } = await supabaseAdmin
-        .from("server_orders")
-        .update({
-          status: nextStatus,
-          pterodactyl_server_id: created.attributes.id,
-          pterodactyl_server_identifier: created.attributes.identifier,
-          error_message: installError,
-        })
-        .eq("id", order.id);
-      if (updErr) throw new Error(updErr.message);
-
-      if (nextStatus === "failed") {
-        return { ok: false as const, orderId: order.id, status: nextStatus, error: installError };
-      }
-      return { ok: true as const, orderId: order.id, status: nextStatus, error: installError };
-    } catch (err) {
-      const msg = cleanError(err);
-      await supabaseAdmin
-        .from("server_orders")
-        .update({ status: "failed", error_message: msg })
-        .eq("id", order.id);
-      return { ok: false as const, orderId: order.id, error: msg };
+    if (!result.ok) {
+      return { ok: false as const, orderId: order.id, status: result.status, error: result.error };
     }
+    return { ok: true as const, orderId: order.id, status: result.status, error: result.error };
   });
 
 export const powerServer = createServerFn({ method: "POST" })

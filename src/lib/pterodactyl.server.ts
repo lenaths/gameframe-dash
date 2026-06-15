@@ -295,3 +295,12 @@ export async function createPanelUser(input: {
   })) as { attributes: { id: number } };
   return res.attributes.id;
 }
+
+export async function findPanelUserByEmail(email: string): Promise<number | null> {
+  const res = (await ptero.app(`/users?filter[email]=${encodeURIComponent(email)}`)) as {
+    data?: Array<{ attributes: { id: number; email: string } }>;
+  };
+  const normalized = email.trim().toLowerCase();
+  const user = res.data?.find((entry) => entry.attributes.email.toLowerCase() === normalized);
+  return user?.attributes.id ?? null;
+}

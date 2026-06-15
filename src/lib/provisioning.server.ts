@@ -1,0 +1,411 @@
+import "@tanstack/react-start/server-only";
+
+import { z } from "zod";
+
+type ServerOrderStatus =
+  | "pending"
+  | "provisioning"
+  | "active"
+  | "suspended"
+  | "failed"
+  | "cancelled";
+
+type SupabaseAny = {
+  from: (table: string) => SupabaseQuery;
+};
+
+type SupabaseResult<T = unknown> = {
+  data: T | null;
+  error: { message: string; code?: string } | null;
+};
+
+type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
+  select: (columns: string) => SupabaseQuery<T>;
+  eq: (column: string, value: unknown) => SupabaseQuery<T>;
+  single: () => SupabaseQuery<T>;
+  maybeSingle: () => SupabaseQuery<T>;
+  insert: (values: Record<string, unknown>) => SupabaseQuery<T>;
+  update: (values: Record<string, unknown>) => SupabaseQuery<T>;
+};
+
+const planVariantSchema = z.object({
+  nest_id: z.number().int().positive(),
+  egg_id: z.number().int().positive(),
+  label: z.string().optional(),
+  docker_image: z.string().trim().min(1).optional(),
+  startup: z.string().trim().min(1).optional(),
+});
+
+type ProvisionServerOrderInput = {
+  serverOrderId: string;
+  userId: string;
+  planId: string;
+  serverName: string;
+  variantIndex?: number;
+  environment?: Record<string, string>;
+  fallbackEmail?: string | null;
+};
+
+type PaidOrderRow = {
+  id: string;
+  user_id: string;
+  plan_id: string | null;
+  product_id: string | null;
+  status: string;
+};
+
+type ExistingServerOrder = {
+  id: string;
+  status: ServerOrderStatus;
+  pterodactyl_server_id: number | null;
+  pterodactyl_server_identifier: string | null;
+};
+
+export function cleanProvisioningError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, " ").trim().slice(0, 1000);
+}
+
+function mapPterodactylInstallStatus(status: unknown): ServerOrderStatus {
+  if (status === null) return "active";
+  if (status === "suspended") return "suspended";
+  if (status === "install_failed" || status === "restore_failed") return "failed";
+  return "provisioning";
+}
+
+function normalizeEnvironment(input: Record<string, unknown>) {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (!key.trim()) continue;
+    if (value == null) {
+      env[key] = "";
+    } else if (typeof value === "string") {
+      env[key] = value;
+    } else if (typeof value === "number" || typeof value === "boolean") {
+      env[key] = String(value);
+    }
+  }
+  return env;
+}
+
+function filterEnvironmentForEgg(
+  input: Record<string, string>,
+  allowedVariables: Set<string>,
+  context: string,
+) {
+  const env: Record<string, string> = {};
+  const ignored: string[] = [];
+
+  for (const [key, value] of Object.entries(input)) {
+    if (allowedVariables.has(key)) {
+      env[key] = value;
+    } else {
+      ignored.push(key);
+    }
+  }
+
+  if (ignored.length > 0) {
+    console.warn(
+      `[Pterodactyl] Ignored unknown environment variables for ${context}: ${ignored.join(", ")}`,
+    );
+  }
+
+  return env;
+}
+
+async function ensurePanelUser(input: {
+  db: SupabaseAny;
+  userId: string;
+  fallbackEmail?: string | null;
+}) {
+  const { createPanelUser, findPanelUserByEmail } = await import("@/lib/pterodactyl.server");
+  const profileResult = await input.db
+    .from("profiles")
+    .select("id, email, display_name, pterodactyl_user_id")
+    .eq("id", input.userId)
+    .maybeSingle();
+  const profile = profileResult.data as {
+    email: string | null;
+    display_name: string | null;
+    pterodactyl_user_id: number | null;
+  } | null;
+
+  let pteroUserId = profile?.pterodactyl_user_id ?? null;
+  if (pteroUserId) return pteroUserId;
+
+  const email = profile?.email ?? input.fallbackEmail ?? "";
+  if (!email) throw new Error("Missing email for panel account creation.");
+  const display = profile?.display_name ?? email.split("@")[0];
+
+  pteroUserId = await findPanelUserByEmail(email);
+  if (!pteroUserId) {
+    pteroUserId = await createPanelUser({
+      email,
+      username: email.split("@")[0],
+      firstName: display.split(" ")[0] || "Player",
+      lastName: display.split(" ").slice(1).join(" ") || "User",
+    });
+  }
+
+  const { error } = await input.db
+    .from("profiles")
+    .update({ pterodactyl_user_id: pteroUserId })
+    .eq("id", input.userId);
+  if (error) throw new Error(error.message);
+
+  return pteroUserId;
+}
+
+export async function provisionServerOrder(input: ProvisionServerOrderInput) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { ptero, getEggDetails, getFirstFreeAllocation, assertPteroAppConfigured } =
+    await import("@/lib/pterodactyl.server");
+  assertPteroAppConfigured();
+
+  const db = supabaseAdmin as unknown as SupabaseAny;
+
+  const existingResult = await db
+    .from("server_orders")
+    .select("id, status, pterodactyl_server_id, pterodactyl_server_identifier")
+    .eq("id", input.serverOrderId)
+    .maybeSingle();
+  const existing = existingResult.data as ExistingServerOrder | null;
+  if (!existing) throw new Error("Server order not found.");
+  if (existing.pterodactyl_server_id || existing.pterodactyl_server_identifier) {
+    console.info(`[Provisioning] Server order ${input.serverOrderId} already has a server.`);
+    let syncedStatus = existing.status;
+    if (existing.pterodactyl_server_id) {
+      try {
+        const { ptero } = await import("@/lib/pterodactyl.server");
+        const fetched = (await ptero.app(`/servers/${existing.pterodactyl_server_id}`)) as {
+          attributes: { status?: string | null };
+        };
+        syncedStatus = mapPterodactylInstallStatus(
+          "status" in fetched.attributes ? fetched.attributes.status : existing.status,
+        );
+        await db
+          .from("server_orders")
+          .update({ status: syncedStatus, error_message: null })
+          .eq("id", input.serverOrderId);
+      } catch (error) {
+        console.warn(
+          `[Provisioning] Could not sync existing server_order=${input.serverOrderId}: ${cleanProvisioningError(error)}`,
+        );
+      }
+    }
+    return {
+      ok: true as const,
+      serverOrderId: input.serverOrderId,
+      status: syncedStatus,
+      pterodactylServerId: existing.pterodactyl_server_id,
+      pterodactylServerIdentifier: existing.pterodactyl_server_identifier,
+      reused: true,
+    };
+  }
+
+  const { error: markProvisioningError } = await db
+    .from("server_orders")
+    .update({ status: "provisioning", error_message: null })
+    .eq("id", input.serverOrderId);
+  if (markProvisioningError) throw new Error(markProvisioningError.message);
+
+  const planResult = await db
+    .from("plans")
+    .select("*")
+    .eq("id", input.planId)
+    .eq("is_active", true)
+    .single();
+  const plan = planResult.data as Record<string, unknown> | null;
+  if (planResult.error || !plan) throw new Error("Plan not found.");
+
+  try {
+    const variantsRaw =
+      Array.isArray(plan.allowed_eggs) && plan.allowed_eggs.length > 0
+        ? plan.allowed_eggs
+        : [{ nest_id: plan.pterodactyl_nest_id, egg_id: plan.pterodactyl_egg_id }];
+    const variant = variantsRaw[input.variantIndex ?? 0] ?? variantsRaw[0];
+    const parsedVariant = planVariantSchema.parse(variant);
+    const egg = await getEggDetails(parsedVariant.nest_id, parsedVariant.egg_id);
+    const dockerImage = parsedVariant.docker_image || egg.docker_image;
+    const startup = parsedVariant.startup || egg.startup;
+    if (!dockerImage) throw new Error("The selected Pterodactyl egg has no Docker image.");
+    if (!startup) throw new Error("The selected Pterodactyl egg has no startup command.");
+
+    const pteroUserId = await ensurePanelUser({
+      db,
+      userId: input.userId,
+      fallbackEmail: input.fallbackEmail,
+    });
+
+    const allocation = await getFirstFreeAllocation();
+    const eggDefaults: Record<string, string> = {};
+    for (const v of egg.variables) eggDefaults[v.env_variable] = v.default_value ?? "";
+    const allowedVariables = new Set(egg.variables.map((v) => v.env_variable));
+    const planEnv = filterEnvironmentForEgg(
+      normalizeEnvironment((plan.environment as Record<string, unknown>) ?? {}),
+      allowedVariables,
+      `plan ${String(plan.slug ?? plan.id)}`,
+    );
+    const userEnv = filterEnvironmentForEgg(
+      normalizeEnvironment(input.environment ?? {}),
+      allowedVariables,
+      `server ${input.serverName}`,
+    );
+    const env = normalizeEnvironment({ ...eggDefaults, ...planEnv, ...userEnv });
+
+    const payload = {
+      name: input.serverName,
+      user: pteroUserId,
+      egg: parsedVariant.egg_id,
+      docker_image: dockerImage,
+      startup,
+      environment: env,
+      limits: {
+        memory: plan.ram_mb,
+        swap: plan.swap_mb,
+        disk: plan.disk_mb,
+        io: plan.io_weight,
+        cpu: plan.cpu_percent,
+      },
+      feature_limits: { databases: 1, allocations: 1, backups: 2 },
+      allocation: { default: allocation.id },
+      skip_scripts: false,
+      start_on_completion: true,
+    };
+
+    console.info(
+      `[Provisioning] Creating Pterodactyl server for server_order=${input.serverOrderId}`,
+    );
+    const created = (await ptero.app("/servers", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })) as { attributes: { id: number; identifier: string; status?: string | null } };
+
+    const fetched = (await ptero.app(`/servers/${created.attributes.id}`)) as {
+      attributes: { status?: string | null };
+    };
+    const createdStatus =
+      "status" in fetched.attributes ? fetched.attributes.status : created.attributes.status;
+    const nextStatus = mapPterodactylInstallStatus(createdStatus);
+    const installError =
+      nextStatus === "failed"
+        ? `Pterodactyl reported server install status "${String(createdStatus)}".`
+        : null;
+
+    const { error: updateError } = await db
+      .from("server_orders")
+      .update({
+        status: nextStatus,
+        pterodactyl_server_id: created.attributes.id,
+        pterodactyl_server_identifier: created.attributes.identifier,
+        error_message: installError,
+      })
+      .eq("id", input.serverOrderId);
+    if (updateError) throw new Error(updateError.message);
+
+    return {
+      ok: nextStatus !== "failed",
+      serverOrderId: input.serverOrderId,
+      status: nextStatus,
+      pterodactylServerId: created.attributes.id,
+      pterodactylServerIdentifier: created.attributes.identifier,
+      error: installError,
+      reused: false,
+    };
+  } catch (error) {
+    const message = cleanProvisioningError(error);
+    console.error(`[Provisioning] Failed server_order=${input.serverOrderId}: ${message}`);
+    await db
+      .from("server_orders")
+      .update({ status: "failed", error_message: message })
+      .eq("id", input.serverOrderId);
+    return {
+      ok: false as const,
+      serverOrderId: input.serverOrderId,
+      status: "failed" as const,
+      error: message,
+      reused: false,
+    };
+  }
+}
+
+export async function provisionPaidOrder(orderId: string) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const db = supabaseAdmin as unknown as SupabaseAny;
+
+  const orderResult = await db
+    .from("orders")
+    .select("id, user_id, plan_id, product_id, status")
+    .eq("id", orderId)
+    .maybeSingle();
+  const order = orderResult.data as PaidOrderRow | null;
+  if (orderResult.error) throw new Error(orderResult.error.message);
+  if (!order) throw new Error("Paid order not found.");
+  if (!order.plan_id) throw new Error("Paid order has no plan_id.");
+  if (!["paid", "active"].includes(order.status)) {
+    throw new Error(`Order ${order.id} is not paid or active (status=${order.status}).`);
+  }
+
+  const planResult = await db
+    .from("plans")
+    .select("id, game, name")
+    .eq("id", order.plan_id)
+    .single();
+  const plan = planResult.data as { game?: string; name?: string } | null;
+  if (planResult.error || !plan) throw new Error("Plan not found.");
+  const serverName = `${plan.game ?? "Game"} ${plan.name ?? "Server"}`.slice(0, 40);
+
+  const existingServerResult = await db
+    .from("server_orders")
+    .select("id, status, pterodactyl_server_id, pterodactyl_server_identifier")
+    .eq("order_id", order.id)
+    .maybeSingle();
+  const existingServer = existingServerResult.data as ExistingServerOrder | null;
+  if (existingServer?.pterodactyl_server_id || existingServer?.pterodactyl_server_identifier) {
+    console.info(`[Provisioning] Order ${order.id} already provisioned.`);
+    const result = await provisionServerOrder({
+      serverOrderId: existingServer.id,
+      userId: order.user_id,
+      planId: order.plan_id,
+      serverName,
+    });
+    return { ...result, orderId: order.id, serverOrderId: existingServer.id };
+  }
+
+  let serverOrderId = existingServer?.id ?? null;
+  if (!serverOrderId) {
+    const createdResult = await db
+      .from("server_orders")
+      .insert({
+        user_id: order.user_id,
+        plan_id: order.plan_id,
+        product_id: order.product_id,
+        order_id: order.id,
+        server_name: serverName,
+        status: "pending",
+      })
+      .select("id")
+      .single();
+    const created = createdResult.data as { id: string } | null;
+    if (createdResult.error || !created) {
+      throw new Error(createdResult.error?.message ?? "Could not create server_order.");
+    }
+    serverOrderId = created.id;
+  }
+
+  const result = await provisionServerOrder({
+    serverOrderId,
+    userId: order.user_id,
+    planId: order.plan_id,
+    serverName,
+  });
+
+  if (result.ok) {
+    await db
+      .from("orders")
+      .update({ status: "active", updated_at: new Date().toISOString() })
+      .eq("id", order.id);
+  }
+
+  return { ...result, orderId: order.id, serverOrderId };
+}
