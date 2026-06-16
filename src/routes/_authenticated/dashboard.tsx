@@ -42,14 +42,14 @@ function isServerUsable(status: string) {
 
 function statusDescription(status: string) {
   const descriptions: Record<string, string> = {
-    pending_payment: "Paiement en attente avant lancement du provisioning.",
+    pending_payment: "Paiement en attente avant préparation du serveur.",
     paid: "Paiement reçu, préparation du serveur en attente.",
-    provisioning: "Provisioning en cours sur l’infrastructure XNT.",
-    installing: "Installation Pterodactyl en cours.",
+    provisioning: "Préparation en cours sur l’infrastructure XNT.",
+    installing: "Installation serveur en cours.",
     active: "Serveur prêt à être géré.",
     running: "Serveur en ligne et prêt à jouer.",
     failed: "Une erreur est survenue, le support peut vous aider.",
-    provisioning_failed: "Le provisioning a échoué, contactez le support ou attendez une relance.",
+    provisioning_failed: "La préparation a échoué, contactez le support ou attendez une relance.",
     suspended: "Serveur suspendu, vérifiez votre facturation ou contactez le support.",
     cancelled: "Abonnement annulé.",
   };
@@ -218,7 +218,7 @@ function ServerCard({
         lines.push(`SFTP : ${connection.sftpHost}:${connection.sftpPort}`);
       }
       if (connection?.sftpUsername) lines.push(`Utilisateur SFTP : ${connection.sftpUsername}`);
-      if (connection?.identifier) lines.push(`Identifiant : ${connection.identifier}`);
+      lines.push(`Identifiant serveur : ${s.id}`);
       if (lines.length === 0) {
         toast.warning("Informations de connexion indisponibles.");
         return;

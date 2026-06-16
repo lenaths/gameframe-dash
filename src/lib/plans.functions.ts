@@ -22,7 +22,7 @@ export const listPlans = createServerFn({ method: "GET" }).handler(async () => {
   return { plans: data ?? [] };
 });
 
-/** Returns the plan plus its variants enriched with egg variables fetched live from the panel. */
+/** Returns the plan plus its templates enriched with server variables fetched live. */
 export const getDeployOptions = createServerFn({ method: "POST" })
   .validator((d: unknown) => z.object({ planId: z.string().uuid() }).parse(d))
   .handler(async ({ data }) => {
@@ -70,18 +70,18 @@ export const getDeployOptions = createServerFn({ method: "POST" })
               combined,
             );
           const friendly = isNetwork
-            ? "Can't reach the Pterodactyl panel (network/DNS error). Verify PTERODACTYL_PANEL_URL is correct and the panel is online."
+            ? "L’infrastructure serveur est temporairement inaccessible. Réessayez dans quelques instants."
             : /\b5\d\d\b/.test(msg)
-              ? "Pterodactyl panel is unreachable right now (HTTP error from the panel host). Check that the panel is online."
+              ? "L’infrastructure serveur est temporairement indisponible."
               : /\b404\b/.test(msg)
-                ? `Egg ${v.nest_id}/${v.egg_id} not found on the panel. Update the plan's nest/egg IDs in admin.`
+                ? "Template serveur indisponible. Contactez le support."
                 : /\b401\b|\b403\b/.test(msg)
-                  ? "Pterodactyl rejected the API key. Check PTERODACTYL_APP_API_KEY permissions."
+                  ? "Service serveur temporairement indisponible."
                   : msg;
 
           return {
             index: i,
-            label: v.label || `Egg ${v.nest_id}/${v.egg_id}`,
+            label: v.label || "Template serveur",
             eggName: "",
             eggDescription: "",
             variables: [] as Awaited<ReturnType<typeof getEggDetails>>["variables"],

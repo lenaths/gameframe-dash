@@ -63,7 +63,8 @@ const BLOCKED_EDITOR_EXTENSIONS = new Set([
   ".db",
 ]);
 
-const WS_ERROR_MESSAGE = "Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.";
+const WS_ERROR_MESSAGE =
+  "Console temps réel inaccessible. Le service serveur est temporairement indisponible.";
 const SHOW_CONSOLE_DEBUG = import.meta.env.DEV;
 
 type ConsoleDebugState = {
@@ -270,7 +271,7 @@ function ServerDetail() {
                 <TabsTrigger value="files">Files</TabsTrigger>
                 <TabsTrigger value="backups">Backups</TabsTrigger>
                 <TabsTrigger value="network">Network</TabsTrigger>
-                <TabsTrigger value="startup">Startup &amp; Variables</TabsTrigger>
+                <TabsTrigger value="startup">Paramètres avancés</TabsTrigger>
                 <TabsTrigger value="settings">Settings</TabsTrigger>
                 <TabsTrigger value="info">SFTP &amp; Info</TabsTrigger>
               </TabsList>
@@ -400,7 +401,7 @@ function StatsTab({ orderId }: { orderId: string }) {
         <div>
           <h3 className="font-display text-xl font-semibold">Stats serveur</h3>
           <p className="text-sm text-muted-foreground">
-            Mesures live Pterodactyl, rafraîchies toutes les 5 secondes.
+            Mesures serveur en direct, rafraîchies toutes les 5 secondes.
           </p>
         </div>
         <Button size="sm" variant="outline" onClick={() => stats.refetch()}>
@@ -1314,7 +1315,7 @@ function BackupsTab({ orderId }: { orderId: string }) {
         <div>
           <h3 className="font-display text-lg font-semibold">Backups</h3>
           <p className="text-sm text-muted-foreground">
-            Créez et supprimez les sauvegardes Pterodactyl de ce serveur.
+            Créez et supprimez les sauvegardes de ce serveur.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -1459,7 +1460,7 @@ function NetworkTab({
   const makePrimary = useMutation({
     mutationFn: (allocationId: number) => setPrimary({ data: { orderId, allocationId } }),
     onSuccess: () => {
-      toast.success("Allocation principale mise à jour.");
+      toast.success("Port principal mis à jour.");
       qc.invalidateQueries({ queryKey: ["network", orderId] });
       qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
     },
@@ -1469,7 +1470,7 @@ function NetworkTab({
   const remove = useMutation({
     mutationFn: (allocationId: number) => removeAllocation({ data: { orderId, allocationId } }),
     onSuccess: () => {
-      toast.success("Allocation supprimée.");
+      toast.success("Port réseau supprimé.");
       qc.invalidateQueries({ queryKey: ["network", orderId] });
       qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
     },
@@ -1484,7 +1485,7 @@ function NetworkTab({
         <div>
           <h3 className="font-display text-lg font-semibold">Network</h3>
           <p className="text-sm text-muted-foreground">
-            Gérez les allocations réseau visibles par vos joueurs.
+            Gérez les ports réseau visibles par vos joueurs.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -1503,7 +1504,7 @@ function NetworkTab({
                     "",
                     `Je souhaite demander un port supplémentaire pour le serveur ${serverName}.`,
                     `Order id : ${orderId}`,
-                    `Identifier Pterodactyl : ${identifier ?? "indisponible"}`,
+                    `Identifiant serveur : ${orderId}`,
                   ].join("\n"),
                 } as never
               }
@@ -1515,7 +1516,7 @@ function NetworkTab({
       </div>
 
       {network.isLoading ? (
-        <div className="p-6 text-sm text-muted-foreground">Chargement des allocations…</div>
+        <div className="p-6 text-sm text-muted-foreground">Chargement des ports réseau…</div>
       ) : network.error ? (
         <div className="space-y-3 p-6">
           <div className="text-sm font-medium text-destructive">Network indisponible</div>
@@ -1527,9 +1528,9 @@ function NetworkTab({
       ) : allocations.length === 0 ? (
         <div className="p-8 text-center">
           <Network className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
-          <div className="font-display text-lg font-semibold">Aucune allocation</div>
+          <div className="font-display text-lg font-semibold">Aucun port réseau</div>
           <p className="mt-1 text-sm text-muted-foreground">
-            Aucune allocation réseau n’est disponible pour ce serveur.
+            Aucun port réseau n’est disponible pour ce serveur.
           </p>
         </div>
       ) : (
@@ -1555,7 +1556,7 @@ function NetworkTab({
                   </div>
                   {allocation.isPrivateSource && (
                     <p className="mt-1 text-xs text-muted-foreground">
-                      IP interne masquée, affichage public via alias/node.
+                      IP interne masquée, affichage public via l’adresse serveur.
                     </p>
                   )}
                 </div>
@@ -1576,7 +1577,7 @@ function NetworkTab({
                       variant="outline"
                       disabled={remove.isPending}
                       onClick={() => {
-                        if (confirm(`Supprimer l’allocation ${allocation.port} ?`)) {
+                        if (confirm(`Supprimer le port ${allocation.port} ?`)) {
                           remove.mutate(allocation.id);
                         }
                       }}
@@ -1634,7 +1635,7 @@ function InfoTab({
   };
 
   const copyAll = async () => {
-    const lines = buildConnectionCopyLines(connection);
+    const lines = buildConnectionCopyLines(connection, order.id);
     if (lines.length === 0) {
       toast.warning("Informations de connexion indisponibles.");
       return;
@@ -1664,7 +1665,7 @@ function InfoTab({
                       ``,
                       `J'ai besoin d'aide pour le serveur ${order.serverName}.`,
                       `Order id : ${order.id}`,
-                      `Identifier Pterodactyl : ${connection.identifier ?? "indisponible"}`,
+                      `Identifiant serveur : ${order.id}`,
                       `Etat actuel : ${order.status}`,
                     ].join("\n"),
                   } as never
@@ -1702,9 +1703,9 @@ function InfoTab({
             onCopy={() => copyValue("Utilisateur SFTP", connection.sftpUsername)}
           />
           <InfoLine
-            label="Identifier Pterodactyl"
-            value={connection.identifier ?? "—"}
-            onCopy={() => copyValue("Identifier", connection.identifier)}
+            label="Identifiant serveur"
+            value={order.id}
+            onCopy={() => copyValue("Identifiant serveur", order.id)}
           />
         </div>
         {connection.unavailableReason && (
@@ -1741,7 +1742,7 @@ function InfoLine({
   );
 }
 
-function buildConnectionCopyLines(connection: ConnectionInfo) {
+function buildConnectionCopyLines(connection: ConnectionInfo, xntServerId: string) {
   const lines: string[] = [];
   if (connection.address && connection.port) {
     lines.push(`Adresse : ${connection.address}:${connection.port}`);
@@ -1750,7 +1751,7 @@ function buildConnectionCopyLines(connection: ConnectionInfo) {
     lines.push(`SFTP : ${connection.sftpHost}:${connection.sftpPort}`);
   }
   if (connection.sftpUsername) lines.push(`Utilisateur SFTP : ${connection.sftpUsername}`);
-  if (connection.identifier) lines.push(`Identifiant : ${connection.identifier}`);
+  lines.push(`Identifiant serveur : ${xntServerId}`);
   return lines;
 }
 
@@ -1801,7 +1802,7 @@ function SettingsTab({
       <section className="xnt-card rounded-xl p-5">
         <h3 className="font-display text-lg font-semibold">Renommer le serveur</h3>
         <p className="mt-1 text-sm text-muted-foreground">
-          Le renommage utilise la Client API Pterodactyl si votre panel l’autorise.
+          Le renommage utilise le service serveur XNT si cette action est autorisée.
         </p>
         <div className="mt-4 space-y-3">
           <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={40} />
@@ -1821,8 +1822,8 @@ function SettingsTab({
           <div>
             <h3 className="font-display text-lg font-semibold">Réinstaller le serveur</h3>
             <p className="mt-1 text-sm text-muted-foreground">
-              Action destructive : selon l’egg, les fichiers peuvent être réinitialisés et le script
-              d’installation relancé.
+              Action destructive : selon le template serveur, les fichiers peuvent être
+              réinitialisés et le script d’installation relancé.
             </p>
           </div>
         </div>
@@ -1842,7 +1843,7 @@ function SettingsTab({
             onClick={() => {
               if (
                 confirm(
-                  `Réinstaller ${serverName} ? Cette action peut réinitialiser les fichiers selon l'egg.`,
+                  `Réinstaller ${serverName} ? Cette action peut réinitialiser les fichiers selon le template serveur.`,
                 )
               ) {
                 reinstall.mutate();
@@ -1855,19 +1856,19 @@ function SettingsTab({
       </section>
 
       <section className="xnt-card rounded-xl p-5 lg:col-span-2">
-        <h3 className="font-display text-lg font-semibold">Version / Egg</h3>
+        <h3 className="font-display text-lg font-semibold">Version / Template serveur</h3>
         <p className="mt-1 text-sm text-muted-foreground">
-          Le projet supporte déjà les variantes de plans via <code>allowed_eggs</code>, mais changer
-          l’egg d’un serveur existant touche l’image Docker, la commande startup et les variables.
-          Pour éviter de casser le provisioning actuel, cette action sera ajoutée après validation
-          d’un flow de migration dédié.
+          Le projet supporte déjà plusieurs templates de serveur, mais changer le template d’un
+          serveur existant touche l’image runtime, la commande de lancement et les paramètres. Pour
+          éviter de casser la préparation actuelle, cette action sera ajoutée après validation d’un
+          parcours de migration dédié.
         </p>
         <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-primary/15 bg-background/35 p-4">
           <Badge variant="outline" className="border-accent/40 bg-accent/10 text-accent">
             Bientôt disponible
           </Badge>
           <span className="text-sm text-muted-foreground">
-            Serveur actuel : {identifier ?? "identifier indisponible"}
+            Changement de template prévu dans une prochaine version.
           </span>
         </div>
       </section>
@@ -1875,7 +1876,7 @@ function SettingsTab({
   );
 }
 
-/* ---------------- Startup & Variables ---------------- */
+/* ---------------- Advanced Settings ---------------- */
 
 function StartupTab({ orderId }: { orderId: string }) {
   const fetchStartup = useServerFn(getServerStartup);
@@ -1946,9 +1947,9 @@ function StartupTab({ orderId }: { orderId: string }) {
     <div className="xnt-card space-y-6 rounded-xl p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="font-display text-lg font-semibold">Startup & Variables</h3>
+          <h3 className="font-display text-lg font-semibold">Paramètres avancés</h3>
           <p className="text-sm text-muted-foreground mt-1">
-            Modifiez uniquement les variables autorisées par l’egg Pterodactyl.
+            Modifiez uniquement les paramètres autorisés pour ce template serveur.
           </p>
         </div>
         <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">
@@ -1960,8 +1961,8 @@ function StartupTab({ orderId }: { orderId: string }) {
 
       {reinstall && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
-          La sauvegarde avec réinstallation peut réinitialiser les fichiers selon l’egg. Créez un
-          backup avant de continuer.
+          La sauvegarde avec réinstallation peut réinitialiser les fichiers selon le template
+          serveur. Créez une sauvegarde avant de continuer.
         </div>
       )}
 

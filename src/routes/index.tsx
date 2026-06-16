@@ -15,7 +15,7 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Premium gaming server hosting with Stripe checkout, Pterodactyl provisioning, NVMe storage and a modern dashboard.",
+          "Premium gaming server hosting with Stripe checkout, automatic XNT server preparation, NVMe storage and a modern dashboard.",
       },
     ],
   }),
@@ -50,15 +50,15 @@ function Home() {
           >
             <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary shadow-[0_0_26px_rgba(0,191,255,0.12)]">
               <span className="h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_16px_rgba(0,191,255,0.9)]" />
-              Stripe paid, Pterodactyl provisioned, ready to play
+              Stripe paid, XNT prepared, ready to play
             </div>
             <h1 className="font-display text-5xl font-bold leading-[1.04] sm:text-6xl lg:text-7xl">
               Premium game servers,
               <span className="block xnt-text-glow">deployed at neon speed.</span>
             </h1>
             <p className="mt-6 max-w-2xl text-lg leading-8 text-muted-foreground">
-              XNT Servers combines a polished SaaS dashboard with automatic Pterodactyl provisioning
-              for Minecraft, ARK, Conan Exiles and Garry's Mod communities.
+              XNT Servers combines a polished SaaS dashboard with automatic server preparation for
+              Minecraft, ARK, Conan Exiles and Garry's Mod communities.
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Button
@@ -113,7 +113,7 @@ function Home() {
               {[
                 ["CPU", "Ryzen"],
                 ["DDoS", "Edge"],
-                ["Panel", "Live"],
+                ["Console", "Live"],
               ].map(([label, value]) => (
                 <div
                   key={label}
@@ -163,7 +163,7 @@ function Home() {
             [
               Zap,
               "Provisioning automatique",
-              "Paiement validé, order activée, serveur créé automatiquement via Pterodactyl.",
+              "Paiement validé, commande activée, serveur préparé automatiquement sur l’infrastructure XNT.",
             ],
             [
               Shield,
@@ -178,7 +178,7 @@ function Home() {
             [
               Cpu,
               "Hardware gaming",
-              "CPU haute fréquence, limites claires et allocation automatique disponible.",
+              "CPU haute fréquence, limites claires et ports réseau préparés automatiquement.",
             ],
             [
               HardDrive,

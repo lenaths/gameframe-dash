@@ -248,6 +248,21 @@ function assertEditableFilePath(path: string) {
   return normalized;
 }
 
+function publicServerServiceError(
+  error: unknown,
+  fallback = "Service serveur temporairement indisponible.",
+) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /pterodactyl|wings|panel|api key|application api|client api|egg|nest|node|allocation|identifier|uuid/i.test(
+      message,
+    )
+  ) {
+    return fallback;
+  }
+  return message;
+}
+
 function normalizePterodactylSocketUrl(socket: string, panelBaseUrl: string) {
   if (!socket?.trim()) throw new Error("Pterodactyl did not return a websocket URL.");
 
@@ -597,7 +612,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
       return {
         order,
         live: null,
-        warning: err instanceof Error ? err.message : "Pterodactyl live data unavailable.",
+        warning: publicServerServiceError(err, "Données serveur en direct indisponibles."),
       };
     }
   });
@@ -624,7 +639,7 @@ export const getServerWebsocket = createServerFn({ method: "POST" })
       };
       const wsResponse = parseWebsocketResponse(res);
       if (!wsResponse.token || !wsResponse.socket) {
-        throw new Error("Pterodactyl websocket response is missing token or socket.");
+        throw new Error("Console temps réel temporairement indisponible.");
       }
 
       const inspected = inspectPterodactylSocketUrl(wsResponse.socket);
@@ -668,7 +683,10 @@ export const getServerWebsocket = createServerFn({ method: "POST" })
         identifier,
         error: (e as Error).message,
       });
-      return { ok: false as const, error: (e as Error).message };
+      return {
+        ok: false as const,
+        error: publicServerServiceError(e, "Console temps réel temporairement indisponible."),
+      };
     }
   });
 
@@ -722,7 +740,7 @@ export const listServerFiles = createServerFn({ method: "POST" })
         error: null as string | null,
       };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = publicServerServiceError(err);
       return { directory: data.directory, files: [], error: msg };
     }
   });
@@ -1017,9 +1035,7 @@ export const renameServer = createServerFn({ method: "POST" })
         body: JSON.stringify({ name: data.name }),
       });
     } catch (error) {
-      throw new Error(
-        `Renommage indisponible via la Client API Pterodactyl pour ce serveur: ${(error as Error).message}`,
-      );
+      throw new Error(publicServerServiceError(error, "Renommage indisponible pour ce serveur."));
     }
     const { error } = await context.supabase
       .from("server_orders")

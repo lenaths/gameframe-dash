@@ -126,9 +126,9 @@ export function serverReadyEmail(input: {
     subject: `Serveur prêt - ${input.serverName}`,
     html: layout(
       "Serveur prêt",
-      `<p>Votre serveur <strong>${escapeHtml(input.serverName)}</strong> est prêt.</p><p>Identifiant Pterodactyl : <strong>${escapeHtml(input.identifier ?? "indisponible")}</strong></p>`,
+      `<p>Votre serveur <strong>${escapeHtml(input.serverName)}</strong> est prêt.</p><p>Vous pouvez retrouver ses informations de connexion dans votre dashboard XNTServers.</p>`,
     ),
-    text: `Votre serveur ${input.serverName} est prêt.\nIdentifiant Pterodactyl : ${input.identifier ?? "indisponible"}`,
+    text: `Votre serveur ${input.serverName} est prêt.\nVous pouvez retrouver ses informations de connexion dans votre dashboard XNTServers.`,
   };
 }
 
@@ -139,12 +139,12 @@ export function provisioningFailedEmail(input: {
 }) {
   return {
     to: input.to,
-    subject: `Provisioning échoué - ${input.serverName}`,
+    subject: `Préparation serveur échouée - ${input.serverName}`,
     html: layout(
-      "Provisioning échoué",
-      `<p>Le provisioning du serveur <strong>${escapeHtml(input.serverName)}</strong> a échoué.</p><p style="color:#fca5a5">${escapeHtml(input.error)}</p><p>Notre équipe peut relancer l'opération depuis l'administration.</p>`,
+      "Préparation serveur échouée",
+      `<p>La préparation du serveur <strong>${escapeHtml(input.serverName)}</strong> a échoué.</p><p style="color:#fca5a5">${escapeHtml(input.error)}</p><p>Notre équipe peut relancer l'opération depuis l'administration.</p>`,
     ),
-    text: `Le provisioning du serveur ${input.serverName} a échoué.\n${input.error}`,
+    text: `La préparation du serveur ${input.serverName} a échoué.\n${input.error}`,
   };
 }
 

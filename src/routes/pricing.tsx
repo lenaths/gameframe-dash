@@ -60,8 +60,7 @@ function Pricing() {
             Pick your <span className="xnt-text-glow">neon stack</span>.
           </h1>
           <p className="text-muted-foreground mt-3 max-w-xl">
-            Hardware-backed game servers with Stripe checkout and automatic Pterodactyl
-            provisioning.
+            Hardware-backed game servers with Stripe checkout and automatic XNT preparation.
           </p>
           <div className="mt-8 flex flex-wrap gap-2">
             {games.map((g) => (
@@ -101,7 +100,7 @@ function Pricing() {
                     `${p.cpu_percent}% Ryzen 7950X`,
                     `${(p.disk_mb / 1024).toFixed(0)} GB NVMe SSD`,
                     "DDoS protection",
-                    "Full Pterodactyl panel",
+                    "Console XNT complète",
                     "Daily backups",
                   ].map((f) => (
                     <li key={f} className="flex items-center gap-2 text-muted-foreground">
