@@ -298,14 +298,23 @@ type AdminMonitoring = {
 type AdminAnomaly = {
   id: string;
   type: string;
-  area: "stripe" | "pterodactyl";
+  area: "stripe" | "pterodactyl" | "notifications";
+  severity: "critical" | "important" | "info";
   status: string;
   date: string;
   message: string;
   recommendation: string;
-  repairAction: "retry_provisioning" | "sync_server" | "none";
+  repairAction:
+    | "retry_provisioning"
+    | "sync_server"
+    | "reprocess_stripe_event"
+    | "regenerate_notification"
+    | "none";
   orderId?: string | null;
   serverOrderId?: string | null;
+  stripeEventId?: string | null;
+  activityLogId?: string | null;
+  invoiceId?: string | null;
 };
 
 function AdminMonitoringSection({ data }: { data?: AdminMonitoring }) {
@@ -344,6 +353,9 @@ function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }
           repairAction: anomaly.repairAction,
           orderId: anomaly.orderId,
           serverOrderId: anomaly.serverOrderId,
+          stripeEventId: anomaly.stripeEventId,
+          activityLogId: anomaly.activityLogId,
+          invoiceId: anomaly.invoiceId,
         },
       }),
     onSuccess: () => {
@@ -357,14 +369,25 @@ function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }
 
   return (
     <section>
-      <SectionTitle
-        icon={<RefreshCw className="h-5 w-5" />}
-        title={`Reconciliation (${anomalies.length})`}
-      />
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <SectionTitle
+          icon={<RefreshCw className="h-5 w-5" />}
+          title={`Reconciliation (${anomalies.length})`}
+        />
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => qc.invalidateQueries({ queryKey: ["admin-reconciliation"] })}
+        >
+          <RefreshCw className="mr-2 h-4 w-4" />
+          Rafraîchir
+        </Button>
+      </div>
       <TableShell empty={anomalies.length === 0 ? "Aucune anomalie détectée." : null}>
         <Table>
           <TableHeader className="bg-surface-2">
             <TableRow>
+              <TableHead>Priorité</TableHead>
               <TableHead>Area</TableHead>
               <TableHead>Type</TableHead>
               <TableHead>Status</TableHead>
@@ -377,6 +400,9 @@ function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }
           <TableBody>
             {anomalies.map((anomaly) => (
               <TableRow key={anomaly.id}>
+                <TableCell>
+                  <SeverityBadge severity={anomaly.severity} />
+                </TableCell>
                 <TableCell>
                   <Badge variant="outline" className="capitalize">
                     {anomaly.area}
@@ -401,7 +427,7 @@ function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }
                       disabled={repair.isPending}
                       onClick={() => repair.mutate(anomaly)}
                     >
-                      Repair
+                      {repairLabel(anomaly.repairAction)}
                     </Button>
                   )}
                 </TableCell>
@@ -1198,6 +1224,35 @@ function StatusBadge({ status }: { status: string }) {
       {status.replaceAll("_", " ")}
     </Badge>
   );
+}
+
+function SeverityBadge({ severity }: { severity: AdminAnomaly["severity"] }) {
+  const label = {
+    critical: "Critique",
+    important: "Important",
+    info: "Info",
+  }[severity];
+  const className = {
+    critical: "border-destructive/50 bg-destructive/15 text-destructive",
+    important: "border-yellow-400/50 bg-yellow-400/10 text-yellow-200",
+    info: "border-primary/40 bg-primary/10 text-primary",
+  }[severity];
+  return (
+    <Badge variant="outline" className={className}>
+      {label}
+    </Badge>
+  );
+}
+
+function repairLabel(action: AdminAnomaly["repairAction"]) {
+  const labels = {
+    retry_provisioning: "Retry provisioning",
+    sync_server: "Sync server",
+    reprocess_stripe_event: "Reprocess event",
+    regenerate_notification: "Regenerate",
+    none: "Manual",
+  };
+  return labels[action];
 }
 
 function StripeLink({ id, type }: { id: string | null; type: "payment" | "invoice" }) {

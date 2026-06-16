@@ -25,6 +25,11 @@ type StripeEventRow = {
   processed_at: string | null;
 };
 
+type StoredStripeEventRow = StripeEventRow & {
+  payload: Stripe.Event;
+  type: string;
+};
+
 type OrderRow = {
   id: string;
   user_id: string;
@@ -102,6 +107,34 @@ export async function handleStripeWebhookRequest(request: Request) {
     console.error("[Stripe] Webhook processing failed", error);
     return Response.json({ error: "Stripe webhook processing failed." }, { status: 500 });
   }
+}
+
+export async function reprocessStoredStripeEvent(stripeEventId: string) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const db = supabaseAdmin as unknown as SupabaseAny;
+  const { data, error } = await db
+    .from("stripe_events")
+    .select("stripe_event_id, type, payload, processed_at")
+    .eq("stripe_event_id", stripeEventId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  const stored = data as StoredStripeEventRow | null;
+  if (!stored) throw new Error("Stripe event introuvable.");
+  if (stored.processed_at) {
+    console.info(
+      `[Stripe] Reprocess skipped for ${stripeEventId}: already processed at ${stored.processed_at}.`,
+    );
+    return { ok: true, skipped: true, processed: true };
+  }
+
+  console.warn(`[Stripe] Admin reprocessing stored event ${stripeEventId} (${stored.type}).`);
+  await handleStripeEvent(db, stored.payload);
+  const { error: processedError } = await db
+    .from("stripe_events")
+    .update({ processed_at: new Date().toISOString() })
+    .eq("stripe_event_id", stripeEventId);
+  if (processedError) throw new Error(processedError.message);
+  return { ok: true, reprocessed: true };
 }
 
 async function handleStripeEvent(db: SupabaseAny, event: Stripe.Event) {

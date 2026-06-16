@@ -16,6 +16,9 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   in: (column: string, values: unknown[]) => SupabaseQuery<T>;
   order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
   limit: (count: number) => SupabaseQuery<T>;
+  insert: (values: unknown) => SupabaseQuery<T>;
+  update: (values: unknown) => SupabaseQuery<T>;
+  maybeSingle: () => SupabaseQuery<T>;
 };
 
 type ProfileRef = { id: string; email: string | null };
@@ -75,6 +78,45 @@ type InvoiceDetailRow = {
   stripe_invoice_pdf: string | null;
   created_at: string;
 };
+type ActivityLogRow = {
+  id: string;
+  user_id: string;
+  order_id: string | null;
+  server_order_id: string | null;
+  action: string;
+  description: string | null;
+  created_at: string;
+};
+type InvoiceRow = {
+  id: string;
+  user_id: string;
+  invoice_number: string;
+  status: string;
+  total_cents: number;
+  currency: string;
+  created_at: string;
+};
+type ReconciliationAnomaly = {
+  id: string;
+  type: string;
+  area: "stripe" | "pterodactyl" | "notifications";
+  severity: "critical" | "important" | "info";
+  status: string;
+  date: string;
+  message: string;
+  recommendation: string;
+  repairAction:
+    | "retry_provisioning"
+    | "sync_server"
+    | "reprocess_stripe_event"
+    | "regenerate_notification"
+    | "none";
+  orderId?: string | null;
+  serverOrderId?: string | null;
+  stripeEventId?: string | null;
+  activityLogId?: string | null;
+  invoiceId?: string | null;
+};
 
 async function getProfilesById(userIds: Array<string | null | undefined>) {
   const ids = [...new Set(userIds.filter((id): id is string => Boolean(id)))];
@@ -96,6 +138,178 @@ async function assertAdmin(userId: string) {
     .eq("role", "admin")
     .maybeSingle();
   if (!data) throw new Error("Admin access required.");
+}
+
+async function writeAdminAuditLog(input: {
+  actorUserId: string;
+  action: string;
+  entityType: string;
+  entityId?: string | null;
+  after?: Record<string, unknown>;
+}) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const db = supabaseAdmin as unknown as SupabaseAny;
+  const { error } = await db.from("audit_logs").insert({
+    actor_user_id: input.actorUserId,
+    entity_type: input.entityType,
+    entity_id: input.entityId ?? null,
+    action: input.action,
+    after: input.after ?? {},
+  });
+  if (error) {
+    console.warn(`[Admin] audit log failed for ${input.action}: ${error.message}`);
+  }
+}
+
+async function syncServerOrderStatus(serverOrderId: string, actorUserId: string) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { ptero, assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
+  assertPteroAppConfigured();
+
+  const { data: order, error: orderError } = await supabaseAdmin
+    .from("server_orders")
+    .select("id, pterodactyl_server_id")
+    .eq("id", serverOrderId)
+    .maybeSingle();
+  if (orderError || !order?.pterodactyl_server_id) {
+    throw new Error(orderError?.message ?? "Server order has no Pterodactyl server id.");
+  }
+
+  try {
+    const server = (await ptero.app(`/servers/${order.pterodactyl_server_id}`)) as {
+      attributes: { status?: string | null };
+    };
+    const status =
+      server.attributes.status === null
+        ? "active"
+        : server.attributes.status === "suspended"
+          ? "suspended"
+          : server.attributes.status === "install_failed" ||
+              server.attributes.status === "restore_failed"
+            ? "failed"
+            : "provisioning";
+
+    const { error: updateError } = await supabaseAdmin
+      .from("server_orders")
+      .update({
+        status,
+        error_message: status === "failed" ? "Pterodactyl install failed." : null,
+      })
+      .eq("id", serverOrderId);
+    if (updateError) throw new Error(updateError.message);
+    await writeAdminAuditLog({
+      actorUserId,
+      action: "admin.sync_server_status",
+      entityType: "server_order",
+      entityId: serverOrderId,
+      after: { status, pterodactyl_server_id: order.pterodactyl_server_id },
+    });
+    return { ok: true, status };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown Pterodactyl sync error.";
+    const missing = message.includes("404") || message.toLowerCase().includes("not found");
+    if (!missing) throw error;
+    const { error: updateError } = await supabaseAdmin
+      .from("server_orders")
+      .update({
+        status: "failed",
+        error_message: "Pterodactyl server introuvable lors de la réconciliation admin.",
+      })
+      .eq("id", serverOrderId);
+    if (updateError) throw new Error(updateError.message);
+    await writeAdminAuditLog({
+      actorUserId,
+      action: "admin.sync_server_missing",
+      entityType: "server_order",
+      entityId: serverOrderId,
+      after: { status: "failed", pterodactyl_server_id: order.pterodactyl_server_id },
+    });
+    return { ok: true, status: "failed", missing: true };
+  }
+}
+
+function formatNotificationMoney(cents: number, currency: string) {
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: currency || "EUR",
+  }).format(cents / 100);
+}
+
+async function regenerateNotificationRepair(input: {
+  actorUserId: string;
+  activityLogId: string | null;
+  invoiceId: string | null;
+}) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const db = supabaseAdmin as unknown as SupabaseAny;
+  if (input.activityLogId) {
+    const { data, error } = await db
+      .from("activity_logs")
+      .select("id, user_id, order_id, server_order_id, action, description, created_at")
+      .eq("id", input.activityLogId)
+      .maybeSingle();
+    const log = data as ActivityLogRow | null;
+    if (error || !log) throw new Error(error?.message ?? "Activity log introuvable.");
+    const map: Record<string, { title: string; type: string }> = {
+      payment_received: { title: "Paiement reçu", type: "payment" },
+      provisioning_started: { title: "Provisioning démarré", type: "provisioning" },
+      provisioning_succeeded: { title: "Serveur prêt", type: "server_ready" },
+      provisioning_failed: { title: "Erreur provisioning", type: "provisioning_failed" },
+      "ticket.staff_replied": { title: "Ticket répondu", type: "support" },
+    };
+    const item = map[log.action] ?? { title: log.action, type: "activity" };
+    const href = log.server_order_id
+      ? `/manage/${log.server_order_id}`
+      : log.action.startsWith("ticket.")
+        ? "/support"
+        : log.order_id
+          ? "/billing"
+          : "/dashboard";
+    const { error: insertError } = await db.from("notifications").insert({
+      user_id: log.user_id,
+      source_activity_log_id: log.id,
+      type: item.type,
+      title: item.title,
+      body: log.description,
+      href,
+      created_at: log.created_at,
+    });
+    if (insertError && insertError.code !== "23505") throw new Error(insertError.message);
+    await writeAdminAuditLog({
+      actorUserId: input.actorUserId,
+      action: "admin.reconciliation.regenerate_notification",
+      entityType: "activity_log",
+      entityId: input.activityLogId,
+      after: { inserted: !insertError },
+    });
+    return { ok: true, duplicate: insertError?.code === "23505" };
+  }
+  if (!input.invoiceId) throw new Error("Missing activity log or invoice id.");
+  const { data, error } = await db
+    .from("invoices")
+    .select("id, user_id, invoice_number, status, total_cents, currency, created_at")
+    .eq("id", input.invoiceId)
+    .maybeSingle();
+  const invoice = data as InvoiceRow | null;
+  if (error || !invoice) throw new Error(error?.message ?? "Invoice introuvable.");
+  const { error: insertError } = await db.from("notifications").insert({
+    user_id: invoice.user_id,
+    source_invoice_id: invoice.id,
+    type: "invoice",
+    title: "Facture créée",
+    body: `${invoice.invoice_number} · ${formatNotificationMoney(invoice.total_cents, invoice.currency)} · ${invoice.status}`,
+    href: "/billing",
+    created_at: invoice.created_at,
+  });
+  if (insertError && insertError.code !== "23505") throw new Error(insertError.message);
+  await writeAdminAuditLog({
+    actorUserId: input.actorUserId,
+    action: "admin.reconciliation.regenerate_notification",
+    entityType: "invoice",
+    entityId: input.invoiceId,
+    after: { inserted: !insertError },
+  });
+  return { ok: true, duplicate: insertError?.code === "23505" };
 }
 
 export const adminListAll = createServerFn({ method: "GET" })
@@ -377,38 +591,7 @@ export const adminSyncServerStatus = createServerFn({ method: "POST" })
   .validator((d: unknown) => z.object({ serverOrderId: z.string().uuid() }).parse(d))
   .handler(async ({ data, context }) => {
     await assertAdmin(context.userId);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { ptero, assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
-    assertPteroAppConfigured();
-
-    const { data: order, error: orderError } = await supabaseAdmin
-      .from("server_orders")
-      .select("id, pterodactyl_server_id")
-      .eq("id", data.serverOrderId)
-      .maybeSingle();
-    if (orderError || !order?.pterodactyl_server_id) {
-      throw new Error(orderError?.message ?? "Server order has no Pterodactyl server id.");
-    }
-
-    const server = (await ptero.app(`/servers/${order.pterodactyl_server_id}`)) as {
-      attributes: { status?: string | null };
-    };
-    const status =
-      server.attributes.status === null
-        ? "active"
-        : server.attributes.status === "suspended"
-          ? "suspended"
-          : server.attributes.status === "install_failed" ||
-              server.attributes.status === "restore_failed"
-            ? "failed"
-            : "provisioning";
-
-    const { error: updateError } = await supabaseAdmin
-      .from("server_orders")
-      .update({ status, error_message: status === "failed" ? "Pterodactyl install failed." : null })
-      .eq("id", data.serverOrderId);
-    if (updateError) throw new Error(updateError.message);
-    return { ok: true, status };
+    return syncServerOrderStatus(data.serverOrderId, context.userId);
   });
 
 export const adminGetMonitoring = createServerFn({ method: "GET" })
@@ -476,6 +659,9 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
       { data: servers, error: serversError },
       { data: invoices, error: invoicesError },
       { data: payments, error: paymentsError },
+      { data: stripeEvents, error: stripeEventsError },
+      { data: activityLogs, error: activityLogsError },
+      { data: notifications, error: notificationsError },
     ] = await Promise.all([
       db
         .from("orders")
@@ -499,8 +685,37 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
         .select("id, order_id, status, stripe_invoice_id, stripe_payment_intent_id, created_at")
         .order("created_at", { ascending: false })
         .limit(200),
+      db
+        .from("stripe_events")
+        .select("id, stripe_event_id, type, processed_at, created_at")
+        .order("created_at", { ascending: false })
+        .limit(200),
+      db
+        .from("activity_logs")
+        .select("id, user_id, action, created_at")
+        .in("action", [
+          "payment_received",
+          "provisioning_started",
+          "provisioning_succeeded",
+          "provisioning_failed",
+          "ticket.staff_replied",
+        ])
+        .order("created_at", { ascending: false })
+        .limit(200),
+      db
+        .from("notifications")
+        .select("id, source_activity_log_id, source_invoice_id, created_at")
+        .order("created_at", { ascending: false })
+        .limit(500),
     ]);
-    const firstError = ordersError ?? serversError ?? invoicesError ?? paymentsError;
+    const firstError =
+      ordersError ??
+      serversError ??
+      invoicesError ??
+      paymentsError ??
+      stripeEventsError ??
+      activityLogsError ??
+      notificationsError;
     if (firstError) throw new Error(firstError.message);
 
     const serverRows = (servers ?? []) as ServerLinkRow[];
@@ -531,18 +746,17 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
     const invoicesByStripe = new Set(
       invoiceRows.map((invoice) => invoice.stripe_invoice_id).filter(Boolean),
     );
-    const anomalies: Array<{
-      id: string;
-      type: string;
-      area: "stripe" | "pterodactyl";
-      status: string;
-      date: string;
-      message: string;
-      recommendation: string;
-      repairAction: "retry_provisioning" | "sync_server" | "none";
-      orderId?: string | null;
-      serverOrderId?: string | null;
-    }> = [];
+    const notificationRows = (notifications ?? []) as Array<{
+      source_activity_log_id: string | null;
+      source_invoice_id: string | null;
+    }>;
+    const notifiedActivities = new Set(
+      notificationRows.map((notification) => notification.source_activity_log_id).filter(Boolean),
+    );
+    const notifiedInvoices = new Set(
+      notificationRows.map((notification) => notification.source_invoice_id).filter(Boolean),
+    );
+    const anomalies: ReconciliationAnomaly[] = [];
 
     for (const order of (orders ?? []) as Array<{
       id: string;
@@ -556,6 +770,7 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
           id: `order-${order.id}`,
           type: "paid_order_without_server",
           area: "stripe",
+          severity: "critical",
           status: "repairable",
           date: order.created_at,
           message: `Order ${order.id.slice(0, 8)} is paid but has no server_order.`,
@@ -569,6 +784,7 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
           id: `subscription-${order.id}`,
           type: "incomplete_subscription",
           area: "stripe",
+          severity: "important",
           status: "manual_review",
           date: order.created_at,
           message: `Order ${order.id.slice(0, 8)} has no stripe_subscription_id.`,
@@ -589,6 +805,7 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
           id: `invoice-${invoice.id}`,
           type: "invoice_without_payment",
           area: "stripe",
+          severity: "important",
           status: "manual_review",
           date: invoice.created_at,
           message: `Invoice ${invoice.id.slice(0, 8)} has no matching payment.`,
@@ -605,6 +822,7 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
           id: `payment-${payment.id}`,
           type: "payment_without_invoice",
           area: "stripe",
+          severity: "important",
           status: "manual_review",
           date: payment.created_at,
           message: `Payment ${payment.id.slice(0, 8)} has no matching invoice.`,
@@ -628,6 +846,7 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
           id: `server-missing-${server.id}`,
           type: "server_order_without_pterodactyl",
           area: "pterodactyl",
+          severity: "critical",
           status: "repairable",
           date:
             (server as ServerLinkRow & { created_at?: string }).created_at ??
@@ -643,6 +862,7 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
           id: `server-stuck-${server.id}`,
           type: "provisioning_stuck",
           area: "pterodactyl",
+          severity: "important",
           status: "repairable",
           date:
             (server as ServerLinkRow & { created_at?: string }).created_at ??
@@ -655,6 +875,123 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
       }
     }
 
+    const { ptero, assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
+    try {
+      assertPteroAppConfigured();
+      for (const server of serverRows.filter((row) => row.pterodactyl_server_id).slice(0, 50)) {
+        try {
+          await ptero.app(`/servers/${server.pterodactyl_server_id}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown Pterodactyl error.";
+          if (message.includes("404") || message.toLowerCase().includes("not found")) {
+            anomalies.push({
+              id: `ptero-missing-${server.id}`,
+              type: "pterodactyl_server_missing",
+              area: "pterodactyl",
+              severity: "critical",
+              status: "repairable",
+              date:
+                (server as ServerLinkRow & { created_at?: string }).created_at ??
+                new Date().toISOString(),
+              message: `Pterodactyl server ${server.pterodactyl_server_id} is referenced but not found.`,
+              recommendation: "Sync server status to mark it failed, then review before retry.",
+              repairAction: "sync_server",
+              orderId: server.order_id,
+              serverOrderId: server.id,
+            });
+          } else {
+            anomalies.push({
+              id: `ptero-check-${server.id}`,
+              type: "pterodactyl_check_failed",
+              area: "pterodactyl",
+              severity: "info",
+              status: "manual_review",
+              date:
+                (server as ServerLinkRow & { created_at?: string }).created_at ??
+                new Date().toISOString(),
+              message: `Could not verify Pterodactyl server ${server.pterodactyl_server_id}: ${message}`,
+              recommendation: "Check Pterodactyl Application API connectivity.",
+              repairAction: "none",
+              serverOrderId: server.id,
+            });
+          }
+        }
+      }
+    } catch (error) {
+      anomalies.push({
+        id: "pterodactyl-config-check",
+        type: "pterodactyl_check_unavailable",
+        area: "pterodactyl",
+        severity: "info",
+        status: "manual_review",
+        date: new Date().toISOString(),
+        message: error instanceof Error ? error.message : "Pterodactyl check unavailable.",
+        recommendation: "Verify server-only Pterodactyl Application API configuration.",
+        repairAction: "none",
+      });
+    }
+
+    for (const event of (stripeEvents ?? []) as Array<{
+      stripe_event_id: string;
+      type: string;
+      processed_at: string | null;
+      created_at: string;
+    }>) {
+      if (!event.processed_at) {
+        anomalies.push({
+          id: `stripe-event-${event.stripe_event_id}`,
+          type: "stripe_event_unprocessed",
+          area: "stripe",
+          severity: "critical",
+          status: "repairable",
+          date: event.created_at,
+          message: `Stripe event ${event.stripe_event_id} (${event.type}) is stored but unprocessed.`,
+          recommendation: "Reprocess only if processed_at is still null.",
+          repairAction: "reprocess_stripe_event",
+          stripeEventId: event.stripe_event_id,
+        });
+      }
+    }
+
+    for (const log of (activityLogs ?? []) as Array<{
+      id: string;
+      action: string;
+      created_at: string;
+    }>) {
+      if (!notifiedActivities.has(log.id)) {
+        anomalies.push({
+          id: `notification-activity-${log.id}`,
+          type: "notification_missing_activity",
+          area: "notifications",
+          severity: "info",
+          status: "repairable",
+          date: log.created_at,
+          message: `Notification missing for activity ${log.action}.`,
+          recommendation: "Regenerate the notification from the activity log.",
+          repairAction: "regenerate_notification",
+          activityLogId: log.id,
+        });
+      }
+    }
+
+    for (const invoice of invoiceRows.filter((row) => row.status === "paid")) {
+      if (!notifiedInvoices.has(invoice.id)) {
+        anomalies.push({
+          id: `notification-invoice-${invoice.id}`,
+          type: "notification_missing_invoice",
+          area: "notifications",
+          severity: "info",
+          status: "repairable",
+          date: invoice.created_at,
+          message: `Notification missing for invoice ${invoice.id.slice(0, 8)}.`,
+          recommendation: "Regenerate the invoice notification.",
+          repairAction: "regenerate_notification",
+          invoiceId: invoice.id,
+          orderId: invoice.order_id,
+        });
+      }
+    }
+
     return { anomalies };
   });
 
@@ -663,9 +1000,17 @@ export const adminRepairReconciliation = createServerFn({ method: "POST" })
   .validator((d: unknown) =>
     z
       .object({
-        repairAction: z.enum(["retry_provisioning", "sync_server"]),
+        repairAction: z.enum([
+          "retry_provisioning",
+          "sync_server",
+          "reprocess_stripe_event",
+          "regenerate_notification",
+        ]),
         orderId: z.string().uuid().optional().nullable(),
         serverOrderId: z.string().uuid().optional().nullable(),
+        stripeEventId: z.string().optional().nullable(),
+        activityLogId: z.string().uuid().optional().nullable(),
+        invoiceId: z.string().uuid().optional().nullable(),
       })
       .parse(d),
   )
@@ -674,39 +1019,40 @@ export const adminRepairReconciliation = createServerFn({ method: "POST" })
     if (data.repairAction === "retry_provisioning") {
       if (!data.orderId) throw new Error("Missing order id for provisioning repair.");
       const { provisionPaidOrder } = await import("@/lib/provisioning.server");
-      return provisionPaidOrder(data.orderId, {
+      const result = await provisionPaidOrder(data.orderId, {
         actorUserId: context.userId,
         source: "admin_reconciliation",
       });
+      await writeAdminAuditLog({
+        actorUserId: context.userId,
+        action: "admin.reconciliation.retry_provisioning",
+        entityType: "order",
+        entityId: data.orderId,
+        after: { result },
+      });
+      return result;
+    }
+    if (data.repairAction === "reprocess_stripe_event") {
+      if (!data.stripeEventId) throw new Error("Missing Stripe event id for reprocess repair.");
+      const { reprocessStoredStripeEvent } = await import("@/lib/stripe-webhook.server");
+      const result = await reprocessStoredStripeEvent(data.stripeEventId);
+      await writeAdminAuditLog({
+        actorUserId: context.userId,
+        action: "admin.reconciliation.reprocess_stripe_event",
+        entityType: "stripe_event",
+        entityId: data.stripeEventId,
+        after: result,
+      });
+      return result;
+    }
+    if (data.repairAction === "regenerate_notification") {
+      const result = await regenerateNotificationRepair({
+        actorUserId: context.userId,
+        activityLogId: data.activityLogId ?? null,
+        invoiceId: data.invoiceId ?? null,
+      });
+      return result;
     }
     if (!data.serverOrderId) throw new Error("Missing server order id for sync repair.");
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { ptero, assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
-    assertPteroAppConfigured();
-    const { data: order, error: orderError } = await supabaseAdmin
-      .from("server_orders")
-      .select("id, pterodactyl_server_id")
-      .eq("id", data.serverOrderId)
-      .maybeSingle();
-    if (orderError || !order?.pterodactyl_server_id) {
-      throw new Error(orderError?.message ?? "Server order has no Pterodactyl server id.");
-    }
-    const server = (await ptero.app(`/servers/${order.pterodactyl_server_id}`)) as {
-      attributes: { status?: string | null };
-    };
-    const status =
-      server.attributes.status === null
-        ? "active"
-        : server.attributes.status === "suspended"
-          ? "suspended"
-          : server.attributes.status === "install_failed" ||
-              server.attributes.status === "restore_failed"
-            ? "failed"
-            : "provisioning";
-    const { error: updateError } = await supabaseAdmin
-      .from("server_orders")
-      .update({ status, error_message: status === "failed" ? "Pterodactyl install failed." : null })
-      .eq("id", data.serverOrderId);
-    if (updateError) throw new Error(updateError.message);
-    return { ok: true, status };
+    return syncServerOrderStatus(data.serverOrderId, context.userId);
   });
