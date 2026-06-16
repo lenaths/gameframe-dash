@@ -16,6 +16,10 @@ const powerInput = z.object({
 
 const orderInput = z.object({ orderId: z.string().uuid() });
 const backupInput = z.object({ orderId: z.string().uuid(), backupId: z.string().uuid() });
+const allocationInput = z.object({
+  orderId: z.string().uuid(),
+  allocationId: z.number().int().positive(),
+});
 
 type SupabaseAny = {
   from: (table: string) => SupabaseQuery;
@@ -897,6 +901,98 @@ export const deleteServerBackup = createServerFn({ method: "POST" })
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
     await ptero.client(`/servers/${identifier}/backups/${data.backupId}`, {
+      method: "DELETE",
+      contentType: null,
+    });
+    return { ok: true };
+  });
+
+/** List server network allocations through the Pterodactyl Client API. */
+export const listServerNetworkAllocations = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const order = await loadOwnedOrder(context.supabase, data.orderId, context.userId);
+    if (!order.pterodactyl_server_identifier) {
+      throw new Error("Server not found or access denied.");
+    }
+    const identifier = order.pterodactyl_server_identifier;
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+
+    let nodePublicAddress: string | null = null;
+    if (order.pterodactyl_server_id) {
+      try {
+        const { assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
+        assertPteroAppConfigured();
+        const appMeta = (await ptero.app(
+          `/servers/${order.pterodactyl_server_id}?include=node`,
+        )) as PteroApplicationServerMeta;
+        nodePublicAddress = await resolvePublicIPv4(getNodeHostFromApplicationMeta(appMeta));
+      } catch (error) {
+        console.warn("[Pterodactyl Network] node public IP lookup failed", {
+          identifier,
+          error: (error as Error).message,
+        });
+      }
+    }
+
+    const res = (await ptero.client(`/servers/${identifier}/network/allocations`)) as {
+      data?: Array<{
+        attributes: {
+          id: number;
+          ip: string | null;
+          ip_alias?: string | null;
+          alias?: string | null;
+          port: number;
+          notes?: string | null;
+          is_default: boolean;
+        };
+      }>;
+    };
+
+    return {
+      allocations: (res.data ?? []).map((allocation) => {
+        const attrs = allocation.attributes;
+        const alias = attrs.ip_alias ?? attrs.alias ?? null;
+        const publicAddress =
+          publicHost(alias) ?? publicHost(attrs.ip) ?? publicHost(nodePublicAddress);
+        return {
+          id: attrs.id,
+          address: publicAddress,
+          port: attrs.port,
+          alias,
+          notes: attrs.notes ?? null,
+          isDefault: attrs.is_default,
+          isPrivateSource: Boolean(attrs.ip && !publicHost(attrs.ip)),
+        };
+      }),
+    };
+  });
+
+/** Set a network allocation as primary through the Pterodactyl Client API. */
+export const setPrimaryServerAllocation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => allocationInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    await ptero.client(`/servers/${identifier}/network/allocations/${data.allocationId}/primary`, {
+      method: "POST",
+    });
+    return { ok: true };
+  });
+
+/** Delete a network allocation through the Pterodactyl Client API. */
+export const deleteServerAllocation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => allocationInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    await ptero.client(`/servers/${identifier}/network/allocations/${data.allocationId}`, {
       method: "DELETE",
       contentType: null,
     });

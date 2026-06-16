@@ -17,6 +17,7 @@ import {
   Copy,
   LifeBuoy,
   Archive,
+  Network,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,6 +40,9 @@ import {
   listServerBackups,
   createServerBackup,
   deleteServerBackup,
+  listServerNetworkAllocations,
+  setPrimaryServerAllocation,
+  deleteServerAllocation,
   getServerStartup,
   updateServerStartup,
 } from "@/lib/servers.functions";
@@ -261,6 +265,7 @@ function ServerDetail() {
                 <TabsTrigger value="console">Console</TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
                 <TabsTrigger value="backups">Backups</TabsTrigger>
+                <TabsTrigger value="network">Network</TabsTrigger>
                 <TabsTrigger value="startup">Startup &amp; Variables</TabsTrigger>
                 <TabsTrigger value="info">SFTP &amp; Info</TabsTrigger>
               </TabsList>
@@ -273,6 +278,13 @@ function ServerDetail() {
               </TabsContent>
               <TabsContent value="backups" className="mt-4">
                 <BackupsTab orderId={orderId} />
+              </TabsContent>
+              <TabsContent value="network" className="mt-4">
+                <NetworkTab
+                  orderId={orderId}
+                  serverName={order.server_name}
+                  identifier={order.pterodactyl_server_identifier ?? null}
+                />
               </TabsContent>
               <TabsContent value="startup" className="mt-4">
                 <StartupTab orderId={orderId} />
@@ -1225,6 +1237,186 @@ function BackupStateBadge({ state }: { state: ServerBackup["state"] }) {
 
 function formatDateTime(value: string) {
   return new Date(value).toLocaleString();
+}
+
+/* ---------------- Network ---------------- */
+
+type ServerAllocation = {
+  id: number;
+  address: string | null;
+  port: number;
+  alias: string | null;
+  notes: string | null;
+  isDefault: boolean;
+  isPrivateSource: boolean;
+};
+
+function NetworkTab({
+  orderId,
+  serverName,
+  identifier,
+}: {
+  orderId: string;
+  serverName: string;
+  identifier: string | null;
+}) {
+  const fetchNetwork = useServerFn(listServerNetworkAllocations);
+  const setPrimary = useServerFn(setPrimaryServerAllocation);
+  const removeAllocation = useServerFn(deleteServerAllocation);
+  const qc = useQueryClient();
+
+  const network = useQuery({
+    queryKey: ["network", orderId],
+    queryFn: () => fetchNetwork({ data: { orderId } }),
+  });
+
+  const makePrimary = useMutation({
+    mutationFn: (allocationId: number) => setPrimary({ data: { orderId, allocationId } }),
+    onSuccess: () => {
+      toast.success("Allocation principale mise à jour.");
+      qc.invalidateQueries({ queryKey: ["network", orderId] });
+      qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: (allocationId: number) => removeAllocation({ data: { orderId, allocationId } }),
+    onSuccess: () => {
+      toast.success("Allocation supprimée.");
+      qc.invalidateQueries({ queryKey: ["network", orderId] });
+      qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const allocations = (network.data?.allocations ?? []) as ServerAllocation[];
+
+  return (
+    <div className="xnt-card rounded-xl">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 p-4">
+        <div>
+          <h3 className="font-display text-lg font-semibold">Network</h3>
+          <p className="text-sm text-muted-foreground">
+            Gérez les allocations réseau visibles par vos joueurs.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => network.refetch()}>
+            <RefreshCw className="mr-1.5 h-4 w-4" /> Actualiser
+          </Button>
+          <Button asChild size="sm" variant="outline">
+            <Link
+              to="/support"
+              search={
+                {
+                  subject: `Demande de port supplémentaire - ${serverName}`,
+                  orderId,
+                  body: [
+                    "Bonjour,",
+                    "",
+                    `Je souhaite demander un port supplémentaire pour le serveur ${serverName}.`,
+                    `Order id : ${orderId}`,
+                    `Identifier Pterodactyl : ${identifier ?? "indisponible"}`,
+                  ].join("\n"),
+                } as never
+              }
+            >
+              <LifeBuoy className="mr-1.5 h-4 w-4" /> Demander un port
+            </Link>
+          </Button>
+        </div>
+      </div>
+
+      {network.isLoading ? (
+        <div className="p-6 text-sm text-muted-foreground">Chargement des allocations…</div>
+      ) : network.error ? (
+        <div className="space-y-3 p-6">
+          <div className="text-sm font-medium text-destructive">Network indisponible</div>
+          <div className="text-sm text-muted-foreground">{(network.error as Error).message}</div>
+          <Button size="sm" variant="outline" onClick={() => network.refetch()}>
+            <RefreshCw className="mr-1.5 h-4 w-4" /> Réessayer
+          </Button>
+        </div>
+      ) : allocations.length === 0 ? (
+        <div className="p-8 text-center">
+          <Network className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
+          <div className="font-display text-lg font-semibold">Aucune allocation</div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Aucune allocation réseau n’est disponible pour ce serveur.
+          </p>
+        </div>
+      ) : (
+        <div className="grid gap-3 p-4">
+          {allocations.map((allocation) => (
+            <article
+              key={allocation.id}
+              className="rounded-lg border border-primary/15 bg-background/35 p-4"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="font-display text-base font-semibold">
+                      {allocation.address
+                        ? `${allocation.address}:${allocation.port}`
+                        : `Adresse publique indisponible:${allocation.port}`}
+                    </div>
+                    {allocation.isDefault && (
+                      <span className="rounded-full border border-primary/40 bg-primary/10 px-2 py-0.5 text-xs uppercase tracking-wider text-primary">
+                        principale
+                      </span>
+                    )}
+                  </div>
+                  {allocation.isPrivateSource && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      IP interne masquée, affichage public via alias/node.
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {!allocation.isDefault && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={makePrimary.isPending}
+                      onClick={() => makePrimary.mutate(allocation.id)}
+                    >
+                      Définir comme principale
+                    </Button>
+                  )}
+                  {!allocation.isDefault && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={remove.isPending}
+                      onClick={() => {
+                        if (confirm(`Supprimer l’allocation ${allocation.port} ?`)) {
+                          remove.mutate(allocation.id);
+                        }
+                      }}
+                    >
+                      <Trash2 className="mr-1.5 h-4 w-4 text-destructive" />
+                      Supprimer
+                    </Button>
+                  )}
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
+                <BackupMeta label="Adresse publique" value={allocation.address ?? "Indisponible"} />
+                <BackupMeta label="Port" value={String(allocation.port)} />
+                <BackupMeta label="Alias" value={allocation.alias ?? "Aucun alias"} />
+              </div>
+              {allocation.notes && (
+                <div className="mt-3 rounded-md border border-primary/10 bg-background/40 p-3 text-sm text-muted-foreground">
+                  {allocation.notes}
+                </div>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /* ---------------- Info ---------------- */
