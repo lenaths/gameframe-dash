@@ -15,6 +15,7 @@ const powerInput = z.object({
 });
 
 const orderInput = z.object({ orderId: z.string().uuid() });
+const backupInput = z.object({ orderId: z.string().uuid(), backupId: z.string().uuid() });
 
 type SupabaseAny = {
   from: (table: string) => SupabaseQuery;
@@ -829,6 +830,75 @@ export const createServerFolder = createServerFn({ method: "POST" })
     await ptero.client(`/servers/${identifier}/files/create-folder`, {
       method: "POST",
       body: JSON.stringify({ root, name: data.name }),
+    });
+    return { ok: true };
+  });
+
+/** List server backups through the Pterodactyl Client API. */
+export const listServerBackups = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    const res = (await ptero.client(`/servers/${identifier}/backups`)) as {
+      data?: Array<{
+        attributes: {
+          uuid: string;
+          name: string;
+          bytes: number;
+          is_successful: boolean;
+          is_locked: boolean;
+          created_at: string;
+          completed_at: string | null;
+        };
+      }>;
+    };
+    return {
+      backups: (res.data ?? []).map((backup) => {
+        const attrs = backup.attributes;
+        return {
+          uuid: attrs.uuid,
+          name: attrs.name,
+          bytes: attrs.bytes,
+          isSuccessful: attrs.is_successful,
+          isLocked: attrs.is_locked,
+          createdAt: attrs.created_at,
+          completedAt: attrs.completed_at,
+          state: attrs.completed_at ? (attrs.is_successful ? "completed" : "failed") : "processing",
+        };
+      }),
+    };
+  });
+
+/** Create a server backup through the Pterodactyl Client API. */
+export const createServerBackup = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    const name = `XNT Backup ${new Date().toISOString().slice(0, 16).replace("T", " ")}`;
+    const res = (await ptero.client(`/servers/${identifier}/backups`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    })) as { attributes?: { uuid?: string } };
+    return { ok: true, backupId: res.attributes?.uuid ?? null };
+  });
+
+/** Delete a server backup through the Pterodactyl Client API. */
+export const deleteServerBackup = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => backupInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    await ptero.client(`/servers/${identifier}/backups/${data.backupId}`, {
+      method: "DELETE",
+      contentType: null,
     });
     return { ok: true };
   });

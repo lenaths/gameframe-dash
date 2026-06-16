@@ -161,6 +161,20 @@ async function ensurePanelUser(input: {
   return pteroUserId;
 }
 
+async function getProvisioningRecipientEmail(
+  db: SupabaseAny,
+  userId: string,
+  fallbackEmail?: string | null,
+) {
+  const profileResult = await db.from("profiles").select("email").eq("id", userId).maybeSingle();
+  if (profileResult.error) {
+    console.warn(
+      `[Email] Could not load profile email for user=${userId}: ${profileResult.error.message}`,
+    );
+  }
+  return ((profileResult.data as { email?: string | null } | null)?.email ?? fallbackEmail) || null;
+}
+
 async function writeActivityLog(
   db: SupabaseAny,
   values: {
@@ -405,6 +419,26 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
         status: nextStatus,
       },
     });
+    const recipientEmail = await getProvisioningRecipientEmail(
+      db,
+      input.userId,
+      input.fallbackEmail,
+    );
+    const { sendTransactionalEmail, provisioningFailedEmail, serverReadyEmail } =
+      await import("@/lib/email.server");
+    await sendTransactionalEmail(
+      nextStatus === "failed"
+        ? provisioningFailedEmail({
+            to: recipientEmail,
+            serverName: input.serverName,
+            error: installError ?? "Installation Pterodactyl échouée.",
+          })
+        : serverReadyEmail({
+            to: recipientEmail,
+            serverName: input.serverName,
+            identifier: created.attributes.identifier,
+          }),
+    );
 
     return {
       ok: nextStatus !== "failed",
@@ -436,6 +470,19 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
       action: "provisioning_failed",
       after: { error: message },
     });
+    const recipientEmail = await getProvisioningRecipientEmail(
+      db,
+      input.userId,
+      input.fallbackEmail,
+    );
+    const { sendTransactionalEmail, provisioningFailedEmail } = await import("@/lib/email.server");
+    await sendTransactionalEmail(
+      provisioningFailedEmail({
+        to: recipientEmail,
+        serverName: input.serverName,
+        error: message,
+      }),
+    );
     return {
       ok: false as const,
       serverOrderId: input.serverOrderId,

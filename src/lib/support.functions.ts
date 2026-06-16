@@ -249,5 +249,24 @@ export const adminReplyToTicket = createServerFn({ method: "POST" })
       after: { ticket_id: data.ticketId },
     });
 
+    const { data: profile, error: profileError } = await db
+      .from("profiles")
+      .select("email")
+      .eq("id", currentTicket.user_id)
+      .maybeSingle();
+    if (profileError) {
+      console.warn(
+        `[Email] Could not load profile email for ticket=${data.ticketId}: ${profileError.message}`,
+      );
+    }
+    const { sendTransactionalEmail, ticketRepliedEmail } = await import("@/lib/email.server");
+    await sendTransactionalEmail(
+      ticketRepliedEmail({
+        to: (profile as { email?: string | null } | null)?.email ?? null,
+        subject: currentTicket.subject,
+        replyPreview: data.body.slice(0, 500),
+      }),
+    );
+
     return { ok: true };
   });

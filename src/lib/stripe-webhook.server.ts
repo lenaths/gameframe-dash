@@ -33,6 +33,15 @@ type OrderRow = {
   currency: string;
 };
 
+async function getUserEmail(db: SupabaseAny, userId: string) {
+  const { data, error } = await db.from("profiles").select("email").eq("id", userId).maybeSingle();
+  if (error) {
+    console.warn(`[Email] Could not load profile email for user=${userId}: ${error.message}`);
+    return null;
+  }
+  return (data as { email?: string | null } | null)?.email ?? null;
+}
+
 export async function handleStripeWebhookRequest(request: Request) {
   const payload = await request.text();
   const signature = request.headers.get("stripe-signature");
@@ -322,6 +331,18 @@ async function handleInvoicePaid(db: SupabaseAny, invoice: Stripe.Invoice, event
     currency,
     eventId,
   });
+
+  const recipientEmail = await getUserEmail(db, order.user_id);
+  const { sendTransactionalEmail, paidInvoiceEmail } = await import("@/lib/email.server");
+  await sendTransactionalEmail(
+    paidInvoiceEmail({
+      to: recipientEmail,
+      amountCents: amountPaid,
+      currency,
+      invoiceNumber,
+      hostedInvoiceUrl: invoice.hosted_invoice_url,
+    }),
+  );
 
   try {
     const { provisionPaidOrder } = await import("@/lib/provisioning.server");

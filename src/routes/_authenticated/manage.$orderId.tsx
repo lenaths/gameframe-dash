@@ -16,6 +16,7 @@ import {
   ChevronLeft,
   Copy,
   LifeBuoy,
+  Archive,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,6 +36,9 @@ import {
   writeServerFile,
   deleteServerFiles,
   createServerFolder,
+  listServerBackups,
+  createServerBackup,
+  deleteServerBackup,
   getServerStartup,
   updateServerStartup,
 } from "@/lib/servers.functions";
@@ -256,6 +260,7 @@ function ServerDetail() {
               <TabsList>
                 <TabsTrigger value="console">Console</TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
+                <TabsTrigger value="backups">Backups</TabsTrigger>
                 <TabsTrigger value="startup">Startup &amp; Variables</TabsTrigger>
                 <TabsTrigger value="info">SFTP &amp; Info</TabsTrigger>
               </TabsList>
@@ -265,6 +270,9 @@ function ServerDetail() {
               </TabsContent>
               <TabsContent value="files" className="mt-4">
                 <FilesTab orderId={orderId} />
+              </TabsContent>
+              <TabsContent value="backups" className="mt-4">
+                <BackupsTab orderId={orderId} />
               </TabsContent>
               <TabsContent value="startup" className="mt-4">
                 <StartupTab orderId={orderId} />
@@ -1052,6 +1060,171 @@ function formatSize(b: number) {
 function hasBlockedEditorExtension(name: string) {
   const normalized = name.toLowerCase();
   return [...BLOCKED_EDITOR_EXTENSIONS].some((extension) => normalized.endsWith(extension));
+}
+
+/* ---------------- Backups ---------------- */
+
+type ServerBackup = {
+  uuid: string;
+  name: string;
+  bytes: number;
+  isSuccessful: boolean;
+  isLocked: boolean;
+  createdAt: string;
+  completedAt: string | null;
+  state: "completed" | "processing" | "failed";
+};
+
+function BackupsTab({ orderId }: { orderId: string }) {
+  const fetchBackups = useServerFn(listServerBackups);
+  const createBackup = useServerFn(createServerBackup);
+  const deleteBackup = useServerFn(deleteServerBackup);
+  const qc = useQueryClient();
+
+  const backups = useQuery({
+    queryKey: ["backups", orderId],
+    queryFn: () => fetchBackups({ data: { orderId } }),
+    refetchInterval: (query) => {
+      const rows = (query.state.data?.backups ?? []) as ServerBackup[];
+      return rows.some((backup) => backup.state === "processing") ? 5000 : false;
+    },
+  });
+
+  const create = useMutation({
+    mutationFn: () => createBackup({ data: { orderId } }),
+    onSuccess: () => {
+      toast.success("Sauvegarde lancée.");
+      qc.invalidateQueries({ queryKey: ["backups", orderId] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const remove = useMutation({
+    mutationFn: (backupId: string) => deleteBackup({ data: { orderId, backupId } }),
+    onSuccess: () => {
+      toast.success("Sauvegarde supprimée.");
+      qc.invalidateQueries({ queryKey: ["backups", orderId] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const rows = (backups.data?.backups ?? []) as ServerBackup[];
+
+  return (
+    <div className="xnt-card rounded-xl">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/60 p-4">
+        <div>
+          <h3 className="font-display text-lg font-semibold">Backups</h3>
+          <p className="text-sm text-muted-foreground">
+            Créez et supprimez les sauvegardes Pterodactyl de ce serveur.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => backups.refetch()}>
+            <RefreshCw className="mr-1.5 h-4 w-4" /> Actualiser
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => create.mutate()}
+            disabled={create.isPending}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+          >
+            <Archive className="mr-1.5 h-4 w-4" />
+            {create.isPending ? "Création…" : "Créer une sauvegarde"}
+          </Button>
+        </div>
+      </div>
+
+      {backups.isLoading ? (
+        <div className="p-6 text-sm text-muted-foreground">Chargement des sauvegardes…</div>
+      ) : backups.error ? (
+        <div className="space-y-3 p-6">
+          <div className="text-sm font-medium text-destructive">Backups indisponibles</div>
+          <div className="text-sm text-muted-foreground">{(backups.error as Error).message}</div>
+          <Button size="sm" variant="outline" onClick={() => backups.refetch()}>
+            <RefreshCw className="mr-1.5 h-4 w-4" /> Réessayer
+          </Button>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="p-8 text-center">
+          <Archive className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
+          <div className="font-display text-lg font-semibold">Aucune sauvegarde</div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Créez une première sauvegarde avant une mise à jour ou un changement important.
+          </p>
+        </div>
+      ) : (
+        <div className="grid gap-3 p-4">
+          {rows.map((backup) => (
+            <article
+              key={backup.uuid}
+              className="rounded-lg border border-primary/15 bg-background/35 p-4"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="break-words font-display text-base font-semibold">
+                    {backup.name || "Backup"}
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-muted-foreground">{backup.uuid}</div>
+                </div>
+                <BackupStateBadge state={backup.state} />
+              </div>
+              <div className="mt-4 grid gap-3 text-sm sm:grid-cols-3">
+                <BackupMeta label="Taille" value={formatSize(backup.bytes)} />
+                <BackupMeta label="Créée" value={formatDateTime(backup.createdAt)} />
+                <BackupMeta
+                  label="Terminée"
+                  value={backup.completedAt ? formatDateTime(backup.completedAt) : "En cours"}
+                />
+              </div>
+              <div className="mt-4 flex justify-end">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={remove.isPending || backup.isLocked}
+                  onClick={() => {
+                    if (confirm(`Supprimer la sauvegarde ${backup.name || backup.uuid} ?`)) {
+                      remove.mutate(backup.uuid);
+                    }
+                  }}
+                >
+                  <Trash2 className="mr-1.5 h-4 w-4 text-destructive" />
+                  Supprimer
+                </Button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BackupMeta({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-primary/10 bg-background/40 p-3">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 break-words font-mono text-sm text-primary">{value}</div>
+    </div>
+  );
+}
+
+function BackupStateBadge({ state }: { state: ServerBackup["state"] }) {
+  const classes =
+    state === "completed"
+      ? "border-success/40 bg-success/10 text-success"
+      : state === "failed"
+        ? "border-destructive/40 bg-destructive/10 text-destructive"
+        : "border-accent/40 bg-accent/10 text-accent";
+  return (
+    <span className={`rounded-full border px-2.5 py-1 text-xs uppercase tracking-wider ${classes}`}>
+      {state}
+    </span>
+  );
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString();
 }
 
 /* ---------------- Info ---------------- */
