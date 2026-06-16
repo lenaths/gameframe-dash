@@ -18,6 +18,7 @@ import {
   LifeBuoy,
   Archive,
   Network,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,6 +44,8 @@ import {
   listServerNetworkAllocations,
   setPrimaryServerAllocation,
   deleteServerAllocation,
+  renameServer,
+  reinstallServerClient,
   getServerStartup,
   updateServerStartup,
 } from "@/lib/servers.functions";
@@ -268,6 +271,7 @@ function ServerDetail() {
                 <TabsTrigger value="backups">Backups</TabsTrigger>
                 <TabsTrigger value="network">Network</TabsTrigger>
                 <TabsTrigger value="startup">Startup &amp; Variables</TabsTrigger>
+                <TabsTrigger value="settings">Settings</TabsTrigger>
                 <TabsTrigger value="info">SFTP &amp; Info</TabsTrigger>
               </TabsList>
 
@@ -292,6 +296,13 @@ function ServerDetail() {
               </TabsContent>
               <TabsContent value="startup" className="mt-4">
                 <StartupTab orderId={orderId} />
+              </TabsContent>
+              <TabsContent value="settings" className="mt-4">
+                <SettingsTab
+                  orderId={orderId}
+                  serverName={order.server_name}
+                  identifier={order.pterodactyl_server_identifier ?? null}
+                />
               </TabsContent>
               <TabsContent value="info" className="mt-4">
                 <InfoTab
@@ -1743,6 +1754,127 @@ function buildConnectionCopyLines(connection: ConnectionInfo) {
   return lines;
 }
 
+/* ---------------- Settings ---------------- */
+
+function SettingsTab({
+  orderId,
+  serverName,
+  identifier,
+}: {
+  orderId: string;
+  serverName: string;
+  identifier: string | null;
+}) {
+  const renameFn = useServerFn(renameServer);
+  const reinstallFn = useServerFn(reinstallServerClient);
+  const qc = useQueryClient();
+  const [name, setName] = useState(serverName);
+  const [confirmText, setConfirmText] = useState("");
+
+  useEffect(() => setName(serverName), [serverName]);
+
+  const rename = useMutation({
+    mutationFn: () => renameFn({ data: { orderId, name: name.trim() } }),
+    onSuccess: () => {
+      toast.success("Serveur renommé.");
+      qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
+      qc.invalidateQueries({ queryKey: ["my-servers"] });
+      qc.invalidateQueries({ queryKey: ["my-billing"] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const reinstall = useMutation({
+    mutationFn: () => reinstallFn({ data: { orderId } }),
+    onSuccess: () => {
+      toast.success("Réinstallation lancée.");
+      setConfirmText("");
+      qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const canReinstall = confirmText === "REINSTALL";
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-2">
+      <section className="xnt-card rounded-xl p-5">
+        <h3 className="font-display text-lg font-semibold">Renommer le serveur</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Le renommage utilise la Client API Pterodactyl si votre panel l’autorise.
+        </p>
+        <div className="mt-4 space-y-3">
+          <Input value={name} onChange={(event) => setName(event.target.value)} maxLength={40} />
+          <Button
+            onClick={() => rename.mutate()}
+            disabled={rename.isPending || name.trim().length < 2 || name.trim() === serverName}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+          >
+            {rename.isPending ? "Renommage…" : "Renommer"}
+          </Button>
+        </div>
+      </section>
+
+      <section className="xnt-card rounded-xl border-destructive/30 p-5">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="mt-1 h-5 w-5 text-destructive" />
+          <div>
+            <h3 className="font-display text-lg font-semibold">Réinstaller le serveur</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Action destructive : selon l’egg, les fichiers peuvent être réinitialisés et le script
+              d’installation relancé.
+            </p>
+          </div>
+        </div>
+        <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          Pour confirmer, tapez <span className="font-mono font-semibold">REINSTALL</span>.
+        </div>
+        <div className="mt-4 space-y-3">
+          <Input
+            value={confirmText}
+            onChange={(event) => setConfirmText(event.target.value)}
+            placeholder="REINSTALL"
+            className="font-mono"
+          />
+          <Button
+            variant="destructive"
+            disabled={!canReinstall || reinstall.isPending}
+            onClick={() => {
+              if (
+                confirm(
+                  `Réinstaller ${serverName} ? Cette action peut réinitialiser les fichiers selon l'egg.`,
+                )
+              ) {
+                reinstall.mutate();
+              }
+            }}
+          >
+            {reinstall.isPending ? "Réinstallation…" : "Réinstaller le serveur"}
+          </Button>
+        </div>
+      </section>
+
+      <section className="xnt-card rounded-xl p-5 lg:col-span-2">
+        <h3 className="font-display text-lg font-semibold">Version / Egg</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Le projet supporte déjà les variantes de plans via <code>allowed_eggs</code>, mais changer
+          l’egg d’un serveur existant touche l’image Docker, la commande startup et les variables.
+          Pour éviter de casser le provisioning actuel, cette action sera ajoutée après validation
+          d’un flow de migration dédié.
+        </p>
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-primary/15 bg-background/35 p-4">
+          <Badge variant="outline" className="border-accent/40 bg-accent/10 text-accent">
+            Bientôt disponible
+          </Badge>
+          <span className="text-sm text-muted-foreground">
+            Serveur actuel : {identifier ?? "identifier indisponible"}
+          </span>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 /* ---------------- Startup & Variables ---------------- */
 
 function StartupTab({ orderId }: { orderId: string }) {
@@ -1794,22 +1926,44 @@ function StartupTab({ orderId }: { orderId: string }) {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  if (startup.isLoading) return <div className="text-sm text-muted-foreground">Loading…</div>;
+  if (startup.isLoading)
+    return (
+      <div className="xnt-card rounded-xl p-6 text-sm text-muted-foreground">
+        Chargement des variables serveur…
+      </div>
+    );
   if (startup.error)
-    return <div className="text-sm text-destructive">{(startup.error as Error).message}</div>;
+    return (
+      <div className="xnt-card rounded-xl border-destructive/30 p-6 text-sm text-destructive">
+        {(startup.error as Error).message}
+      </div>
+    );
   if (!startup.data) return null;
+
+  const editableCount = startup.data.variables.filter((variable) => variable.user_editable).length;
 
   return (
     <div className="xnt-card space-y-6 rounded-xl p-6">
-      <div>
-        <h3 className="font-display text-lg font-semibold">Server variables</h3>
-        <p className="text-xs text-muted-foreground mt-1">
-          Change version, mods, modpack ID, or any other option below. Changing the version or
-          modpack usually requires a reinstall.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="font-display text-lg font-semibold">Startup & Variables</h3>
+          <p className="text-sm text-muted-foreground mt-1">
+            Modifiez uniquement les variables autorisées par l’egg Pterodactyl.
+          </p>
+        </div>
+        <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">
+          {editableCount} modifiable(s)
+        </Badge>
       </div>
 
       <EggVariablesForm variables={startup.data.variables} values={env} onChange={setEnv} />
+
+      {reinstall && (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          La sauvegarde avec réinstallation peut réinitialiser les fichiers selon l’egg. Créez un
+          backup avant de continuer.
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-4">
         <label className="flex items-center gap-2 text-sm">

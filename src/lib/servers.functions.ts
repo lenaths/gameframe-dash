@@ -20,6 +20,10 @@ const allocationInput = z.object({
   orderId: z.string().uuid(),
   allocationId: z.number().int().positive(),
 });
+const renameServerInput = z.object({
+  orderId: z.string().uuid(),
+  name: z.string().min(2).max(40),
+});
 
 type SupabaseAny = {
   from: (table: string) => SupabaseQuery;
@@ -995,6 +999,48 @@ export const deleteServerAllocation = createServerFn({ method: "POST" })
     await ptero.client(`/servers/${identifier}/network/allocations/${data.allocationId}`, {
       method: "DELETE",
       contentType: null,
+    });
+    return { ok: true };
+  });
+
+/** Rename a server through the Pterodactyl Client API when the panel permits it. */
+export const renameServer = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => renameServerInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    try {
+      await ptero.client(`/servers/${identifier}/settings/rename`, {
+        method: "POST",
+        body: JSON.stringify({ name: data.name }),
+      });
+    } catch (error) {
+      throw new Error(
+        `Renommage indisponible via la Client API Pterodactyl pour ce serveur: ${(error as Error).message}`,
+      );
+    }
+    const { error } = await context.supabase
+      .from("server_orders")
+      .update({ server_name: data.name })
+      .eq("id", data.orderId)
+      .eq("user_id", context.userId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+/** Reinstall a server through the Pterodactyl Client API. */
+export const reinstallServerClient = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    await ptero.client(`/servers/${identifier}/settings/reinstall`, {
+      method: "POST",
+      body: JSON.stringify({}),
     });
     return { ok: true };
   });
