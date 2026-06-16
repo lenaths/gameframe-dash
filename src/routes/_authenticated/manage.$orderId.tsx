@@ -263,6 +263,7 @@ function ServerDetail() {
             <Tabs defaultValue="console">
               <TabsList>
                 <TabsTrigger value="console">Console</TabsTrigger>
+                <TabsTrigger value="stats">Stats</TabsTrigger>
                 <TabsTrigger value="files">Files</TabsTrigger>
                 <TabsTrigger value="backups">Backups</TabsTrigger>
                 <TabsTrigger value="network">Network</TabsTrigger>
@@ -272,6 +273,9 @@ function ServerDetail() {
 
               <TabsContent value="console" className="mt-4">
                 <ConsoleTab orderId={orderId} />
+              </TabsContent>
+              <TabsContent value="stats" className="mt-4">
+                <StatsTab orderId={orderId} />
               </TabsContent>
               <TabsContent value="files" className="mt-4">
                 <FilesTab orderId={orderId} />
@@ -333,6 +337,177 @@ function NetworkStat({ label, value }: { label: string; value: string | number }
       <div className="mt-1 truncate font-mono text-sm text-primary">{value}</div>
     </div>
   );
+}
+
+/* ---------------- Stats ---------------- */
+
+type StatsSample = {
+  at: number;
+  cpu: number;
+  memoryMb: number;
+  diskMb: number;
+  rxMb: number;
+  txMb: number;
+};
+
+function StatsTab({ orderId }: { orderId: string }) {
+  const fetchDetail = useServerFn(getServerDetail);
+  const [history, setHistory] = useState<StatsSample[]>([]);
+
+  const stats = useQuery({
+    queryKey: ["server-stats", orderId],
+    queryFn: () => fetchDetail({ data: { orderId } }),
+    refetchInterval: 5000,
+  });
+
+  const live = stats.data?.live;
+  const order = stats.data?.order;
+  const state = live?.state ?? order?.status ?? "unknown";
+  const ramLimit = order?.plans?.ram_mb ?? 0;
+  const diskLimit = order?.plans?.disk_mb ?? 0;
+
+  useEffect(() => {
+    if (!live) return;
+    setHistory((current) =>
+      [
+        ...current,
+        {
+          at: Date.now(),
+          cpu: live.cpu ?? 0,
+          memoryMb: live.memoryMb ?? 0,
+          diskMb: live.diskMb ?? 0,
+          rxMb: live.rxMb ?? 0,
+          txMb: live.txMb ?? 0,
+        },
+      ].slice(-20),
+    );
+  }, [live?.cpu, live?.diskMb, live?.memoryMb, live?.rxMb, live?.txMb, live]);
+
+  return (
+    <div className="xnt-card rounded-xl p-5">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="font-display text-xl font-semibold">Stats serveur</h3>
+          <p className="text-sm text-muted-foreground">
+            Mesures live Pterodactyl, rafraîchies toutes les 5 secondes.
+          </p>
+        </div>
+        <Button size="sm" variant="outline" onClick={() => stats.refetch()}>
+          <RefreshCw className="mr-1.5 h-4 w-4" /> Actualiser
+        </Button>
+      </div>
+
+      {stats.isLoading ? (
+        <div className="text-sm text-muted-foreground">Chargement des statistiques…</div>
+      ) : stats.error || stats.data?.warning ? (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+          {(stats.error as Error | null)?.message ??
+            stats.data?.warning ??
+            "Statistiques indisponibles."}
+        </div>
+      ) : !live ? (
+        <div className="rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">
+          Serveur offline ou statistiques temporairement indisponibles.
+        </div>
+      ) : (
+        <div className="space-y-5">
+          {state !== "running" && state !== "active" && (
+            <div className="rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">
+              Le serveur est actuellement {state}. Certaines métriques peuvent rester à zéro.
+            </div>
+          )}
+
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <StatsCard
+              label="État"
+              value={state}
+              detail={live.state === "offline" ? "Serveur arrêté" : "Ressources accessibles"}
+            />
+            <StatsCard label="CPU" value={`${live.cpu}%`} detail="Utilisation instantanée" />
+            <StatsCard
+              label="RAM"
+              value={`${live.memoryMb} / ${ramLimit || "—"} MB`}
+              detail={formatPercent(live.memoryMb, ramLimit)}
+            />
+            <StatsCard
+              label="Disque"
+              value={`${live.diskMb} / ${diskLimit || "—"} MB`}
+              detail={formatPercent(live.diskMb, diskLimit)}
+            />
+          </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <StatsProgress label="CPU" value={Math.min(live.cpu, 100)} />
+            <StatsProgress label="RAM" value={percentage(live.memoryMb, ramLimit)} />
+            <StatsProgress label="Disque" value={percentage(live.diskMb, diskLimit)} />
+            <div className="rounded-lg border border-primary/15 bg-background/35 p-4">
+              <div className="text-xs uppercase tracking-wider text-muted-foreground">Réseau</div>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                <div className="font-mono text-sm text-primary">RX {live.rxMb} MB</div>
+                <div className="font-mono text-sm text-primary">TX {live.txMb} MB</div>
+              </div>
+            </div>
+          </div>
+
+          {history.length > 1 && (
+            <div className="rounded-lg border border-primary/15 bg-background/35 p-4">
+              <div className="mb-3 text-xs uppercase tracking-wider text-muted-foreground">
+                Mini historique CPU
+              </div>
+              <div className="flex h-24 items-end gap-1">
+                {history.map((sample) => (
+                  <div
+                    key={sample.at}
+                    className="flex-1 rounded-t bg-primary/70 shadow-[0_0_10px_rgba(0,191,255,0.35)]"
+                    style={{ height: `${Math.max(4, Math.min(sample.cpu, 100))}%` }}
+                    title={`${Math.round(sample.cpu)}%`}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatsCard({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return (
+    <div className="rounded-lg border border-primary/15 bg-background/35 p-4 shadow-[0_0_24px_rgba(0,191,255,0.06)]">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 font-display text-2xl font-semibold text-primary">{value}</div>
+      <div className="mt-1 text-xs text-muted-foreground">{detail}</div>
+    </div>
+  );
+}
+
+function StatsProgress({ label, value }: { label: string; value: number }) {
+  const safeValue = Math.max(0, Math.min(100, Number.isFinite(value) ? value : 0));
+  return (
+    <div className="rounded-lg border border-primary/15 bg-background/35 p-4">
+      <div className="mb-2 flex items-center justify-between text-sm">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="font-mono text-primary">{Math.round(safeValue)}%</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-surface-2">
+        <div
+          className="h-full rounded-full bg-primary shadow-[0_0_14px_rgba(0,191,255,0.65)]"
+          style={{ width: `${safeValue}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function percentage(value: number, limit: number) {
+  if (!limit) return 0;
+  return (value / limit) * 100;
+}
+
+function formatPercent(value: number, limit: number) {
+  if (!limit) return "Limite indisponible";
+  return `${Math.round(percentage(value, limit))}% utilisé`;
 }
 
 /* ---------------- Console ---------------- */
