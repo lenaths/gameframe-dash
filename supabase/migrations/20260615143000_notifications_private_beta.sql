@@ -5,6 +5,7 @@ create table if not exists public.notifications (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   source_activity_log_id uuid references public.activity_logs(id) on delete set null,
+  source_invoice_id uuid references public.invoices(id) on delete set null,
   type text not null,
   title text not null,
   body text,
@@ -13,6 +14,17 @@ create table if not exists public.notifications (
   created_at timestamptz not null default now(),
   unique (source_activity_log_id)
 );
+
+alter table public.notifications
+  add column if not exists source_invoice_id uuid references public.invoices(id) on delete set null;
+
+create unique index if not exists idx_notifications_source_activity_log
+on public.notifications(source_activity_log_id)
+where source_activity_log_id is not null;
+
+create unique index if not exists idx_notifications_source_invoice
+on public.notifications(source_invoice_id)
+where source_invoice_id is not null;
 
 create index if not exists idx_notifications_user_created
 on public.notifications(user_id, created_at desc);

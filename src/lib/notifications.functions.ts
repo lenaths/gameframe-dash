@@ -31,6 +31,16 @@ type ActivityLogRow = {
   created_at: string;
 };
 
+type InvoiceRow = {
+  id: string;
+  user_id: string;
+  invoice_number: string;
+  status: string;
+  total_cents: number;
+  currency: string;
+  created_at: string;
+};
+
 type NotificationRow = {
   id: string;
   type: string;
@@ -77,6 +87,25 @@ function notificationFromActivity(log: ActivityLogRow) {
   };
 }
 
+function formatMoney(cents: number, currency: string) {
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: currency || "EUR",
+  }).format(cents / 100);
+}
+
+function notificationFromInvoice(invoice: InvoiceRow) {
+  return {
+    user_id: invoice.user_id,
+    source_invoice_id: invoice.id,
+    type: "invoice",
+    title: "Facture créée",
+    body: `${invoice.invoice_number} · ${formatMoney(invoice.total_cents, invoice.currency)} · ${invoice.status}`,
+    href: "/billing",
+    created_at: invoice.created_at,
+  };
+}
+
 async function syncNotificationsForUser(db: SupabaseAny, userId: string) {
   const { data, error } = await db
     .from("activity_logs")
@@ -93,6 +122,23 @@ async function syncNotificationsForUser(db: SupabaseAny, userId: string) {
       .insert(notificationFromActivity(log));
     if (insertError && insertError.code !== "23505") {
       console.warn(`[Notifications] sync failed for ${log.id}: ${insertError.message}`);
+    }
+  }
+
+  const { data: invoices, error: invoicesError } = await db
+    .from("invoices")
+    .select("id, user_id, invoice_number, status, total_cents, currency, created_at")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(30);
+  if (invoicesError) throw new Error(invoicesError.message);
+
+  for (const invoice of (invoices ?? []) as InvoiceRow[]) {
+    const { error: insertError } = await db
+      .from("notifications")
+      .insert(notificationFromInvoice(invoice));
+    if (insertError && insertError.code !== "23505") {
+      console.warn(`[Notifications] invoice sync failed for ${invoice.id}: ${insertError.message}`);
     }
   }
 }
