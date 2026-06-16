@@ -9,6 +9,7 @@ import {
   Plus,
   ShieldAlert,
   Settings,
+  Copy,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
@@ -23,6 +24,7 @@ export const Route = createFileRoute("/_authenticated/dashboard")({
 
 const statusColor: Record<string, string> = {
   active: "xnt-status-active",
+  running: "xnt-status-active",
   paid: "xnt-status-paid",
   provisioning: "xnt-status-provisioning",
   installing: "xnt-status-installing",
@@ -33,6 +35,26 @@ const statusColor: Record<string, string> = {
   suspended: "text-muted-foreground bg-muted border-border",
   cancelled: "xnt-status-cancelled",
 };
+
+function isServerUsable(status: string) {
+  return status === "active" || status === "running";
+}
+
+function statusDescription(status: string) {
+  const descriptions: Record<string, string> = {
+    pending_payment: "Paiement en attente avant lancement du provisioning.",
+    paid: "Paiement reçu, préparation du serveur en attente.",
+    provisioning: "Provisioning en cours sur l’infrastructure XNT.",
+    installing: "Installation Pterodactyl en cours.",
+    active: "Serveur prêt à être géré.",
+    running: "Serveur en ligne et prêt à jouer.",
+    failed: "Une erreur est survenue, le support peut vous aider.",
+    provisioning_failed: "Le provisioning a échoué, contactez le support ou attendez une relance.",
+    suspended: "Serveur suspendu, vérifiez votre facturation ou contactez le support.",
+    cancelled: "Abonnement annulé.",
+  };
+  return descriptions[status] ?? "Statut serveur en cours de synchronisation.";
+}
 
 function Dashboard() {
   const fetchServers = useServerFn(listMyServers);
@@ -134,6 +156,7 @@ function Dashboard() {
                 server={s as DashboardServer}
                 powerPending={power.isPending}
                 onPower={power.mutate}
+                onFetchDetail={(orderId) => fetchDetail({ data: { orderId } })}
               />
             ))}
           </div>
@@ -148,6 +171,9 @@ type DashboardServer = {
   server_name: string;
   status: string;
   error_message: string | null;
+  created_at: string;
+  last_payment_at?: string | null;
+  next_renewal_at?: string | null;
   plans?: {
     game?: string | null;
     name?: string | null;
@@ -161,12 +187,48 @@ function ServerCard({
   server: s,
   powerPending,
   onPower,
+  onFetchDetail,
 }: {
   server: DashboardServer;
   powerPending: boolean;
   onPower: (vars: { orderId: string; signal: "start" | "stop" | "restart" }) => void;
+  onFetchDetail: (orderId: string) => Promise<{
+    live?: {
+      connection?: {
+        address: string | null;
+        port: number | null;
+        sftpHost: string | null;
+        sftpPort: number | null;
+        sftpUsername: string | null;
+        identifier: string | null;
+      };
+    } | null;
+  }>;
 }) {
   const status = String(s.status);
+  const copyConnection = async () => {
+    try {
+      const detail = await onFetchDetail(s.id);
+      const connection = detail.live?.connection;
+      const lines: string[] = [];
+      if (connection?.address && connection.port) {
+        lines.push(`Adresse : ${connection.address}:${connection.port}`);
+      }
+      if (connection?.sftpHost && connection.sftpPort) {
+        lines.push(`SFTP : ${connection.sftpHost}:${connection.sftpPort}`);
+      }
+      if (connection?.sftpUsername) lines.push(`Utilisateur SFTP : ${connection.sftpUsername}`);
+      if (connection?.identifier) lines.push(`Identifiant : ${connection.identifier}`);
+      if (lines.length === 0) {
+        toast.warning("Informations de connexion indisponibles.");
+        return;
+      }
+      await navigator.clipboard.writeText(`Serveur XNTServers\n${lines.join("\n")}`);
+      toast.success("Connexion copiée.");
+    } catch (error) {
+      toast.error((error as Error).message);
+    }
+  };
   return (
     <div className="xnt-card xnt-card-hover rounded-xl p-5">
       <div className="flex flex-wrap items-center justify-between gap-5">
@@ -179,6 +241,11 @@ function ServerCard({
             <div className="text-sm text-muted-foreground">
               {s.plans?.game} · {s.plans?.name} · {((s.plans?.ram_mb ?? 0) / 1024).toFixed(0)} GB
               RAM
+            </div>
+            <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
+              <span>Créé: {formatDate(s.created_at)}</span>
+              <span>Paiement: {formatDate(s.last_payment_at)}</span>
+              <span>Renouvellement: {formatDate(s.next_renewal_at)}</span>
             </div>
             {s.error_message && (
               <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -193,7 +260,7 @@ function ServerCard({
           >
             {status}
           </span>
-          {status === "active" && (
+          {isServerUsable(status) && (
             <div className="flex gap-1.5 items-center">
               <Button
                 size="sm"
@@ -232,21 +299,32 @@ function ServerCard({
           )}
         </div>
       </div>
+      <p className="mt-3 text-sm text-muted-foreground">{statusDescription(status)}</p>
       <ProvisioningTimeline status={status} />
+      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+        <ResourcePill label="RAM" value={`${((s.plans?.ram_mb ?? 0) / 1024).toFixed(0)} GB`} />
+        <ResourcePill label="CPU" value={`${s.plans?.cpu_percent ?? 0}%`} />
+        <ResourcePill label="Disque" value={`${((s.plans?.disk_mb ?? 0) / 1024).toFixed(0)} GB`} />
+      </div>
       <div className="mt-4 flex flex-wrap gap-2">
         <Button asChild size="sm" variant="outline">
           <Link to="/billing">Voir la facturation</Link>
         </Button>
-        {status === "active" && (
-          <Button
-            asChild
-            size="sm"
-            className="bg-primary text-primary-foreground hover:bg-primary/90"
-          >
-            <Link to="/manage/$orderId" params={{ orderId: s.id }}>
-              Gérer
-            </Link>
-          </Button>
+        {isServerUsable(status) && (
+          <>
+            <Button size="sm" variant="outline" onClick={copyConnection}>
+              <Copy className="mr-1.5 h-4 w-4" /> Copier connexion
+            </Button>
+            <Button
+              asChild
+              size="sm"
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              <Link to="/manage/$orderId" params={{ orderId: s.id }}>
+                Gérer
+              </Link>
+            </Button>
+          </>
         )}
         {(status === "failed" || status === "provisioning_failed") && (
           <Button asChild size="sm" variant="outline">
@@ -266,6 +344,19 @@ function ServerCard({
       </div>
     </div>
   );
+}
+
+function ResourcePill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 font-display text-lg font-semibold text-primary">{value}</div>
+    </div>
+  );
+}
+
+function formatDate(value?: string | null) {
+  return value ? new Date(value).toLocaleDateString() : "—";
 }
 
 function ProvisioningTimeline({ status }: { status: string }) {

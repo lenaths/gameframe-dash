@@ -15,6 +15,47 @@ const powerInput = z.object({
 });
 
 const orderInput = z.object({ orderId: z.string().uuid() });
+
+type SupabaseAny = {
+  from: (table: string) => SupabaseQuery;
+};
+
+type SupabaseResult<T = unknown> = {
+  data: T | null;
+  error: { message: string; code?: string } | null;
+};
+
+type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
+  select: (columns: string) => SupabaseQuery<T>;
+  eq: (column: string, value: unknown) => SupabaseQuery<T>;
+  in: (column: string, values: unknown[]) => SupabaseQuery<T>;
+  order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
+};
+
+type ServerListRow = {
+  id: string;
+  order_id: string | null;
+  server_name: string;
+  status: string;
+  pterodactyl_server_identifier: string | null;
+  pterodactyl_server_id: number | null;
+  error_message: string | null;
+  created_at: string;
+  plans?: {
+    name?: string | null;
+    game?: string | null;
+    ram_mb?: number | null;
+    cpu_percent?: number | null;
+    disk_mb?: number | null;
+  } | null;
+};
+
+type ServerListItem = ServerListRow & {
+  billing_status: string | null;
+  last_payment_at: string | null;
+  next_renewal_at: string | null;
+};
+
 const MAX_FILE_CONTENT_BYTES = 1024 * 1024;
 const BLOCKED_FILE_EXTENSIONS = new Set([
   ".jar",
@@ -29,10 +70,40 @@ const BLOCKED_FILE_EXTENSIONS = new Set([
 
 type PteroAllocation = {
   attributes?: {
+    id?: number | null;
     ip?: string | null;
     ip_alias?: string | null;
+    alias?: string | null;
     port?: number | null;
     is_default?: boolean | null;
+  };
+};
+
+type PteroServerMeta = {
+  attributes: {
+    identifier?: string | null;
+    uuid?: string | null;
+    uuidShort?: string | null;
+    uuid_short?: string | null;
+    sftp_details?: { ip?: string | null; port?: number | null; username?: string | null };
+    relationships?: {
+      allocations?: { data?: PteroAllocation[] };
+      node?: { attributes?: Record<string, unknown> | null };
+    };
+  };
+};
+
+type PteroApplicationServerMeta = {
+  attributes?: {
+    relationships?: {
+      node?: {
+        attributes?: {
+          fqdn?: string | null;
+          public_ip?: string | null;
+          ip?: string | null;
+        } | null;
+      };
+    };
   };
 };
 
@@ -58,30 +129,65 @@ function publicHost(host: string | null | undefined) {
   return normalized;
 }
 
+function getNodeHostFromApplicationMeta(meta: PteroApplicationServerMeta | null) {
+  const node = meta?.attributes?.relationships?.node?.attributes;
+  return publicHost(node?.public_ip) ?? publicHost(node?.ip) ?? publicHost(node?.fqdn);
+}
+
+async function resolvePublicIPv4(host: string | null | undefined) {
+  const publicNodeHost = publicHost(host);
+  if (!publicNodeHost) return null;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(publicNodeHost)) return publicNodeHost;
+
+  try {
+    const { lookup } = await import("node:dns/promises");
+    const records = await lookup(publicNodeHost, { all: true, family: 4 });
+    return records.map((record) => record.address).find((address) => publicHost(address)) ?? null;
+  } catch (error) {
+    console.warn("[Pterodactyl Server Info] node public IP lookup failed", {
+      host: publicNodeHost,
+      error: (error as Error).message,
+    });
+    return null;
+  }
+}
+
 function getDefaultAllocation(allocations: PteroAllocation[]) {
   return (
     allocations.find((allocation) => allocation.attributes?.is_default) ?? allocations[0] ?? null
   );
 }
 
-function buildConnectionInfo(meta: {
-  attributes: {
-    identifier?: string | null;
-    sftp_details?: { ip?: string | null; port?: number | null; username?: string | null };
-    relationships?: { allocations?: { data?: PteroAllocation[] } };
-  };
-}) {
+function buildConnectionInfo(
+  meta: {
+    attributes: {
+      identifier?: string | null;
+      sftp_details?: { ip?: string | null; port?: number | null; username?: string | null };
+      relationships?: { allocations?: { data?: PteroAllocation[] } };
+    };
+  },
+  accountUsername?: string | null,
+  nodePublicAddress?: string | null,
+) {
   const allocation = getDefaultAllocation(meta.attributes.relationships?.allocations?.data ?? []);
-  const address =
-    publicHost(allocation?.attributes?.ip_alias) ?? publicHost(allocation?.attributes?.ip);
   const sftpHost = publicHost(meta.attributes.sftp_details?.ip);
+  const address =
+    publicHost(allocation?.attributes?.ip_alias) ??
+    publicHost(allocation?.attributes?.alias) ??
+    publicHost(allocation?.attributes?.ip) ??
+    publicHost(nodePublicAddress);
+  const sftpUsername =
+    meta.attributes.sftp_details?.username ??
+    (accountUsername && meta.attributes.identifier
+      ? `${accountUsername}.${meta.attributes.identifier}`
+      : null);
 
   return {
     address,
     port: allocation?.attributes?.port ?? null,
     sftpHost,
     sftpPort: meta.attributes.sftp_details?.port ?? null,
-    sftpUsername: meta.attributes.sftp_details?.username ?? null,
+    sftpUsername,
     identifier: meta.attributes.identifier ?? null,
     unavailableReason:
       address || sftpHost
@@ -131,6 +237,76 @@ function assertEditableFilePath(path: string) {
     throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
   }
   return normalized;
+}
+
+function normalizePterodactylSocketUrl(socket: string, panelBaseUrl: string) {
+  if (!socket?.trim()) throw new Error("Pterodactyl did not return a websocket URL.");
+
+  let url: URL;
+  try {
+    url = new URL(socket, panelBaseUrl || undefined);
+  } catch {
+    throw new Error("Pterodactyl returned an invalid websocket URL.");
+  }
+
+  if (url.protocol === "http:") url.protocol = "ws:";
+  if (url.protocol === "https:") url.protocol = "wss:";
+
+  let upgradedToSecure = false;
+  try {
+    const panelUrl = new URL(panelBaseUrl);
+    if (panelUrl.protocol === "https:" && url.protocol === "ws:") {
+      url.protocol = "wss:";
+      upgradedToSecure = true;
+    }
+  } catch {
+    // Configuration validation happens in the Pterodactyl helper.
+  }
+
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error(`Pterodactyl returned an unsupported websocket protocol: ${url.protocol}`);
+  }
+
+  return {
+    socket: url.toString(),
+    protocol: url.protocol,
+    host: url.host,
+    upgradedToSecure,
+  };
+}
+
+function inspectPterodactylSocketUrl(socket: string) {
+  const url = new URL(socket);
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error(`Pterodactyl returned an unsupported websocket protocol: ${url.protocol}`);
+  }
+  return {
+    protocol: url.protocol,
+    host: url.host,
+  };
+}
+
+function parseWebsocketResponse(res: {
+  data?: { token?: string; socket?: string };
+  token?: string;
+  socket?: string;
+}) {
+  const nestedToken = res.data?.token;
+  const nestedSocket = res.data?.socket;
+  const flatToken = res.token;
+  const flatSocket = res.socket;
+  const responseShape =
+    nestedToken || nestedSocket
+      ? "data.token/data.socket"
+      : flatToken || flatSocket
+        ? "token/socket"
+        : "unknown";
+
+  return {
+    token: nestedToken ?? flatToken ?? "",
+    socket: nestedSocket ?? flatSocket ?? "",
+    responseShape,
+  };
 }
 
 async function assertFileSizeAllowed(identifier: string, file: string) {
@@ -191,16 +367,72 @@ async function loadOwnedIdentifier(
 export const listMyServers = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
-    const { supabase } = context;
-    const { data, error } = await supabase
+    const db = context.supabase as unknown as SupabaseAny;
+    const { data, error } = await db
       .from("server_orders")
       .select(
-        "id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
+        "id, order_id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
       )
       .eq("user_id", context.userId)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
-    return { servers: data ?? [] };
+    const servers = (data ?? []) as ServerListRow[];
+    const orderIds = servers
+      .map((server) => server.order_id)
+      .filter((id): id is string => Boolean(id));
+
+    const withBilling = (
+      rows: ServerListRow[],
+      ordersById = new Map<
+        string,
+        { status: string; current_period_end: string | null; renews_at: string | null }
+      >(),
+      latestPaymentByOrder = new Map<string, string>(),
+    ): ServerListItem[] =>
+      rows.map((server) => {
+        const order = server.order_id ? ordersById.get(server.order_id) : null;
+        return {
+          ...server,
+          billing_status: order?.status ?? null,
+          last_payment_at: server.order_id
+            ? (latestPaymentByOrder.get(server.order_id) ?? null)
+            : null,
+          next_renewal_at: order?.current_period_end ?? order?.renews_at ?? null,
+        };
+      });
+
+    if (orderIds.length === 0) return { servers: withBilling(servers) };
+
+    const [{ data: orders }, { data: payments }] = await Promise.all([
+      db.from("orders").select("id, status, current_period_end, renews_at").in("id", orderIds),
+      db
+        .from("payments")
+        .select("id, order_id, paid_at, created_at")
+        .in("order_id", orderIds)
+        .order("created_at", { ascending: false }),
+    ]);
+    const ordersById = new Map(
+      (
+        (orders ?? []) as Array<{
+          id: string;
+          status: string;
+          current_period_end: string | null;
+          renews_at: string | null;
+        }>
+      ).map((order) => [order.id, order]),
+    );
+    const latestPaymentByOrder = new Map<string, string>();
+    for (const payment of (payments ?? []) as Array<{
+      order_id: string | null;
+      paid_at: string | null;
+      created_at: string;
+    }>) {
+      if (payment.order_id && !latestPaymentByOrder.has(payment.order_id)) {
+        latestPaymentByOrder.set(payment.order_id, payment.paid_at ?? payment.created_at);
+      }
+    }
+
+    return { servers: withBilling(servers, ordersById, latestPaymentByOrder) };
   });
 
 export const deployServer = createServerFn({ method: "POST" })
@@ -268,7 +500,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
     const { data: order, error } = await context.supabase
       .from("server_orders")
       .select(
-        "id, server_name, status, pterodactyl_server_identifier, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
+        "id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
       )
       .eq("id", data.orderId)
       .eq("user_id", context.userId)
@@ -277,7 +509,8 @@ export const getServerDetail = createServerFn({ method: "POST" })
     if (!order.pterodactyl_server_identifier) return { order, live: null };
 
     try {
-      const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+      const { ptero, assertPteroClientConfigured, assertPteroAppConfigured } =
+        await import("@/lib/pterodactyl.server");
       assertPteroClientConfigured();
       const res = (await ptero.client(
         `/servers/${order.pterodactyl_server_identifier}/resources`,
@@ -293,16 +526,49 @@ export const getServerDetail = createServerFn({ method: "POST" })
           };
         };
       };
-      const meta = (await ptero.client(
-        `/servers/${order.pterodactyl_server_identifier}?include=allocations`,
-      )) as {
-        attributes: {
-          identifier?: string | null;
-          sftp_details?: { ip?: string | null; port?: number | null; username?: string | null };
-          relationships?: { allocations?: { data?: PteroAllocation[] } };
-        };
-      };
-      const connection = buildConnectionInfo(meta);
+      const [meta, account] = await Promise.all([
+        ptero.client(
+          `/servers/${order.pterodactyl_server_identifier}?include=allocations,node`,
+        ) as Promise<PteroServerMeta>,
+        ptero.client("/account") as Promise<{
+          attributes?: { username?: string | null };
+        }>,
+      ]);
+      let appMeta: PteroApplicationServerMeta | null = null;
+      if (order.pterodactyl_server_id) {
+        try {
+          assertPteroAppConfigured();
+          appMeta = (await ptero.app(
+            `/servers/${order.pterodactyl_server_id}?include=node,allocations`,
+          )) as PteroApplicationServerMeta;
+        } catch (appError) {
+          console.warn("[Pterodactyl Server Info] application node lookup failed", {
+            identifier: order.pterodactyl_server_identifier,
+            pterodactylServerId: order.pterodactyl_server_id,
+            error: (appError as Error).message,
+          });
+        }
+      }
+      const nodePublicHost = getNodeHostFromApplicationMeta(appMeta);
+      const nodePublicAddress = await resolvePublicIPv4(nodePublicHost);
+      console.info("[Pterodactyl Server Info] raw server connection data", {
+        identifier: meta.attributes.identifier ?? null,
+        uuid: meta.attributes.uuid ?? null,
+        uuidShort: meta.attributes.uuidShort ?? meta.attributes.uuid_short ?? null,
+        allocations: (meta.attributes.relationships?.allocations?.data ?? []).map(
+          (allocation) => allocation.attributes ?? null,
+        ),
+        sftp: meta.attributes.sftp_details ?? null,
+        node: meta.attributes.relationships?.node?.attributes ?? null,
+        applicationNode: appMeta?.attributes?.relationships?.node?.attributes ?? null,
+        nodePublicHost,
+        nodePublicAddress,
+      });
+      const connection = buildConnectionInfo(
+        meta,
+        account.attributes?.username ?? null,
+        nodePublicAddress,
+      );
       return {
         order,
         live: {
@@ -332,15 +598,67 @@ export const getServerWebsocket = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d: unknown) => orderInput.parse(d))
   .handler(async ({ data, context }) => {
+    let identifier: string | null = null;
     try {
-      const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
-      const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+      identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
+      const { ptero, assertPteroClientConfigured, getPanelBaseUrl } =
+        await import("@/lib/pterodactyl.server");
       assertPteroClientConfigured();
-      const res = (await ptero.client(`/servers/${identifier}/websocket`)) as {
-        data: { token: string; socket: string };
+      const meta = (await ptero.client(`/servers/${identifier}`)) as {
+        attributes?: { identifier?: string; uuid?: string; name?: string };
       };
-      return { ok: true as const, token: res.data.token, socket: res.data.socket };
+      const endpoint = `/api/client/servers/${identifier}/websocket`;
+      const res = (await ptero.client(`/servers/${identifier}/websocket`)) as {
+        data?: { token?: string; socket?: string };
+        token?: string;
+        socket?: string;
+      };
+      const wsResponse = parseWebsocketResponse(res);
+      if (!wsResponse.token || !wsResponse.socket) {
+        throw new Error("Pterodactyl websocket response is missing token or socket.");
+      }
+
+      const inspected = inspectPterodactylSocketUrl(wsResponse.socket);
+      const normalized = normalizePterodactylSocketUrl(wsResponse.socket, getPanelBaseUrl());
+      console.info("[Pterodactyl WS] websocket credentials issued", {
+        orderId: data.orderId,
+        identifier,
+        panelServerIdentifier: meta.attributes?.identifier ?? null,
+        panelServerUuid: meta.attributes?.uuid ?? null,
+        endpoint,
+        responseShape: wsResponse.responseShape,
+        hasToken: Boolean(wsResponse.token),
+        tokenLength: wsResponse.token.length,
+        socketHost: inspected.host,
+        socketProtocol: inspected.protocol,
+        upgradedToSecure: normalized.upgradedToSecure,
+      });
+
+      return {
+        ok: true as const,
+        token: wsResponse.token,
+        socket: wsResponse.socket,
+        debug:
+          process.env.NODE_ENV === "development"
+            ? {
+                endpoint,
+                responseShape: wsResponse.responseShape,
+                hasToken: Boolean(wsResponse.token),
+                tokenLength: wsResponse.token.length,
+                originalSocket: wsResponse.socket,
+                normalizedSocket: normalized.socket,
+                socketProtocol: inspected.protocol,
+                socketHost: inspected.host,
+              }
+            : null,
+      };
     } catch (e) {
+      console.error("[Pterodactyl WS] websocket credential generation failed", {
+        orderId: data.orderId,
+        userId: context.userId,
+        identifier,
+        error: (e as Error).message,
+      });
       return { ok: false as const, error: (e as Error).message };
     }
   });

@@ -14,6 +14,8 @@ import {
   Save,
   RefreshCw,
   ChevronLeft,
+  Copy,
+  LifeBuoy,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,6 +24,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { SiteHeader } from "@/components/site-header";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 import {
   getServerDetail,
   getServerWebsocket,
@@ -48,6 +51,59 @@ const BLOCKED_EDITOR_EXTENSIONS = new Set([
   ".sqlite",
   ".db",
 ]);
+
+const WS_ERROR_MESSAGE = "Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.";
+const SHOW_CONSOLE_DEBUG = import.meta.env.DEV;
+
+type ConsoleDebugState = {
+  endpoint: string;
+  responseShape: string;
+  hasToken: string;
+  tokenLength: string;
+  originalSocket: string;
+  normalizedSocket: string;
+  socketProtocol: string;
+  socketHost: string;
+  attempt1Socket: string;
+  attempt1Result: string;
+  attempt2Socket: string;
+  attempt2Result: string;
+  reachedStage: string;
+  websocketOpenAt: string;
+  authSentAt: string;
+  authSuccessAt: string;
+  authFailedAt: string;
+  closeCode: string;
+  closeReason: string;
+  lastRawMessage: string;
+  lastWebsocketError: string;
+  serverDiagnostic: string;
+};
+
+const initialConsoleDebug: ConsoleDebugState = {
+  endpoint: "—",
+  responseShape: "—",
+  hasToken: "—",
+  tokenLength: "—",
+  originalSocket: "—",
+  normalizedSocket: "—",
+  socketProtocol: "—",
+  socketHost: "—",
+  attempt1Socket: "—",
+  attempt1Result: "—",
+  attempt2Socket: "—",
+  attempt2Result: "—",
+  reachedStage: "—",
+  websocketOpenAt: "—",
+  authSentAt: "—",
+  authSuccessAt: "—",
+  authFailedAt: "—",
+  closeCode: "—",
+  closeReason: "—",
+  lastRawMessage: "—",
+  lastWebsocketError: "—",
+  serverDiagnostic: "—",
+};
 
 export const Route = createFileRoute("/_authenticated/manage/$orderId")({
   head: () => ({ meta: [{ title: "Manage server · XntServers" }] }),
@@ -215,6 +271,11 @@ function ServerDetail() {
               </TabsContent>
               <TabsContent value="info" className="mt-4">
                 <InfoTab
+                  order={{
+                    id: order.id,
+                    serverName: order.server_name,
+                    status: live?.state ?? order.status,
+                  }}
                   connection={
                     connection ?? {
                       address: null,
@@ -266,6 +327,13 @@ function ConsoleTab({ orderId }: { orderId: string }) {
   const [connected, setConnected] = useState(false);
   const [consoleError, setConsoleError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [wsCheckPending, setWsCheckPending] = useState(false);
+  const [debug, setDebug] = useState<ConsoleDebugState>(initialConsoleDebug);
+
+  const updateDebug = (patch: Partial<ConsoleDebugState>) => {
+    if (!SHOW_CONSOLE_DEBUG) return;
+    setDebug((current) => ({ ...current, ...patch }));
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -274,6 +342,7 @@ function ConsoleTab({ orderId }: { orderId: string }) {
     let ro: ResizeObserver | null = null;
     setConnected(false);
     setConsoleError(null);
+    setDebug(initialConsoleDebug);
 
     (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -309,70 +378,61 @@ function ConsoleTab({ orderId }: { orderId: string }) {
       const connect = async () => {
         const creds = await fetchWs({ data: { orderId } });
         if (!creds.ok) throw new Error(creds.error);
-        try {
-          ws = new WebSocket(creds.socket);
-        } catch (error) {
-          console.error("[Pterodactyl WS] constructor failed", error);
-          throw new Error("Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.");
-        }
-        wsRef.current = ws;
-        ws.onopen = () => {
-          ws?.send(JSON.stringify({ event: "auth", args: [creds.token] }));
-          setConnected(true);
-          t.write("\x1b[32m[Connected to server console]\x1b[0m\r\n");
-        };
-        ws.onmessage = async (ev) => {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.event === "console output" || msg.event === "install output") {
-              t.write(String(msg.args?.[0] ?? "") + "\r\n");
-            } else if (msg.event === "status") {
-              t.write(`\x1b[33m[status: ${msg.args?.[0]}]\x1b[0m\r\n`);
-            } else if (msg.event === "token expiring" || msg.event === "token expired") {
-              try {
-                const fresh = await fetchWs({ data: { orderId } });
-                if (!fresh.ok) throw new Error(fresh.error);
-                ws?.send(JSON.stringify({ event: "auth", args: [fresh.token] }));
-              } catch (err) {
-                t.write(`\x1b[31m[token refresh failed: ${(err as Error).message}]\x1b[0m\r\n`);
-              }
-            } else if (msg.event === "jwt error" || msg.event === "auth error") {
-              t.write(`\x1b[31m[auth error]\x1b[0m\r\n`);
-            }
-          } catch {
-            /* ignore */
-          }
-        };
-        ws.onclose = (event) => {
-          console.warn("[Pterodactyl WS] closed", {
-            code: event.code,
-            reason: event.reason,
-            wasClean: event.wasClean,
+        const socketAttempts = buildWebsocketAttempts(creds.socket);
+        const firstSocketMeta = getWebsocketLogMeta(socketAttempts[0] ?? creds.socket);
+        updateDebug({
+          endpoint: creds.debug?.endpoint ?? "—",
+          responseShape: creds.debug?.responseShape ?? "—",
+          hasToken: creds.debug?.hasToken ? "oui" : "non",
+          tokenLength:
+            typeof creds.debug?.tokenLength === "number" ? String(creds.debug.tokenLength) : "—",
+          originalSocket: creds.debug?.originalSocket ?? creds.socket,
+          normalizedSocket: creds.debug?.normalizedSocket ?? "—",
+          socketProtocol: firstSocketMeta.socketProtocol,
+          socketHost: firstSocketMeta.socketHost,
+          attempt1Socket: socketAttempts[0] ?? "—",
+          attempt1Result: "pending",
+          attempt2Socket: socketAttempts[1] ?? "—",
+          attempt2Result: socketAttempts[1] ? "waiting" : "not needed",
+          reachedStage: "created",
+        });
+
+        for (let index = 0; index < socketAttempts.length; index += 1) {
+          if (cancelled) return;
+          const attemptNumber = index + 1;
+          const attemptSocket = socketAttempts[index];
+          const result = await openConsoleSocket({
+            socketUrl: attemptSocket,
+            attemptNumber,
+            token: creds.token,
+            orderId,
+            terminal: t,
+            setActiveSocket: (activeSocket) => {
+              ws = activeSocket;
+              wsRef.current = activeSocket;
+            },
+            setConnected,
+            setConsoleError,
+            updateDebug,
+            fetchWs,
           });
-          setConnected(false);
-          t.write(
-            `\x1b[31m[disconnected code=${event.code} reason=${event.reason || "none"}]\x1b[0m\r\n`,
-          );
-        };
-        ws.onerror = (event) => {
-          console.error("[Pterodactyl WS] error", event);
-          setConsoleError("Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.");
-          setConnected(false);
-          t.write("\x1b[31m[ws error]\x1b[0m\r\n");
-        };
+
+          if (result === "connected") return;
+          if (result === "fallback" && socketAttempts[index + 1]) {
+            t.write("\x1b[33m[Retrying websocket without explicit :443...]\x1b[0m\r\n");
+            continue;
+          }
+          throw new Error(WS_ERROR_MESSAGE);
+        }
       };
 
       try {
         await connect();
       } catch (e) {
-        const message =
-          (e as Error).message || "Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.";
+        const message = (e as Error).message || WS_ERROR_MESSAGE;
+        updateDebug({ lastWebsocketError: message });
         console.error("[Pterodactyl WS] connect failed", e);
-        setConsoleError(
-          message.includes("WebSocket")
-            ? message
-            : "Console WebSocket inaccessible. Vérifiez Wings / NPM / SSL.",
-        );
+        setConsoleError(message.includes("WebSocket") ? message : WS_ERROR_MESSAGE);
         t.write(`\x1b[31m${message}\x1b[0m\r\n`);
       }
     })();
@@ -404,6 +464,33 @@ function ConsoleTab({ orderId }: { orderId: string }) {
     }
   };
 
+  const runWsCheck = async () => {
+    try {
+      setWsCheckPending(true);
+      updateDebug({ serverDiagnostic: "running..." });
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) throw new Error("Session Supabase absente.");
+
+      const response = await fetch(`/api/debug/ws-check?orderId=${encodeURIComponent(orderId)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = await response.json();
+      updateDebug({ serverDiagnostic: JSON.stringify(body, null, 2) });
+      if (!response.ok || !body.success) {
+        toast.warning("Diagnostic WebSocket terminé avec une anomalie.");
+      } else {
+        toast.success("Diagnostic WebSocket OK.");
+      }
+    } catch (error) {
+      const message = (error as Error).message;
+      updateDebug({ serverDiagnostic: message });
+      toast.error(message);
+    } finally {
+      setWsCheckPending(false);
+    }
+  };
+
   return (
     <div className="overflow-hidden rounded-xl border border-primary/20 bg-[#050816] shadow-[0_0_35px_rgba(0,191,255,0.08)]">
       {consoleError && (
@@ -414,6 +501,17 @@ function ConsoleTab({ orderId }: { orderId: string }) {
           </Button>
         </div>
       )}
+      {SHOW_CONSOLE_DEBUG && (
+        <ConsoleDebugPanel debug={debug} onRunWsCheck={runWsCheck} pending={wsCheckPending} />
+      )}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary/15 bg-surface px-3 py-2 text-sm">
+        <span className={connected ? "text-success" : "text-muted-foreground"}>
+          {connected ? "Console connectée" : "Connexion console en cours ou déconnectée"}
+        </span>
+        <Button size="sm" variant="outline" onClick={() => setRetryKey((key) => key + 1)}>
+          <RefreshCw className="mr-1 h-4 w-4" /> Reconnecter
+        </Button>
+      </div>
       <div ref={termRef} className="h-[420px] w-full px-3 py-2" />
       <form onSubmit={onSubmit} className="flex gap-2 border-t border-primary/15 bg-surface p-2">
         <Input
@@ -429,6 +527,340 @@ function ConsoleTab({ orderId }: { orderId: string }) {
       </form>
     </div>
   );
+}
+
+function ConsoleDebugPanel({
+  debug,
+  onRunWsCheck,
+  pending,
+}: {
+  debug: ConsoleDebugState;
+  onRunWsCheck: () => void;
+  pending: boolean;
+}) {
+  const rows: Array<[string, string]> = [
+    ["Endpoint websocket", debug.endpoint],
+    ["Structure réponse", debug.responseShape],
+    ["Token présent", debug.hasToken],
+    ["Longueur token", debug.tokenLength],
+    ["Socket original", debug.originalSocket],
+    ["Socket final", debug.normalizedSocket],
+    ["socketProtocol", debug.socketProtocol],
+    ["socketHost", debug.socketHost],
+    ["Tentative 1 socket", debug.attempt1Socket],
+    ["Tentative 1 résultat", debug.attempt1Result],
+    ["Tentative 2 socket", debug.attempt2Socket],
+    ["Tentative 2 résultat", debug.attempt2Result],
+    ["Étape atteinte", debug.reachedStage],
+    ["WebSocket open", debug.websocketOpenAt],
+    ["Auth sent", debug.authSentAt],
+    ["Auth success", debug.authSuccessAt],
+    ["Auth failed", debug.authFailedAt],
+    ["Close code", debug.closeCode],
+    ["Close reason", debug.closeReason],
+    ["Dernier message brut", debug.lastRawMessage],
+    ["Dernière erreur", debug.lastWebsocketError],
+    ["Diagnostic serveur", debug.serverDiagnostic],
+  ];
+
+  return (
+    <div className="border-b border-primary/20 bg-primary/5 p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-xs font-semibold uppercase tracking-wider text-primary">
+          Console debug développement
+        </div>
+        <Button size="sm" variant="outline" onClick={onRunWsCheck} disabled={pending}>
+          <RefreshCw className={`h-4 w-4 mr-1 ${pending ? "animate-spin" : ""}`} />
+          Test WebSocket
+        </Button>
+      </div>
+      <div className="grid gap-2 text-xs sm:grid-cols-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="rounded-md border border-primary/10 bg-background/40 p-2">
+            <div className="text-muted-foreground">{label}</div>
+            <div className="mt-1 break-all font-mono text-foreground">{value || "—"}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+type ConsoleSocketResult = "connected" | "fallback" | "failed";
+
+type ConsoleSocketArgs = {
+  socketUrl: string;
+  attemptNumber: number;
+  token: string;
+  orderId: string;
+  terminal: { write: (value: string) => void };
+  setActiveSocket: (socket: WebSocket) => void;
+  setConnected: (connected: boolean) => void;
+  setConsoleError: (message: string | null) => void;
+  updateDebug: (patch: Partial<ConsoleDebugState>) => void;
+  fetchWs: (input: { data: { orderId: string } }) => Promise<{
+    ok: boolean;
+    token?: string;
+    error?: string;
+  }>;
+};
+
+function openConsoleSocket({
+  socketUrl,
+  attemptNumber,
+  token,
+  orderId,
+  terminal,
+  setActiveSocket,
+  setConnected,
+  setConsoleError,
+  updateDebug,
+  fetchWs,
+}: ConsoleSocketArgs) {
+  return new Promise<ConsoleSocketResult>((resolve) => {
+    const socketMeta = getWebsocketLogMeta(socketUrl);
+    const attemptResultKey = attemptNumber === 1 ? "attempt1Result" : "attempt2Result";
+    let opened = false;
+    let authenticated = false;
+    let settled = false;
+    let ws: WebSocket;
+    let openTimer: number | null = window.setTimeout(() => {
+      if (opened || settled) return;
+      updateDebug({
+        [attemptResultKey]: "timeout before open",
+        reachedStage: "failed",
+        lastWebsocketError: "timeout before open",
+      });
+      settled = true;
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
+      resolve(attemptNumber === 1 ? "fallback" : "failed");
+    }, 8_000);
+
+    const finish = (result: ConsoleSocketResult) => {
+      if (settled) return;
+      settled = true;
+      if (openTimer) {
+        window.clearTimeout(openTimer);
+        openTimer = null;
+      }
+      resolve(result);
+    };
+
+    updateDebug({
+      [attemptResultKey]: "created",
+      reachedStage: "created",
+      socketProtocol: socketMeta.socketProtocol,
+      socketHost: socketMeta.socketHost,
+    });
+
+    try {
+      ws = new WebSocket(socketUrl);
+    } catch (error) {
+      updateDebug({
+        [attemptResultKey]: "constructor failed",
+        reachedStage: "failed",
+        lastWebsocketError: stringifyWebsocketError(error),
+      });
+      console.error("[Pterodactyl WS] constructor failed", { ...socketMeta, error });
+      finish(attemptNumber === 1 ? "fallback" : "failed");
+      return;
+    }
+
+    setActiveSocket(ws);
+
+    ws.onopen = () => {
+      opened = true;
+      if (openTimer) {
+        window.clearTimeout(openTimer);
+        openTimer = null;
+      }
+      const now = formatDebugTime();
+      ws.send(JSON.stringify({ event: "auth", args: [token] }));
+      updateDebug({
+        [attemptResultKey]: "open, auth sent",
+        reachedStage: "auth sent",
+        websocketOpenAt: now,
+        authSentAt: now,
+      });
+      terminal.write("\x1b[36m[WebSocket open, authenticating...]\x1b[0m\r\n");
+    };
+
+    ws.onmessage = async (ev) => {
+      const raw = typeof ev.data === "string" ? ev.data : "[binary websocket message]";
+      updateDebug({ lastRawMessage: truncateDebugValue(raw) });
+      try {
+        const msg = JSON.parse(raw);
+        if (msg.event === "auth success") {
+          authenticated = true;
+          updateDebug({
+            [attemptResultKey]: "auth success",
+            reachedStage: "auth success",
+            authSuccessAt: formatDebugTime(),
+          });
+          setConnected(true);
+          setConsoleError(null);
+          ws.send(JSON.stringify({ event: "send logs", args: [null] }));
+          ws.send(JSON.stringify({ event: "send stats", args: [null] }));
+          terminal.write("\x1b[32m[Authenticated to server console]\x1b[0m\r\n");
+          finish("connected");
+        } else if (msg.event === "console output" || msg.event === "install output") {
+          terminal.write(String(msg.args?.[0] ?? "") + "\r\n");
+        } else if (msg.event === "status") {
+          terminal.write(`\x1b[33m[status: ${msg.args?.[0]}]\x1b[0m\r\n`);
+        } else if (msg.event === "token expiring" || msg.event === "token expired") {
+          try {
+            const fresh = await fetchWs({ data: { orderId } });
+            if (!fresh.ok || !fresh.token) throw new Error(fresh.error ?? "Token refresh failed.");
+            ws.send(JSON.stringify({ event: "auth", args: [fresh.token] }));
+            terminal.write("\x1b[36m[Console token refreshed]\x1b[0m\r\n");
+          } catch (err) {
+            terminal.write(`\x1b[31m[token refresh failed: ${(err as Error).message}]\x1b[0m\r\n`);
+          }
+        } else if (msg.event === "jwt error" || msg.event === "auth error") {
+          updateDebug({
+            [attemptResultKey]: "auth failed",
+            reachedStage: "auth failed",
+            authFailedAt: formatDebugTime(),
+            lastWebsocketError: String(msg.args?.[0] ?? msg.event),
+          });
+          setConsoleError(WS_ERROR_MESSAGE);
+          setConnected(false);
+          console.error("[Pterodactyl WS] auth failed", {
+            ...socketMeta,
+            event: msg.event,
+            args: msg.args,
+          });
+          terminal.write(`\x1b[31m[auth error]\x1b[0m\r\n`);
+          finish("failed");
+        }
+      } catch {
+        // Pterodactyl messages should be JSON; keep raw content in the debug panel.
+      }
+    };
+
+    ws.onclose = (event) => {
+      const result =
+        !opened && event.code === 1006 && attemptNumber === 1
+          ? "closed 1006 before open, fallback"
+          : `closed ${event.code}`;
+      updateDebug({
+        [attemptResultKey]: result,
+        reachedStage: authenticated ? "auth success" : opened ? "open" : "failed",
+        closeCode: String(event.code),
+        closeReason: event.reason || "none",
+        lastWebsocketError: event.wasClean ? "—" : `closed: ${event.code}`,
+      });
+      console.warn("[Pterodactyl WS] closed", {
+        ...socketMeta,
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean,
+        opened,
+        authenticated,
+        attemptNumber,
+      });
+      setConnected(false);
+      terminal.write(
+        `\x1b[31m[disconnected code=${event.code} reason=${event.reason || "none"}]\x1b[0m\r\n`,
+      );
+
+      if (!opened && event.code === 1006 && attemptNumber === 1) {
+        finish("fallback");
+        return;
+      }
+
+      if (!authenticated) {
+        setConsoleError(WS_ERROR_MESSAGE);
+        finish("failed");
+      }
+    };
+
+    ws.onerror = (event) => {
+      updateDebug({
+        [attemptResultKey]: "websocket error",
+        lastWebsocketError: stringifyWebsocketError(event),
+      });
+      console.error("[Pterodactyl WS] error", { ...socketMeta, event, attemptNumber });
+      setConsoleError(WS_ERROR_MESSAGE);
+      setConnected(false);
+      terminal.write("\x1b[31m[ws error]\x1b[0m\r\n");
+    };
+  });
+}
+
+function formatDebugTime() {
+  return new Date().toLocaleTimeString("fr-BE", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function stringifyWebsocketError(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (error instanceof Event) return error.type || "websocket event";
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function buildWebsocketAttempts(socket: string) {
+  const first = normalizeBrowserWebsocketUrl(socket, { preserveDefaultPort: true });
+  const attempts = [first];
+  const withoutDefaultPort = removeExplicitDefaultWebsocketPort(first);
+  if (withoutDefaultPort !== first) attempts.push(withoutDefaultPort);
+  return attempts;
+}
+
+function normalizeBrowserWebsocketUrl(socket: string, options?: { preserveDefaultPort?: boolean }) {
+  const url = new URL(socket, window.location.href);
+  if (url.protocol === "http:")
+    url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  if (url.protocol === "https:") url.protocol = "wss:";
+  if (window.location.protocol === "https:" && url.protocol === "ws:") url.protocol = "wss:";
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error(WS_ERROR_MESSAGE);
+  }
+  if (options?.preserveDefaultPort) {
+    return preserveExplicitDefaultWebsocketPort(socket, url);
+  }
+  return url.toString();
+}
+
+function preserveExplicitDefaultWebsocketPort(original: string, url: URL) {
+  const serialized = url.toString();
+  if (url.protocol === "wss:" && /:443(\/|$|\?)/.test(original)) {
+    return serialized.replace(`wss://${url.hostname}`, `wss://${url.hostname}:443`);
+  }
+  if (url.protocol === "ws:" && /:80(\/|$|\?)/.test(original)) {
+    return serialized.replace(`ws://${url.hostname}`, `ws://${url.hostname}:80`);
+  }
+  return serialized;
+}
+
+function removeExplicitDefaultWebsocketPort(socket: string) {
+  return socket
+    .replace(/^wss:\/\/([^/:?#]+):443(?=\/|$|\?)/, "wss://$1")
+    .replace(/^ws:\/\/([^/:?#]+):80(?=\/|$|\?)/, "ws://$1");
+}
+
+function truncateDebugValue(value: string) {
+  return value.length > 500 ? `${value.slice(0, 500)}…` : value;
+}
+
+function getWebsocketLogMeta(socket: string) {
+  try {
+    const url = new URL(socket);
+    return { socketProtocol: url.protocol, socketHost: url.host };
+  } catch {
+    return { socketProtocol: "invalid", socketHost: "invalid" };
+  }
 }
 
 /* ---------------- Files ---------------- */
@@ -634,24 +1066,95 @@ type ConnectionInfo = {
   unavailableReason: string | null;
 };
 
-function InfoTab({ connection }: { connection: ConnectionInfo }) {
+function InfoTab({
+  connection,
+  order,
+}: {
+  connection: ConnectionInfo;
+  order: { id: string; serverName: string; status: string };
+}) {
+  const copyValue = async (label: string, value: string | number | null) => {
+    if (value == null || value === "") {
+      toast.warning(`${label} indisponible.`);
+      return;
+    }
+    await navigator.clipboard.writeText(String(value));
+    toast.success(`${label} copié.`);
+  };
+
+  const copyAll = async () => {
+    const lines = buildConnectionCopyLines(connection);
+    if (lines.length === 0) {
+      toast.warning("Informations de connexion indisponibles.");
+      return;
+    }
+    await navigator.clipboard.writeText(`Serveur XNTServers\n${lines.join("\n")}`);
+    toast.success("Infos de connexion copiées.");
+  };
+
   return (
     <div className="xnt-card space-y-4 rounded-xl p-6">
       <div>
-        <h3 className="font-display text-lg font-semibold mb-2">Connexion serveur</h3>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-display text-lg font-semibold">Connexion serveur</h3>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={copyAll}>
+              <Copy className="mr-1.5 h-4 w-4" /> Copier toutes les infos
+            </Button>
+            <Button asChild size="sm" variant="outline">
+              <Link
+                to="/support"
+                search={
+                  {
+                    subject: `Support serveur ${order.serverName}`,
+                    orderId: order.id,
+                    body: [
+                      `Bonjour,`,
+                      ``,
+                      `J'ai besoin d'aide pour le serveur ${order.serverName}.`,
+                      `Order id : ${order.id}`,
+                      `Identifier Pterodactyl : ${connection.identifier ?? "indisponible"}`,
+                      `Etat actuel : ${order.status}`,
+                    ].join("\n"),
+                  } as never
+                }
+              >
+                <LifeBuoy className="mr-1.5 h-4 w-4" /> Contacter le support
+              </Link>
+            </Button>
+          </div>
+        </div>
         <div className="grid gap-3 md:grid-cols-2">
           <InfoLine
             label="Adresse publique"
             value={connection.address ?? "Adresse publique indisponible"}
+            onCopy={() => copyValue("Adresse publique", connection.address)}
           />
-          <InfoLine label="Port serveur" value={connection.port ?? "Port indisponible"} />
-          <InfoLine label="Hôte SFTP public" value={connection.sftpHost ?? "SFTP indisponible"} />
-          <InfoLine label="Port SFTP" value={connection.sftpPort ?? "Port SFTP indisponible"} />
+          <InfoLine
+            label="Port serveur"
+            value={connection.port ?? "Port indisponible"}
+            onCopy={() => copyValue("Port serveur", connection.port)}
+          />
+          <InfoLine
+            label="Hôte SFTP public"
+            value={connection.sftpHost ?? "SFTP indisponible"}
+            onCopy={() => copyValue("Hôte SFTP", connection.sftpHost)}
+          />
+          <InfoLine
+            label="Port SFTP"
+            value={connection.sftpPort ?? "Port SFTP indisponible"}
+            onCopy={() => copyValue("Port SFTP", connection.sftpPort)}
+          />
           <InfoLine
             label="Utilisateur SFTP"
             value={connection.sftpUsername ?? "Utilisateur SFTP indisponible"}
+            onCopy={() => copyValue("Utilisateur SFTP", connection.sftpUsername)}
           />
-          <InfoLine label="Identifier Pterodactyl" value={connection.identifier ?? "—"} />
+          <InfoLine
+            label="Identifier Pterodactyl"
+            value={connection.identifier ?? "—"}
+            onCopy={() => copyValue("Identifier", connection.identifier)}
+          />
         </div>
         {connection.unavailableReason && (
           <div className="mt-4 rounded-lg border border-accent/30 bg-accent/10 p-3 text-sm text-accent">
@@ -663,13 +1166,41 @@ function InfoTab({ connection }: { connection: ConnectionInfo }) {
   );
 }
 
-function InfoLine({ label, value }: { label: string; value: string | number }) {
+function InfoLine({
+  label,
+  value,
+  onCopy,
+}: {
+  label: string;
+  value: string | number;
+  onCopy?: () => void;
+}) {
   return (
     <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
-      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+        {onCopy && (
+          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={onCopy}>
+            <Copy className="h-4 w-4" />
+          </Button>
+        )}
+      </div>
       <div className="mt-1 break-all font-mono text-sm text-primary">{value}</div>
     </div>
   );
+}
+
+function buildConnectionCopyLines(connection: ConnectionInfo) {
+  const lines: string[] = [];
+  if (connection.address && connection.port) {
+    lines.push(`Adresse : ${connection.address}:${connection.port}`);
+  }
+  if (connection.sftpHost && connection.sftpPort) {
+    lines.push(`SFTP : ${connection.sftpHost}:${connection.sftpPort}`);
+  }
+  if (connection.sftpUsername) lines.push(`Utilisateur SFTP : ${connection.sftpUsername}`);
+  if (connection.identifier) lines.push(`Identifiant : ${connection.identifier}`);
+  return lines;
 }
 
 /* ---------------- Startup & Variables ---------------- */

@@ -6,6 +6,7 @@ import {
   ClipboardList,
   CreditCard,
   ExternalLink,
+  Gauge,
   LifeBuoy,
   Package,
   Plus,
@@ -41,10 +42,13 @@ import { Textarea } from "@/components/ui/textarea";
 import {
   adminListAll,
   adminListLogsDetailed,
+  adminGetMonitoring,
+  adminListReconciliation,
   adminListOrdersDetailed,
   adminListPaymentsDetailed,
   adminListPlans,
   adminListServersDetailed,
+  adminRepairReconciliation,
   adminRetryProvisioning,
   adminSyncServerStatus,
   adminUpdatePlanEggs,
@@ -64,6 +68,8 @@ function Admin() {
   const fetchPayments = useServerFn(adminListPaymentsDetailed);
   const fetchLogs = useServerFn(adminListLogsDetailed);
   const fetchTickets = useServerFn(adminListTickets);
+  const fetchMonitoring = useServerFn(adminGetMonitoring);
+  const fetchReconciliation = useServerFn(adminListReconciliation);
 
   const overviewQ = useQuery({ queryKey: ["admin-all"], queryFn: () => fetchAll(), retry: false });
   const plansQ = useQuery({ queryKey: ["admin-plans"], queryFn: () => fetchPlans(), retry: false });
@@ -92,6 +98,16 @@ function Admin() {
     queryFn: () => fetchTickets(),
     retry: false,
   });
+  const monitoringQ = useQuery({
+    queryKey: ["admin-monitoring"],
+    queryFn: () => fetchMonitoring(),
+    retry: false,
+  });
+  const reconciliationQ = useQuery({
+    queryKey: ["admin-reconciliation"],
+    queryFn: () => fetchReconciliation(),
+    retry: false,
+  });
 
   const error =
     overviewQ.error ??
@@ -100,7 +116,9 @@ function Admin() {
     serversQ.error ??
     paymentsQ.error ??
     logsQ.error ??
-    ticketsQ.error;
+    ticketsQ.error ??
+    monitoringQ.error ??
+    reconciliationQ.error;
 
   return (
     <div className="xnt-page min-h-screen">
@@ -125,6 +143,8 @@ function Admin() {
         <Tabs defaultValue="orders" className="mt-8">
           <TabsList className="h-auto w-full flex-wrap justify-start">
             <TabsTrigger value="orders">Orders</TabsTrigger>
+            <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
+            <TabsTrigger value="reconciliation">Reconciliation</TabsTrigger>
             <TabsTrigger value="servers">Servers</TabsTrigger>
             <TabsTrigger value="payments">Payments</TabsTrigger>
             <TabsTrigger value="logs">Logs</TabsTrigger>
@@ -135,6 +155,14 @@ function Admin() {
 
           <TabsContent value="orders" className="mt-6">
             <AdminOrdersSection orders={(ordersQ.data?.orders ?? []) as AdminOrder[]} />
+          </TabsContent>
+          <TabsContent value="monitoring" className="mt-6">
+            <AdminMonitoringSection data={monitoringQ.data as AdminMonitoring | undefined} />
+          </TabsContent>
+          <TabsContent value="reconciliation" className="mt-6">
+            <AdminReconciliationSection
+              anomalies={(reconciliationQ.data?.anomalies ?? []) as AdminAnomaly[]}
+            />
           </TabsContent>
           <TabsContent value="servers" className="mt-6">
             <AdminServersSection servers={(serversQ.data?.servers ?? []) as AdminServer[]} />
@@ -255,6 +283,136 @@ type AuditLog = {
   action: string;
   created_at: string;
 };
+
+type AdminMonitoring = {
+  users: number;
+  servers: number;
+  orders: number;
+  payments: number;
+  revenueTotalCents: number;
+  revenueMonthCents: number;
+  ticketsOpen: number;
+  ticketsClosed: number;
+};
+
+type AdminAnomaly = {
+  id: string;
+  type: string;
+  area: "stripe" | "pterodactyl";
+  status: string;
+  date: string;
+  message: string;
+  recommendation: string;
+  repairAction: "retry_provisioning" | "sync_server" | "none";
+  orderId?: string | null;
+  serverOrderId?: string | null;
+};
+
+function AdminMonitoringSection({ data }: { data?: AdminMonitoring }) {
+  const cards = [
+    ["Users", data?.users ?? 0],
+    ["Servers", data?.servers ?? 0],
+    ["Orders", data?.orders ?? 0],
+    ["Payments", data?.payments ?? 0],
+    ["Revenue total", formatMoney(data?.revenueTotalCents ?? 0, "EUR")],
+    ["Revenue month", formatMoney(data?.revenueMonthCents ?? 0, "EUR")],
+    ["Tickets ouverts", data?.ticketsOpen ?? 0],
+    ["Tickets fermés", data?.ticketsClosed ?? 0],
+  ];
+  return (
+    <section>
+      <SectionTitle icon={<Gauge className="h-5 w-5" />} title="Monitoring" />
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {cards.map(([label, value]) => (
+          <div key={label} className="xnt-card rounded-xl p-5">
+            <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+            <div className="mt-2 font-display text-3xl font-bold text-primary">{value}</div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }) {
+  const qc = useQueryClient();
+  const repairFn = useServerFn(adminRepairReconciliation);
+  const repair = useMutation({
+    mutationFn: (anomaly: AdminAnomaly) =>
+      repairFn({
+        data: {
+          repairAction: anomaly.repairAction,
+          orderId: anomaly.orderId,
+          serverOrderId: anomaly.serverOrderId,
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Repair lancé");
+      qc.invalidateQueries({ queryKey: ["admin-reconciliation"] });
+      qc.invalidateQueries({ queryKey: ["admin-orders-detailed"] });
+      qc.invalidateQueries({ queryKey: ["admin-servers-detailed"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <section>
+      <SectionTitle
+        icon={<RefreshCw className="h-5 w-5" />}
+        title={`Reconciliation (${anomalies.length})`}
+      />
+      <TableShell empty={anomalies.length === 0 ? "Aucune anomalie détectée." : null}>
+        <Table>
+          <TableHeader className="bg-surface-2">
+            <TableRow>
+              <TableHead>Area</TableHead>
+              <TableHead>Type</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Date</TableHead>
+              <TableHead>Message</TableHead>
+              <TableHead>Action recommandée</TableHead>
+              <TableHead className="text-right">Repair</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {anomalies.map((anomaly) => (
+              <TableRow key={anomaly.id}>
+                <TableCell>
+                  <Badge variant="outline" className="capitalize">
+                    {anomaly.area}
+                  </Badge>
+                </TableCell>
+                <TableCell className="font-mono text-xs">{anomaly.type}</TableCell>
+                <TableCell>
+                  <StatusBadge status={anomaly.status} />
+                </TableCell>
+                <TableCell className="text-muted-foreground">{formatDate(anomaly.date)}</TableCell>
+                <TableCell className="min-w-64">{anomaly.message}</TableCell>
+                <TableCell className="min-w-64 text-muted-foreground">
+                  {anomaly.recommendation}
+                </TableCell>
+                <TableCell className="text-right">
+                  {anomaly.repairAction === "none" ? (
+                    <span className="text-sm text-muted-foreground">Manual</span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={repair.isPending}
+                      onClick={() => repair.mutate(anomaly)}
+                    >
+                      Repair
+                    </Button>
+                  )}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableShell>
+    </section>
+  );
+}
 
 function AdminOrdersSection({ orders }: { orders: AdminOrder[] }) {
   const qc = useQueryClient();

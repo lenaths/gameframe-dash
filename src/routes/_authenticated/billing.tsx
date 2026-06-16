@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { SiteHeader } from "@/components/site-header";
 import { listMyBilling } from "@/lib/billing.functions";
+import { getServerDetail } from "@/lib/servers.functions";
 
 export const Route = createFileRoute("/_authenticated/billing")({
   head: () => ({ meta: [{ title: "Billing · XntServers" }] }),
@@ -118,47 +119,7 @@ function Billing() {
               ) : (
                 <div className="grid gap-4 lg:grid-cols-2">
                   {activeOrders.map((order) => (
-                    <article key={order.id} className="xnt-card rounded-xl p-5">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <Badge
-                            variant="outline"
-                            className={`capitalize xnt-status-${order.status}`}
-                          >
-                            {order.status.replaceAll("_", " ")}
-                          </Badge>
-                          <h3 className="mt-3 font-display text-xl font-semibold">
-                            {order.plans?.game ?? "Game"} · {order.plans?.name ?? "Plan"}
-                          </h3>
-                          <p className="mt-1 text-sm text-muted-foreground">
-                            {order.server_order?.server_name ?? "Serveur en attente"}
-                          </p>
-                        </div>
-                        <div className="text-right">
-                          <div className="font-display text-2xl font-bold text-primary">
-                            {formatMoney(order.total_cents, order.currency)}
-                          </div>
-                          <div className="text-xs text-muted-foreground">mensuel</div>
-                        </div>
-                      </div>
-                      <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                        <InfoPill
-                          label="Renouvellement"
-                          value={formatNullableDate(order.current_period_end ?? order.renews_at)}
-                        />
-                        <InfoPill
-                          label="Subscription"
-                          value={order.stripe_subscription_id?.slice(0, 18) ?? "—"}
-                        />
-                      </div>
-                      {order.server_order && (
-                        <Button asChild size="sm" variant="outline" className="mt-4">
-                          <Link to="/manage/$orderId" params={{ orderId: order.server_order.id }}>
-                            Gérer le serveur
-                          </Link>
-                        </Button>
-                      )}
-                    </article>
+                    <ActiveOrderCard key={order.id} order={order} />
                   ))}
                 </div>
               )}
@@ -276,6 +237,71 @@ function Billing() {
         )}
       </div>
     </div>
+  );
+}
+
+function ActiveOrderCard({ order }: { order: BillingOrder }) {
+  const fetchDetail = useServerFn(getServerDetail);
+  const serverDetail = useQuery({
+    queryKey: ["billing-server-detail", order.server_order?.id],
+    queryFn: () => fetchDetail({ data: { orderId: order.server_order!.id } }),
+    enabled: Boolean(order.server_order?.id),
+    staleTime: 30_000,
+  });
+  const connection = serverDetail.data?.live?.connection;
+  const serverAddress =
+    connection?.address && connection.port ? `${connection.address}:${connection.port}` : null;
+
+  return (
+    <article className="xnt-card rounded-xl p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <Badge variant="outline" className={`capitalize xnt-status-${order.status}`}>
+            {order.status.replaceAll("_", " ")}
+          </Badge>
+          <h3 className="mt-3 font-display text-xl font-semibold">
+            {order.plans?.game ?? "Game"} · {order.plans?.name ?? "Plan"}
+          </h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {order.server_order?.server_name ?? "Serveur en attente"}
+          </p>
+        </div>
+        <div className="text-right">
+          <div className="font-display text-2xl font-bold text-primary">
+            {formatMoney(order.total_cents, order.currency)}
+          </div>
+          <div className="text-xs text-muted-foreground">mensuel</div>
+        </div>
+      </div>
+      <div className="mt-5 grid gap-3 sm:grid-cols-2">
+        <InfoPill
+          label="Renouvellement"
+          value={formatNullableDate(order.current_period_end ?? order.renews_at)}
+        />
+        <InfoPill label="Subscription" value={order.stripe_subscription_id?.slice(0, 18) ?? "—"} />
+        <InfoPill
+          label="Connexion serveur"
+          value={
+            order.server_order
+              ? serverDetail.isLoading
+                ? "Chargement…"
+                : (serverAddress ?? "Adresse indisponible")
+              : "Serveur en attente"
+          }
+        />
+        <InfoPill
+          label="Statut serveur"
+          value={order.server_order?.status?.replaceAll("_", " ") ?? "En attente"}
+        />
+      </div>
+      {order.server_order && (
+        <Button asChild size="sm" variant="outline" className="mt-4">
+          <Link to="/manage/$orderId" params={{ orderId: order.server_order.id }}>
+            Gérer le serveur
+          </Link>
+        </Button>
+      )}
+    </article>
   );
 }
 

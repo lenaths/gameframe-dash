@@ -15,6 +15,7 @@ import { toast } from "sonner";
 const supportSearchSchema = z.object({
   subject: z.string().optional(),
   orderId: z.string().optional(),
+  body: z.string().optional(),
 });
 
 export const Route = createFileRoute("/_authenticated/support")({
@@ -56,10 +57,14 @@ function Support() {
 
   useEffect(() => {
     if (search.subject) setSubject(search.subject);
+    if (search.body && !body) {
+      setBody(search.body);
+      return;
+    }
     if (search.orderId && !body) {
       setBody(`Bonjour,\n\nJ'ai besoin d'aide pour le serveur/order ${search.orderId}.\n`);
     }
-  }, [body, search.orderId, search.subject]);
+  }, [body, search.body, search.orderId, search.subject]);
 
   const ticketsQuery = useQuery({
     queryKey: ["my-tickets"],

@@ -410,3 +410,303 @@ export const adminSyncServerStatus = createServerFn({ method: "POST" })
     if (updateError) throw new Error(updateError.message);
     return { ok: true, status };
   });
+
+export const adminGetMonitoring = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const [
+      { data: profiles, error: profilesError },
+      { data: servers, error: serversError },
+      { data: orders, error: ordersError },
+      { data: payments, error: paymentsError },
+      { data: tickets, error: ticketsError },
+    ] = await Promise.all([
+      db.from("profiles").select("id"),
+      db.from("server_orders").select("id, status"),
+      db.from("orders").select("id, status, total_cents, created_at"),
+      db.from("payments").select("id, status, amount_cents, refunded_cents, created_at"),
+      db.from("tickets").select("id, status"),
+    ]);
+    const firstError =
+      profilesError ?? serversError ?? ordersError ?? paymentsError ?? ticketsError;
+    if (firstError) throw new Error(firstError.message);
+
+    const paymentRows = (payments ?? []) as Array<{
+      status: string;
+      amount_cents: number | null;
+      refunded_cents: number | null;
+      created_at: string;
+    }>;
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const paidPayments = paymentRows.filter((payment) => payment.status === "paid");
+    const net = (payment: { amount_cents: number | null; refunded_cents: number | null }) =>
+      (payment.amount_cents ?? 0) - (payment.refunded_cents ?? 0);
+
+    return {
+      users: ((profiles ?? []) as unknown[]).length,
+      servers: ((servers ?? []) as unknown[]).length,
+      orders: ((orders ?? []) as unknown[]).length,
+      payments: paymentRows.length,
+      revenueTotalCents: paidPayments.reduce((sum, payment) => sum + net(payment), 0),
+      revenueMonthCents: paidPayments
+        .filter((payment) => new Date(payment.created_at) >= monthStart)
+        .reduce((sum, payment) => sum + net(payment), 0),
+      ticketsOpen: ((tickets ?? []) as Array<{ status: string }>).filter(
+        (ticket) => ticket.status !== "closed",
+      ).length,
+      ticketsClosed: ((tickets ?? []) as Array<{ status: string }>).filter(
+        (ticket) => ticket.status === "closed",
+      ).length,
+    };
+  });
+
+export const adminListReconciliation = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const [
+      { data: orders, error: ordersError },
+      { data: servers, error: serversError },
+      { data: invoices, error: invoicesError },
+      { data: payments, error: paymentsError },
+    ] = await Promise.all([
+      db
+        .from("orders")
+        .select("id, status, stripe_subscription_id, stripe_checkout_session_id, created_at")
+        .order("created_at", { ascending: false })
+        .limit(200),
+      db
+        .from("server_orders")
+        .select(
+          "id, order_id, status, pterodactyl_server_id, pterodactyl_server_identifier, error_message, created_at",
+        )
+        .order("created_at", { ascending: false })
+        .limit(200),
+      db
+        .from("invoices")
+        .select("id, order_id, payment_id, status, stripe_invoice_id, created_at")
+        .order("created_at", { ascending: false })
+        .limit(200),
+      db
+        .from("payments")
+        .select("id, order_id, status, stripe_invoice_id, stripe_payment_intent_id, created_at")
+        .order("created_at", { ascending: false })
+        .limit(200),
+    ]);
+    const firstError = ordersError ?? serversError ?? invoicesError ?? paymentsError;
+    if (firstError) throw new Error(firstError.message);
+
+    const serverRows = (servers ?? []) as ServerLinkRow[];
+    const invoiceRows = (invoices ?? []) as Array<{
+      id: string;
+      order_id: string | null;
+      payment_id: string | null;
+      status: string;
+      stripe_invoice_id: string | null;
+      created_at: string;
+    }>;
+    const paymentRows = (payments ?? []) as Array<{
+      id: string;
+      order_id: string | null;
+      status: string;
+      stripe_invoice_id: string | null;
+      stripe_payment_intent_id: string | null;
+      created_at: string;
+    }>;
+    const serversByOrder = new Map(
+      serverRows
+        .filter((server) => server.order_id)
+        .map((server) => [server.order_id as string, server]),
+    );
+    const paymentsByInvoice = new Set(
+      paymentRows.map((payment) => payment.stripe_invoice_id).filter(Boolean),
+    );
+    const invoicesByStripe = new Set(
+      invoiceRows.map((invoice) => invoice.stripe_invoice_id).filter(Boolean),
+    );
+    const anomalies: Array<{
+      id: string;
+      type: string;
+      area: "stripe" | "pterodactyl";
+      status: string;
+      date: string;
+      message: string;
+      recommendation: string;
+      repairAction: "retry_provisioning" | "sync_server" | "none";
+      orderId?: string | null;
+      serverOrderId?: string | null;
+    }> = [];
+
+    for (const order of (orders ?? []) as Array<{
+      id: string;
+      status: string;
+      stripe_subscription_id: string | null;
+      created_at: string;
+    }>) {
+      const server = serversByOrder.get(order.id);
+      if (["paid", "active"].includes(order.status) && !server) {
+        anomalies.push({
+          id: `order-${order.id}`,
+          type: "paid_order_without_server",
+          area: "stripe",
+          status: "repairable",
+          date: order.created_at,
+          message: `Order ${order.id.slice(0, 8)} is paid but has no server_order.`,
+          recommendation: "Retry provisioning from the paid order.",
+          repairAction: "retry_provisioning",
+          orderId: order.id,
+        });
+      }
+      if (["paid", "active"].includes(order.status) && !order.stripe_subscription_id) {
+        anomalies.push({
+          id: `subscription-${order.id}`,
+          type: "incomplete_subscription",
+          area: "stripe",
+          status: "manual_review",
+          date: order.created_at,
+          message: `Order ${order.id.slice(0, 8)} has no stripe_subscription_id.`,
+          recommendation: "Review Stripe session/subscription manually.",
+          repairAction: "none",
+          orderId: order.id,
+        });
+      }
+    }
+
+    for (const invoice of invoiceRows) {
+      if (
+        invoice.status === "paid" &&
+        invoice.stripe_invoice_id &&
+        !paymentsByInvoice.has(invoice.stripe_invoice_id)
+      ) {
+        anomalies.push({
+          id: `invoice-${invoice.id}`,
+          type: "invoice_without_payment",
+          area: "stripe",
+          status: "manual_review",
+          date: invoice.created_at,
+          message: `Invoice ${invoice.id.slice(0, 8)} has no matching payment.`,
+          recommendation: "Resend Stripe invoice event or review webhook logs.",
+          repairAction: "none",
+          orderId: invoice.order_id,
+        });
+      }
+    }
+
+    for (const payment of paymentRows) {
+      if (payment.stripe_invoice_id && !invoicesByStripe.has(payment.stripe_invoice_id)) {
+        anomalies.push({
+          id: `payment-${payment.id}`,
+          type: "payment_without_invoice",
+          area: "stripe",
+          status: "manual_review",
+          date: payment.created_at,
+          message: `Payment ${payment.id.slice(0, 8)} has no matching invoice.`,
+          recommendation: "Resend Stripe invoice event or review webhook logs.",
+          repairAction: "none",
+          orderId: payment.order_id,
+        });
+      }
+    }
+
+    for (const server of serverRows) {
+      const stuck =
+        server.status === "provisioning" &&
+        Date.now() -
+          new Date(
+            (server as ServerLinkRow & { created_at?: string }).created_at ?? Date.now(),
+          ).getTime() >
+          20 * 60_000;
+      if (!server.pterodactyl_server_id || !server.pterodactyl_server_identifier) {
+        anomalies.push({
+          id: `server-missing-${server.id}`,
+          type: "server_order_without_pterodactyl",
+          area: "pterodactyl",
+          status: "repairable",
+          date:
+            (server as ServerLinkRow & { created_at?: string }).created_at ??
+            new Date().toISOString(),
+          message: `Server order ${server.id.slice(0, 8)} has no Pterodactyl server.`,
+          recommendation: "Retry provisioning if the linked order is paid.",
+          repairAction: server.order_id ? "retry_provisioning" : "none",
+          orderId: server.order_id,
+          serverOrderId: server.id,
+        });
+      } else if (stuck) {
+        anomalies.push({
+          id: `server-stuck-${server.id}`,
+          type: "provisioning_stuck",
+          area: "pterodactyl",
+          status: "repairable",
+          date:
+            (server as ServerLinkRow & { created_at?: string }).created_at ??
+            new Date().toISOString(),
+          message: `Server order ${server.id.slice(0, 8)} appears stuck in provisioning.`,
+          recommendation: "Sync status, then retry provisioning if needed.",
+          repairAction: "sync_server",
+          serverOrderId: server.id,
+        });
+      }
+    }
+
+    return { anomalies };
+  });
+
+export const adminRepairReconciliation = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) =>
+    z
+      .object({
+        repairAction: z.enum(["retry_provisioning", "sync_server"]),
+        orderId: z.string().uuid().optional().nullable(),
+        serverOrderId: z.string().uuid().optional().nullable(),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    if (data.repairAction === "retry_provisioning") {
+      if (!data.orderId) throw new Error("Missing order id for provisioning repair.");
+      const { provisionPaidOrder } = await import("@/lib/provisioning.server");
+      return provisionPaidOrder(data.orderId, {
+        actorUserId: context.userId,
+        source: "admin_reconciliation",
+      });
+    }
+    if (!data.serverOrderId) throw new Error("Missing server order id for sync repair.");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { ptero, assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroAppConfigured();
+    const { data: order, error: orderError } = await supabaseAdmin
+      .from("server_orders")
+      .select("id, pterodactyl_server_id")
+      .eq("id", data.serverOrderId)
+      .maybeSingle();
+    if (orderError || !order?.pterodactyl_server_id) {
+      throw new Error(orderError?.message ?? "Server order has no Pterodactyl server id.");
+    }
+    const server = (await ptero.app(`/servers/${order.pterodactyl_server_id}`)) as {
+      attributes: { status?: string | null };
+    };
+    const status =
+      server.attributes.status === null
+        ? "active"
+        : server.attributes.status === "suspended"
+          ? "suspended"
+          : server.attributes.status === "install_failed" ||
+              server.attributes.status === "restore_failed"
+            ? "failed"
+            : "provisioning";
+    const { error: updateError } = await supabaseAdmin
+      .from("server_orders")
+      .update({ status, error_message: status === "failed" ? "Pterodactyl install failed." : null })
+      .eq("id", data.serverOrderId);
+    if (updateError) throw new Error(updateError.message);
+    return { ok: true, status };
+  });
