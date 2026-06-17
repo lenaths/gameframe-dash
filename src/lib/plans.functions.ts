@@ -9,6 +9,48 @@ export type PlanVariant = {
   startup?: string;
 };
 
+const TEMPLATE_DESCRIPTIONS: Record<string, string> = {
+  vanilla: "Expérience officielle Minecraft, simple et stable.",
+  paper: "Performance optimisée pour serveurs avec plugins.",
+  forge: "Serveur prêt pour mods Forge.",
+  fabric: "Serveur prêt pour mods Fabric.",
+  purpur: "Performances avancées et réglages poussés.",
+  spigot: "Compatibilité plugins classiques.",
+};
+
+export function getTemplateKey(label: string) {
+  const normalized = label.toLowerCase();
+  if (normalized.includes("paper")) return "paper";
+  if (normalized.includes("forge")) return "forge";
+  if (normalized.includes("fabric")) return "fabric";
+  if (normalized.includes("purpur")) return "purpur";
+  if (normalized.includes("spigot")) return "spigot";
+  if (normalized.includes("vanilla")) return "vanilla";
+  return normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "template";
+}
+
+export function getTemplateDescription(label: string, fallback?: string | null) {
+  return TEMPLATE_DESCRIPTIONS[getTemplateKey(label)] ?? fallback ?? "Template serveur compatible.";
+}
+
+export function findVersionVariable<
+  T extends { env_variable: string; name?: string | null; description?: string | null },
+>(variables: T[]) {
+  return (
+    variables.find((variable) =>
+      /^(MINECRAFT_VERSION|SERVER_VERSION|VERSION|BUNGEE_VERSION|PAPER_VERSION|FABRIC_VERSION|FORGE_VERSION|PURPUR_VERSION|SPIGOT_VERSION)$/i.test(
+        variable.env_variable,
+      ),
+    ) ??
+    variables.find((variable) =>
+      /minecraft.*version|version.*minecraft|server.*version/i.test(
+        `${variable.name ?? ""} ${variable.description ?? ""} ${variable.env_variable}`,
+      ),
+    ) ??
+    null
+  );
+}
+
 export const listPlans = createServerFn({ method: "GET" }).handler(async () => {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { data, error } = await supabaseAdmin
@@ -56,8 +98,8 @@ export const getDeployOptions = createServerFn({ method: "POST" })
           return {
             index: i,
             label: v.label || egg.name,
-            eggName: egg.name,
-            eggDescription: egg.description,
+            templateKey: getTemplateKey(v.label || egg.name),
+            templateDescription: getTemplateDescription(v.label || egg.name, egg.description),
             variables: egg.variables.filter((vv) => vv.user_viewable),
             error: null as string | null,
           };
@@ -82,8 +124,8 @@ export const getDeployOptions = createServerFn({ method: "POST" })
           return {
             index: i,
             label: v.label || "Template serveur",
-            eggName: "",
-            eggDescription: "",
+            templateKey: getTemplateKey(v.label || "Template serveur"),
+            templateDescription: "",
             variables: [] as Awaited<ReturnType<typeof getEggDetails>>["variables"],
             error: friendly,
           };

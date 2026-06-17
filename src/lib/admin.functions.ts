@@ -32,6 +32,7 @@ type OrderRow = {
   currency: string;
   stripe_subscription_id: string | null;
   stripe_checkout_session_id: string | null;
+  selected_template_label?: string | null;
   created_at: string;
   plans?: PlanRef;
 };
@@ -42,6 +43,7 @@ type ServerLinkRow = {
   error_message: string | null;
   pterodactyl_server_id: number | null;
   pterodactyl_server_identifier: string | null;
+  selected_template_label?: string | null;
 };
 type ServerDetailRow = ServerLinkRow & {
   user_id: string | null;
@@ -50,6 +52,18 @@ type ServerDetailRow = ServerLinkRow & {
   created_at: string;
   plans?: PlanRef;
 };
+
+function selectedTemplateLabel(metadata: unknown) {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const selectedTemplate =
+    root.selected_template && typeof root.selected_template === "object"
+      ? (root.selected_template as Record<string, unknown>)
+      : null;
+  return typeof selectedTemplate?.label === "string" && selectedTemplate.label.trim()
+    ? selectedTemplate.label
+    : null;
+}
 type PaymentDetailRow = {
   id: string;
   user_id: string | null;
@@ -460,23 +474,32 @@ export const adminListOrdersDetailed = createServerFn({ method: "GET" })
         db
           .from("orders")
           .select(
-            "id, user_id, plan_id, status, total_cents, currency, stripe_subscription_id, stripe_checkout_session_id, created_at, plans(name, game)",
+            "id, user_id, plan_id, status, total_cents, currency, stripe_subscription_id, stripe_checkout_session_id, metadata, created_at, plans(name, game)",
           )
           .order("created_at", { ascending: false })
           .limit(100),
         db
           .from("server_orders")
           .select(
-            "id, order_id, status, error_message, pterodactyl_server_id, pterodactyl_server_identifier",
+            "id, order_id, status, error_message, pterodactyl_server_id, pterodactyl_server_identifier, metadata",
           ),
       ]);
     if (ordersError) throw new Error(ordersError.message);
     if (serversError) throw new Error(serversError.message);
 
-    const orderRows = (orders ?? []) as OrderRow[];
+    const orderRows = ((orders ?? []) as Array<OrderRow & { metadata?: unknown }>).map(
+      ({ metadata, ...order }) => ({
+        ...order,
+        selected_template_label: selectedTemplateLabel(metadata),
+      }),
+    );
     const profilesById = await getProfilesById(orderRows.map((order) => order.user_id));
     const serversByOrder = new Map(
-      ((servers ?? []) as ServerLinkRow[])
+      ((servers ?? []) as Array<ServerLinkRow & { metadata?: unknown }>)
+        .map(({ metadata, ...server }) => ({
+          ...server,
+          selected_template_label: selectedTemplateLabel(metadata),
+        }))
         .filter((server) => server.order_id)
         .map((server) => [server.order_id as string, server]),
     );
@@ -499,12 +522,17 @@ export const adminListServersDetailed = createServerFn({ method: "GET" })
     const { data, error } = await db
       .from("server_orders")
       .select(
-        "id, order_id, user_id, plan_id, server_name, status, pterodactyl_server_id, pterodactyl_server_identifier, error_message, created_at, plans(name, game)",
+        "id, order_id, user_id, plan_id, server_name, status, pterodactyl_server_id, pterodactyl_server_identifier, metadata, error_message, created_at, plans(name, game)",
       )
       .order("created_at", { ascending: false })
       .limit(100);
     if (error) throw new Error(error.message);
-    const servers = (data ?? []) as ServerDetailRow[];
+    const servers = ((data ?? []) as Array<ServerDetailRow & { metadata?: unknown }>).map(
+      ({ metadata, ...server }) => ({
+        ...server,
+        selected_template_label: selectedTemplateLabel(metadata),
+      }),
+    );
     const profilesById = await getProfilesById(servers.map((server) => server.user_id));
     return {
       servers: servers.map((server) => ({

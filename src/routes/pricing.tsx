@@ -6,7 +6,7 @@ import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
-import { listPlans } from "@/lib/plans.functions";
+import { getTemplateDescription, listPlans } from "@/lib/plans.functions";
 import { createCheckoutSession } from "@/lib/stripe.functions";
 import { useAuth } from "@/hooks/use-auth";
 import { toast } from "sonner";
@@ -32,8 +32,10 @@ function Pricing() {
   const navigate = useNavigate();
   const { data, isLoading } = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
   const [game, setGame] = useState<string>("All");
+  const [selectedTemplates, setSelectedTemplates] = useState<Record<string, number>>({});
   const checkout = useMutation({
-    mutationFn: (planId: string) => startCheckout({ data: { planId } }),
+    mutationFn: (input: { planId: string; variantIndex?: number }) =>
+      startCheckout({ data: input }),
     onSuccess: ({ url }) => {
       window.location.assign(url);
     },
@@ -108,12 +110,48 @@ function Pricing() {
                     </li>
                   ))}
                 </ul>
+                {Array.isArray(p.allowed_eggs) && p.allowed_eggs.length > 1 && (
+                  <div className="mt-6 space-y-2">
+                    <div className="text-xs uppercase tracking-wider text-primary">
+                      Template serveur
+                    </div>
+                    <div className="grid gap-2">
+                      {(p.allowed_eggs as Array<{ label?: string }>).map((template, index) => {
+                        const label = template.label || `Template ${index + 1}`;
+                        const selected = (selectedTemplates[p.id] ?? 0) === index;
+                        return (
+                          <button
+                            key={`${p.id}-${index}`}
+                            type="button"
+                            onClick={() =>
+                              setSelectedTemplates((current) => ({ ...current, [p.id]: index }))
+                            }
+                            className={`rounded-lg border p-3 text-left transition-colors ${
+                              selected
+                                ? "border-primary bg-primary/10"
+                                : "border-border/70 bg-background/20 hover:border-primary/40"
+                            }`}
+                          >
+                            <div className="text-sm font-medium">{label}</div>
+                            <div className="mt-0.5 text-xs text-muted-foreground">
+                              {getTemplateDescription(label)}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 <Button
                   className="mt-6 bg-primary text-primary-foreground shadow-[0_0_28px_rgba(0,191,255,0.22)] hover:bg-primary/90"
                   disabled={checkout.isPending}
                   onClick={() => {
                     if (!user) navigate({ to: "/auth", search: { redirect: "/pricing" } as never });
-                    else checkout.mutate(p.id);
+                    else
+                      checkout.mutate({
+                        planId: p.id,
+                        variantIndex: selectedTemplates[p.id] ?? 0,
+                      });
                   }}
                 >
                   {checkout.isPending ? "Redirecting…" : `Commander ${p.name}`}

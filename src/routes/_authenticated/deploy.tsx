@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SiteHeader } from "@/components/site-header";
 import { EggVariablesForm } from "@/components/egg-variables-form";
-import { listPlans, getDeployOptions } from "@/lib/plans.functions";
+import { findVersionVariable, getDeployOptions, listPlans } from "@/lib/plans.functions";
 import { createCheckoutSession } from "@/lib/stripe.functions";
 import { toast } from "sonner";
 
@@ -53,7 +53,15 @@ function Deploy() {
   }, [currentVariant]);
 
   const checkout = useMutation({
-    mutationFn: () => startCheckout({ data: { planId } }),
+    mutationFn: () =>
+      startCheckout({
+        data: {
+          planId,
+          serverName: name.trim() || undefined,
+          variantIndex,
+          environment: env,
+        },
+      }),
     onSuccess: ({ url }) => {
       window.location.assign(url);
     },
@@ -61,6 +69,11 @@ function Deploy() {
   });
 
   const variants = opts.data?.variants ?? [];
+  const versionVariable = currentVariant ? findVersionVariable(currentVariant.variables) : null;
+  const advancedVariables =
+    currentVariant?.variables.filter(
+      (variable) => variable.env_variable !== versionVariable?.env_variable,
+    ) ?? [];
 
   return (
     <div className="xnt-page min-h-screen">
@@ -69,9 +82,9 @@ function Deploy() {
         <div className="mb-6 inline-flex rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
           Checkout powered by Stripe
         </div>
-        <h1 className="font-display text-4xl font-bold">Deploy a new server</h1>
+        <h1 className="font-display text-4xl font-bold">Créer un nouveau serveur</h1>
         <p className="text-muted-foreground mt-2">
-          Pick a plan, a flavor, and configure your version/mods.
+          Choisis un plan, un template serveur et les paramètres avant paiement.
         </p>
 
         <form
@@ -82,7 +95,7 @@ function Deploy() {
           className="xnt-card mt-8 space-y-6 rounded-2xl p-6"
         >
           <div className="space-y-2">
-            <Label htmlFor="name">Server name</Label>
+            <Label htmlFor="name">Nom du serveur</Label>
             <Input
               id="name"
               maxLength={40}
@@ -133,9 +146,9 @@ function Deploy() {
 
           {planId && (
             <div className="space-y-3">
-              <Label>Server flavor</Label>
+              <Label>Template serveur</Label>
               {opts.isLoading && (
-                <div className="text-sm text-muted-foreground">Loading options…</div>
+                <div className="text-sm text-muted-foreground">Chargement des templates…</div>
               )}
               {opts.error && (
                 <div className="text-sm text-destructive">{(opts.error as Error).message}</div>
@@ -160,7 +173,7 @@ function Deploy() {
                       <div
                         className={`text-xs line-clamp-2 mt-0.5 ${v.error ? "text-destructive" : "text-muted-foreground"}`}
                       >
-                        {v.error || v.eggDescription || v.eggName}
+                        {v.error || v.templateDescription}
                       </div>
                     </button>
                   ))}
@@ -169,15 +182,26 @@ function Deploy() {
             </div>
           )}
 
-          {currentVariant && currentVariant.variables.length > 0 && (
+          {currentVariant && (
             <div className="space-y-3">
-              <Label>Configuration</Label>
+              <Label>Version Minecraft</Label>
               <div className="rounded-lg border border-primary/15 bg-background/40 p-4">
-                <EggVariablesForm
-                  variables={currentVariant.variables}
-                  values={env}
-                  onChange={setEnv}
-                />
+                {versionVariable ? (
+                  <EggVariablesForm variables={[versionVariable]} values={env} onChange={setEnv} />
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Sélection de version bientôt disponible pour ce template.
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {currentVariant && advancedVariables.length > 0 && (
+            <div className="space-y-3">
+              <Label>Paramètres avancés</Label>
+              <div className="rounded-lg border border-primary/15 bg-background/40 p-4">
+                <EggVariablesForm variables={advancedVariables} values={env} onChange={setEnv} />
               </div>
             </div>
           )}

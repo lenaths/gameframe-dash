@@ -207,6 +207,7 @@ type AdminOrder = {
   total_cents: number;
   currency: string;
   stripe_subscription_id: string | null;
+  selected_template_label?: string | null;
   created_at: string;
   profile?: AdminProfileRef | null;
   plans?: AdminPlanRef;
@@ -216,6 +217,7 @@ type AdminOrder = {
     error_message: string | null;
     pterodactyl_server_id: number | null;
     pterodactyl_server_identifier: string | null;
+    selected_template_label?: string | null;
   } | null;
 };
 
@@ -227,6 +229,7 @@ type AdminServer = {
   status: string;
   pterodactyl_server_id: number | null;
   pterodactyl_server_identifier: string | null;
+  selected_template_label?: string | null;
   error_message: string | null;
   created_at: string;
   profile?: AdminProfileRef | null;
@@ -469,6 +472,7 @@ function AdminOrdersSection({ orders }: { orders: AdminOrder[] }) {
               <TableHead>Status</TableHead>
               <TableHead>User</TableHead>
               <TableHead>Plan</TableHead>
+              <TableHead>Template</TableHead>
               <TableHead>Montant</TableHead>
               <TableHead>Subscription</TableHead>
               <TableHead>Server</TableHead>
@@ -500,6 +504,7 @@ function AdminOrdersSection({ orders }: { orders: AdminOrder[] }) {
                   <TableCell className="min-w-40">
                     {order.plans?.game ?? "—"} · {order.plans?.name ?? "—"}
                   </TableCell>
+                  <TableCell>{order.selected_template_label ?? "—"}</TableCell>
                   <TableCell>{formatMoney(order.total_cents, order.currency)}</TableCell>
                   <TableCell className="font-mono text-xs">
                     {order.stripe_subscription_id ? shortId(order.stripe_subscription_id, 18) : "—"}
@@ -563,6 +568,7 @@ function AdminServersSection({ servers }: { servers: AdminServer[] }) {
               <TableHead>Server</TableHead>
               <TableHead>User</TableHead>
               <TableHead>Plan</TableHead>
+              <TableHead>Template</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Pterodactyl</TableHead>
               <TableHead>Identifier</TableHead>
@@ -585,6 +591,7 @@ function AdminServersSection({ servers }: { servers: AdminServer[] }) {
                 <TableCell className="min-w-40">
                   {server.plans?.game ?? "—"} · {server.plans?.name ?? "—"}
                 </TableCell>
+                <TableCell>{server.selected_template_label ?? "—"}</TableCell>
                 <TableCell>
                   <StatusBadge status={server.status} />
                 </TableCell>

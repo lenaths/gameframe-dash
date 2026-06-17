@@ -49,6 +49,7 @@ type ServerListRow = {
   pterodactyl_server_identifier: string | null;
   pterodactyl_server_id: number | null;
   error_message: string | null;
+  selected_template_label?: string | null;
   created_at: string;
   plans?: {
     name?: string | null;
@@ -64,6 +65,18 @@ type ServerListItem = ServerListRow & {
   last_payment_at: string | null;
   next_renewal_at: string | null;
 };
+
+function selectedTemplateLabel(metadata: unknown) {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const selectedTemplate =
+    root.selected_template && typeof root.selected_template === "object"
+      ? (root.selected_template as Record<string, unknown>)
+      : null;
+  return typeof selectedTemplate?.label === "string" && selectedTemplate.label.trim()
+    ? selectedTemplate.label
+    : null;
+}
 
 const MAX_FILE_CONTENT_BYTES = 1024 * 1024;
 const BLOCKED_FILE_EXTENSIONS = new Set([
@@ -395,12 +408,17 @@ export const listMyServers = createServerFn({ method: "GET" })
     const { data, error } = await db
       .from("server_orders")
       .select(
-        "id, order_id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
+        "id, order_id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, metadata, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
       )
       .eq("user_id", context.userId)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
-    const servers = (data ?? []) as ServerListRow[];
+    const servers = ((data ?? []) as Array<ServerListRow & { metadata?: unknown }>).map(
+      ({ metadata, ...server }) => ({
+        ...server,
+        selected_template_label: selectedTemplateLabel(metadata),
+      }),
+    );
     const orderIds = servers
       .map((server) => server.order_id)
       .filter((id): id is string => Boolean(id));

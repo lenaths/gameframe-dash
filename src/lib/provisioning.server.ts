@@ -52,6 +52,7 @@ type PaidOrderRow = {
   plan_id: string | null;
   product_id: string | null;
   status: string;
+  metadata?: Record<string, unknown> | null;
 };
 
 type ExistingServerOrder = {
@@ -116,6 +117,31 @@ function filterEnvironmentForEgg(
   }
 
   return env;
+}
+
+function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
+  const metadata = order.metadata && typeof order.metadata === "object" ? order.metadata : {};
+  const selectedTemplate =
+    metadata.selected_template && typeof metadata.selected_template === "object"
+      ? (metadata.selected_template as Record<string, unknown>)
+      : {};
+  const rawIndex = selectedTemplate.index;
+  const variantIndex =
+    typeof rawIndex === "number" && Number.isInteger(rawIndex) && rawIndex >= 0 ? rawIndex : 0;
+  const serverName =
+    typeof metadata.server_name === "string" && metadata.server_name.trim()
+      ? metadata.server_name.trim().slice(0, 40)
+      : null;
+  const environment =
+    metadata.environment && typeof metadata.environment === "object"
+      ? normalizeEnvironment(metadata.environment as Record<string, unknown>)
+      : {};
+  const templateLabel =
+    typeof selectedTemplate.label === "string" && selectedTemplate.label.trim()
+      ? selectedTemplate.label.trim()
+      : null;
+
+  return { variantIndex, serverName, environment, templateLabel };
 }
 
 async function ensurePanelUser(input: {
@@ -499,7 +525,7 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
 
   const orderResult = await db
     .from("orders")
-    .select("id, user_id, plan_id, product_id, status")
+    .select("id, user_id, plan_id, product_id, status, metadata")
     .eq("id", orderId)
     .maybeSingle();
   const order = orderResult.data as PaidOrderRow | null;
@@ -517,7 +543,9 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     .single();
   const plan = planResult.data as { game?: string; name?: string } | null;
   if (planResult.error || !plan) throw new Error("Plan not found.");
-  const serverName = `${plan.game ?? "Game"} ${plan.name ?? "Server"}`.slice(0, 40);
+  const selection = getPaidOrderProvisioningSelection(order);
+  const serverName =
+    selection.serverName ?? `${plan.game ?? "Game"} ${plan.name ?? "Server"}`.slice(0, 40);
 
   const existingServerResult = await db
     .from("server_orders")
@@ -532,6 +560,8 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
       userId: order.user_id,
       planId: order.plan_id,
       serverName,
+      variantIndex: selection.variantIndex,
+      environment: selection.environment,
     });
     return { ...result, orderId: order.id, serverOrderId: existingServer.id };
   }
@@ -547,6 +577,12 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
         order_id: order.id,
         server_name: serverName,
         status: "pending",
+        metadata: {
+          selected_template: {
+            index: selection.variantIndex,
+            label: selection.templateLabel,
+          },
+        },
       })
       .select("id")
       .single();
@@ -588,11 +624,25 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     });
   }
 
+  await db
+    .from("server_orders")
+    .update({
+      metadata: {
+        selected_template: {
+          index: selection.variantIndex,
+          label: selection.templateLabel,
+        },
+      },
+    })
+    .eq("id", serverOrderId);
+
   const result = await provisionServerOrder({
     serverOrderId,
     userId: order.user_id,
     planId: order.plan_id,
     serverName,
+    variantIndex: selection.variantIndex,
+    environment: selection.environment,
   });
 
   if (result.ok && (result.pterodactylServerId || result.pterodactylServerIdentifier)) {

@@ -30,6 +30,7 @@ type PlanForCheckout = {
   currency?: string | null;
   billing_interval?: string | null;
   stripe_price_id?: string | null;
+  allowed_eggs?: unknown;
 };
 
 type ProfileForCheckout = {
@@ -41,6 +42,9 @@ type ProfileForCheckout = {
 
 const checkoutInput = z.object({
   planId: z.string().uuid(),
+  serverName: z.string().trim().min(2).max(40).optional(),
+  variantIndex: z.number().int().min(0).optional(),
+  environment: z.record(z.string(), z.string()).optional(),
 });
 
 export const createCheckoutSession = createServerFn({ method: "POST" })
@@ -56,7 +60,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
     const planResult = await db
       .from("plans")
       .select(
-        "id, product_id, game, name, description, price_monthly_cents, currency, billing_interval, stripe_price_id",
+        "id, product_id, game, name, description, price_monthly_cents, currency, billing_interval, stripe_price_id, allowed_eggs",
       )
       .eq("id", data.planId)
       .eq("is_active", true)
@@ -96,6 +100,15 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
     }
 
     const currency = (plan.currency ?? "EUR").toLowerCase();
+    const variants = Array.isArray((plan as Record<string, unknown>).allowed_eggs)
+      ? ((plan as Record<string, unknown>).allowed_eggs as Array<{ label?: string }>)
+      : [];
+    const requestedVariantIndex =
+      typeof data.variantIndex === "number" && data.variantIndex >= 0 ? data.variantIndex : 0;
+    const selectedVariantIndex = variants[requestedVariantIndex] ? requestedVariantIndex : 0;
+    const selectedVariant = variants[selectedVariantIndex] ?? variants[0] ?? null;
+    const selectedTemplateLabel = selectedVariant?.label ?? plan.name;
+    const serverName = data.serverName?.trim() || `${plan.game} ${plan.name}`.slice(0, 40);
     const orderResult = await db
       .from("orders")
       .insert({
@@ -113,6 +126,12 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
         metadata: {
           source: "stripe_checkout",
           provisioning_deferred: true,
+          server_name: serverName,
+          selected_template: {
+            index: selectedVariantIndex,
+            label: selectedTemplateLabel,
+          },
+          environment: data.environment ?? {},
         },
       })
       .select("id")
@@ -152,6 +171,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
         order_id: order.id,
         user_id: context.userId,
         plan_id: plan.id,
+        template: selectedTemplateLabel,
         provisioning_deferred: "true",
       },
       subscription_data: {
@@ -159,6 +179,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
           order_id: order.id,
           user_id: context.userId,
           plan_id: plan.id,
+          template: selectedTemplateLabel,
           provisioning_deferred: "true",
         },
       },
