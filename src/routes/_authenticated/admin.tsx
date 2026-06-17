@@ -43,6 +43,8 @@ import {
   adminListAll,
   adminListLogsDetailed,
   adminGetMonitoring,
+  adminCreateCurseForgeTemplateMapping,
+  adminDeleteCurseForgeTemplateMapping,
   adminImportCurseForgeModpack,
   adminListReconciliation,
   listCurseForgeMappings,
@@ -62,6 +64,7 @@ import {
   adminToggleCatalogActive,
   adminToggleCurseForgeModpack,
   adminToggleCurseForgeModpackVersion,
+  adminUpdateCurseForgeTemplateMapping,
   adminUpdatePlanEggs,
 } from "@/lib/admin.functions";
 import { adminListTickets, adminReplyToTicket } from "@/lib/support.functions";
@@ -239,6 +242,8 @@ function Admin() {
                   mappings: (curseForgeMappingsQ.data?.mappings ?? []) as AdminCurseForgeMapping[],
                   compatibilities: (curseForgePlansQ.data?.compatibilities ??
                     []) as AdminCurseForgePlanCompatibility[],
+                  templates: (catalogQ.data?.templates ?? []) as AdminCatalogTemplate[],
+                  games: (catalogQ.data?.games ?? []) as AdminCatalogGame[],
                 }}
               />
             </div>
@@ -1021,7 +1026,10 @@ type AdminCurseForgeMapping = {
   priority: number;
   created_at: string;
   curseforge_modpacks?: { name?: string | null } | null;
-  server_templates?: { name?: string | null } | null;
+  server_templates?: {
+    name?: string | null;
+    game_catalog?: { name?: string | null } | null;
+  } | null;
 };
 type AdminCurseForgePlanCompatibility = {
   id: string;
@@ -1050,7 +1058,18 @@ type AdminCurseForgeCacheData = {
   versions: AdminCurseForgeVersion[];
   mappings: AdminCurseForgeMapping[];
   compatibilities: AdminCurseForgePlanCompatibility[];
+  templates: AdminCatalogTemplate[];
+  games: AdminCatalogGame[];
 };
+
+type CurseForgeMappingDraft = {
+  templateId: string;
+  loader: string;
+  minecraftVersion: string;
+  priority: string;
+};
+
+const CURSEFORGE_MAPPING_LOADERS = ["Forge", "Fabric", "Quilt", "NeoForge", "Vanilla", "Other"];
 
 function AdminPlansSection({ plans }: { plans: AdminPlan[] }) {
   return (
@@ -1336,10 +1355,21 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
   const syncFn = useServerFn(adminSyncCurseForgeModpackVersions);
   const toggleModpackFn = useServerFn(adminToggleCurseForgeModpack);
   const toggleVersionFn = useServerFn(adminToggleCurseForgeModpackVersion);
+  const createMappingFn = useServerFn(adminCreateCurseForgeTemplateMapping);
+  const updateMappingFn = useServerFn(adminUpdateCurseForgeTemplateMapping);
+  const deleteMappingFn = useServerFn(adminDeleteCurseForgeTemplateMapping);
   const [query, setQuery] = useState("");
   const [minecraftVersion, setMinecraftVersion] = useState("");
   const [loader, setLoader] = useState("");
   const [results, setResults] = useState<AdminCurseForgeSearchResult[]>([]);
+  const [mappingDrafts, setMappingDrafts] = useState<Record<string, CurseForgeMappingDraft>>({});
+  const gamesById = new Map(data.games.map((game) => [game.id, game]));
+  const versionsByModpack = new Map<string, AdminCurseForgeVersion[]>();
+  for (const version of data.versions) {
+    const current = versionsByModpack.get(version.modpack_id) ?? [];
+    current.push(version);
+    versionsByModpack.set(version.modpack_id, current);
+  }
 
   const refreshCache = () => {
     qc.invalidateQueries({ queryKey: ["admin-curseforge-modpacks"] });
@@ -1400,6 +1430,71 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
     },
     onError: (e: Error) => toast.error(e.message),
   });
+
+  const createMapping = useMutation({
+    mutationFn: (input: { modpackId: string; draft: CurseForgeMappingDraft }) =>
+      createMappingFn({
+        data: {
+          modpackId: input.modpackId,
+          templateId: input.draft.templateId,
+          loader: input.draft.loader || undefined,
+          minecraftVersion: input.draft.minecraftVersion || undefined,
+          priority: Number(input.draft.priority || 0),
+          isActive: true,
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Mapping créé");
+      refreshCache();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const updateMapping = useMutation({
+    mutationFn: (input: { mapping: AdminCurseForgeMapping; isActive?: boolean }) =>
+      updateMappingFn({
+        data: {
+          mappingId: input.mapping.id,
+          modpackId: input.mapping.modpack_id,
+          templateId: input.mapping.template_id,
+          loader: input.mapping.loader ?? undefined,
+          minecraftVersion: input.mapping.minecraft_version ?? undefined,
+          priority: input.mapping.priority,
+          isActive: input.isActive ?? input.mapping.is_active,
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Mapping mis à jour");
+      refreshCache();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const deleteMapping = useMutation({
+    mutationFn: (mappingId: string) => deleteMappingFn({ data: { mappingId } }),
+    onSuccess: () => {
+      toast.success("Mapping désactivé");
+      refreshCache();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const setMappingDraft = (modpackId: string, patch: Partial<CurseForgeMappingDraft>) =>
+    setMappingDrafts((current) => {
+      const existing = current[modpackId] ?? {
+        templateId: "",
+        loader: "",
+        minecraftVersion: "",
+        priority: "0",
+      };
+      return {
+        ...current,
+        [modpackId]: {
+          ...existing,
+          ...patch,
+        },
+      };
+    });
 
   return (
     <div className="grid gap-8">
@@ -1554,6 +1649,161 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
             </TableBody>
           </Table>
         </TableShell>
+      </section>
+
+      <section>
+        <SectionTitle icon={<Server className="h-5 w-5" />} title="Mappings par modpack" />
+        {data.modpacks.length === 0 ? (
+          <EmptyState label="Importe un modpack avant de créer un mapping." />
+        ) : (
+          <div className="grid gap-4">
+            {data.modpacks.map((modpack) => {
+              const modpackVersions = versionsByModpack.get(modpack.id) ?? [];
+              const minecraftVersions = Array.from(
+                new Set(modpackVersions.flatMap((version) => version.minecraft_versions)),
+              ).sort();
+              const loaders = Array.from(
+                new Set([
+                  ...modpackVersions.flatMap((version) => version.loaders),
+                  ...CURSEFORGE_MAPPING_LOADERS,
+                ]),
+              ).filter(Boolean);
+              const mappings = data.mappings.filter((mapping) => mapping.modpack_id === modpack.id);
+              const draft = mappingDrafts[modpack.id] ?? {
+                templateId: "",
+                loader: "",
+                minecraftVersion: "",
+                priority: "0",
+              };
+
+              return (
+                <article key={modpack.id} className="xnt-card rounded-lg p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="font-display text-lg font-semibold">{modpack.name}</h3>
+                      <p className="text-xs text-muted-foreground">
+                        CF {modpack.curseforge_mod_id} · {mappings.length} mapping(s)
+                      </p>
+                    </div>
+                    <StatusBadge status={modpack.is_active ? "active" : "disabled"} />
+                  </div>
+
+                  <form
+                    className="mt-4 grid gap-2 lg:grid-cols-[1.4fr_1fr_1fr_100px_auto]"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      if (!draft.templateId) {
+                        toast.error("Choisis un template serveur.");
+                        return;
+                      }
+                      createMapping.mutate({ modpackId: modpack.id, draft });
+                    }}
+                  >
+                    <select
+                      value={draft.templateId}
+                      onChange={(e) => setMappingDraft(modpack.id, { templateId: e.target.value })}
+                      className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      <option value="">Template serveur</option>
+                      {data.templates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {template.name} · {gamesById.get(template.game_id)?.name ?? "Jeu"}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={draft.loader}
+                      onChange={(e) => setMappingDraft(modpack.id, { loader: e.target.value })}
+                      className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      <option value="">Loader auto</option>
+                      {loaders.map((loaderName) => (
+                        <option key={loaderName} value={loaderName}>
+                          {loaderName}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={draft.minecraftVersion}
+                      onChange={(e) =>
+                        setMappingDraft(modpack.id, { minecraftVersion: e.target.value })
+                      }
+                      className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                    >
+                      <option value="">Version auto</option>
+                      {minecraftVersions.map((version) => (
+                        <option key={version} value={version}>
+                          {version}
+                        </option>
+                      ))}
+                    </select>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={1000}
+                      value={draft.priority}
+                      onChange={(e) => setMappingDraft(modpack.id, { priority: e.target.value })}
+                      placeholder="Priorité"
+                    />
+                    <Button type="submit" disabled={createMapping.isPending || !draft.templateId}>
+                      Ajouter
+                    </Button>
+                  </form>
+
+                  {mappings.length === 0 ? (
+                    <p className="mt-3 text-sm text-muted-foreground">
+                      Aucun mapping pour ce modpack.
+                    </p>
+                  ) : (
+                    <div className="mt-4 grid gap-2">
+                      {mappings.map((mapping) => (
+                        <div
+                          key={mapping.id}
+                          className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/30 p-3"
+                        >
+                          <div>
+                            <div className="font-medium">
+                              {mapping.server_templates?.name ?? shortId(mapping.template_id)}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              {mapping.server_templates?.game_catalog?.name ?? "Jeu"} · loader{" "}
+                              {mapping.loader ?? "auto"} · Minecraft{" "}
+                              {mapping.minecraft_version ?? "auto"} · priorité {mapping.priority}
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <StatusBadge status={mapping.is_active ? "active" : "disabled"} />
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={updateMapping.isPending}
+                              onClick={() =>
+                                updateMapping.mutate({
+                                  mapping,
+                                  isActive: !mapping.is_active,
+                                })
+                              }
+                            >
+                              {mapping.is_active ? "Désactiver" : "Activer"}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={deleteMapping.isPending || !mapping.is_active}
+                              onClick={() => deleteMapping.mutate(mapping.id)}
+                            >
+                              Supprimer
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       <section>

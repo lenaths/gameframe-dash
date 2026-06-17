@@ -647,7 +647,7 @@ export const listCurseForgeMappings = createServerFn({ method: "GET" })
     const { data, error } = await db
       .from("curseforge_template_mappings")
       .select(
-        "id, modpack_id, template_id, loader, minecraft_version, is_active, priority, created_at, curseforge_modpacks(name), server_templates(name)",
+        "id, modpack_id, template_id, loader, minecraft_version, is_active, priority, created_at, curseforge_modpacks(name), server_templates(name, game_catalog(name))",
       )
       .order("priority", { ascending: true })
       .limit(300);
@@ -869,6 +869,185 @@ export const adminToggleCurseForgeModpackVersion = createServerFn({ method: "POS
       entityType: "curseforge_modpack_version",
       entityId: data.versionId,
       after: { isActive: data.isActive },
+    });
+    return { ok: true };
+  });
+
+const curseForgeMappingInput = z.object({
+  modpackId: z.string().uuid(),
+  templateId: z.string().uuid(),
+  loader: z.string().trim().max(40).optional(),
+  minecraftVersion: z.string().trim().max(40).optional(),
+  priority: z.number().int().min(0).max(1000).default(0),
+  isActive: z.boolean().default(true),
+});
+
+async function assertCurseForgeMappingRefs(
+  db: SupabaseAny,
+  input: { modpackId: string; templateId: string },
+) {
+  const [{ data: modpack, error: modpackError }, { data: template, error: templateError }] =
+    await Promise.all([
+      db.from("curseforge_modpacks").select("id").eq("id", input.modpackId).maybeSingle(),
+      db.from("server_templates").select("id").eq("id", input.templateId).maybeSingle(),
+    ]);
+
+  if (modpackError) throw new Error(modpackError.message);
+  if (templateError) throw new Error(templateError.message);
+  if (!modpack) throw new Error("Modpack CurseForge introuvable.");
+  if (!template) throw new Error("Template serveur introuvable.");
+}
+
+function cleanNullableText(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
+}
+
+async function assertCurseForgeMappingUnique(
+  db: SupabaseAny,
+  input: {
+    modpackId: string;
+    templateId: string;
+    loader: string | null;
+    minecraftVersion: string | null;
+    ignoreMappingId?: string;
+  },
+) {
+  const { data, error } = await db
+    .from("curseforge_template_mappings")
+    .select("id, loader, minecraft_version")
+    .eq("modpack_id", input.modpackId)
+    .eq("template_id", input.templateId);
+  if (error) throw new Error(error.message);
+
+  const duplicate = (
+    (data ?? []) as Array<{ id: string; loader: string | null; minecraft_version: string | null }>
+  ).find(
+    (mapping) =>
+      mapping.id !== input.ignoreMappingId &&
+      (mapping.loader ?? null) === input.loader &&
+      (mapping.minecraft_version ?? null) === input.minecraftVersion,
+  );
+  if (duplicate) {
+    throw new Error("Ce mapping existe déjà pour ce modpack, template, loader et version.");
+  }
+}
+
+export const adminCreateCurseForgeTemplateMapping = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => curseForgeMappingInput.parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    await assertCurseForgeMappingRefs(db, data);
+
+    const payload = {
+      modpack_id: data.modpackId,
+      template_id: data.templateId,
+      loader: cleanNullableText(data.loader),
+      minecraft_version: cleanNullableText(data.minecraftVersion),
+      is_active: data.isActive,
+      priority: data.priority,
+      metadata: {},
+    };
+    await assertCurseForgeMappingUnique(db, {
+      modpackId: data.modpackId,
+      templateId: data.templateId,
+      loader: payload.loader,
+      minecraftVersion: payload.minecraft_version,
+    });
+
+    const { data: inserted, error } = await db
+      .from("curseforge_template_mappings")
+      .insert(payload)
+      .select("id")
+      .single();
+    if (error) {
+      if (error.code === "23505") {
+        throw new Error("Ce mapping existe déjà pour ce modpack, template, loader et version.");
+      }
+      throw new Error(error.message);
+    }
+
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.curseforge.create_mapping",
+      entityType: "curseforge_template_mapping",
+      entityId: (inserted as { id?: string } | null)?.id ?? null,
+      after: payload,
+    });
+
+    return { ok: true, id: (inserted as { id?: string } | null)?.id ?? null };
+  });
+
+export const adminUpdateCurseForgeTemplateMapping = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) =>
+    curseForgeMappingInput.extend({ mappingId: z.string().uuid() }).parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    await assertCurseForgeMappingRefs(db, data);
+
+    const payload = {
+      modpack_id: data.modpackId,
+      template_id: data.templateId,
+      loader: cleanNullableText(data.loader),
+      minecraft_version: cleanNullableText(data.minecraftVersion),
+      is_active: data.isActive,
+      priority: data.priority,
+    };
+    await assertCurseForgeMappingUnique(db, {
+      modpackId: data.modpackId,
+      templateId: data.templateId,
+      loader: payload.loader,
+      minecraftVersion: payload.minecraft_version,
+      ignoreMappingId: data.mappingId,
+    });
+
+    const { error } = await db
+      .from("curseforge_template_mappings")
+      .update(payload)
+      .eq("id", data.mappingId);
+    if (error) {
+      if (error.code === "23505") {
+        throw new Error("Ce mapping existe déjà pour ce modpack, template, loader et version.");
+      }
+      throw new Error(error.message);
+    }
+
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.curseforge.update_mapping",
+      entityType: "curseforge_template_mapping",
+      entityId: data.mappingId,
+      after: payload,
+    });
+
+    return { ok: true };
+  });
+
+export const adminDeleteCurseForgeTemplateMapping = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => z.object({ mappingId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { error } = await db
+      .from("curseforge_template_mappings")
+      .update({ is_active: false })
+      .eq("id", data.mappingId);
+    if (error) throw new Error(error.message);
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.curseforge.disable_mapping",
+      entityType: "curseforge_template_mapping",
+      entityId: data.mappingId,
+      after: { isActive: false },
     });
     return { ok: true };
   });
