@@ -44,6 +44,10 @@ import {
   adminListLogsDetailed,
   adminGetMonitoring,
   adminListReconciliation,
+  listCurseForgeMappings,
+  listCurseForgeModpacks,
+  listCurseForgeModpackVersions,
+  listCurseForgePlanCompatibilities,
   adminListGameCatalog,
   adminListOrdersDetailed,
   adminListPaymentsDetailed,
@@ -73,6 +77,10 @@ function Admin() {
   const fetchMonitoring = useServerFn(adminGetMonitoring);
   const fetchReconciliation = useServerFn(adminListReconciliation);
   const fetchCatalog = useServerFn(adminListGameCatalog);
+  const fetchCurseForgeModpacks = useServerFn(listCurseForgeModpacks);
+  const fetchCurseForgeVersions = useServerFn(listCurseForgeModpackVersions);
+  const fetchCurseForgeMappings = useServerFn(listCurseForgeMappings);
+  const fetchCurseForgePlans = useServerFn(listCurseForgePlanCompatibilities);
 
   const overviewQ = useQuery({ queryKey: ["admin-all"], queryFn: () => fetchAll(), retry: false });
   const plansQ = useQuery({ queryKey: ["admin-plans"], queryFn: () => fetchPlans(), retry: false });
@@ -116,6 +124,26 @@ function Admin() {
     queryFn: () => fetchCatalog(),
     retry: false,
   });
+  const curseForgeModpacksQ = useQuery({
+    queryKey: ["admin-curseforge-modpacks"],
+    queryFn: () => fetchCurseForgeModpacks(),
+    retry: false,
+  });
+  const curseForgeVersionsQ = useQuery({
+    queryKey: ["admin-curseforge-versions"],
+    queryFn: () => fetchCurseForgeVersions(),
+    retry: false,
+  });
+  const curseForgeMappingsQ = useQuery({
+    queryKey: ["admin-curseforge-mappings"],
+    queryFn: () => fetchCurseForgeMappings(),
+    retry: false,
+  });
+  const curseForgePlansQ = useQuery({
+    queryKey: ["admin-curseforge-plans"],
+    queryFn: () => fetchCurseForgePlans(),
+    retry: false,
+  });
 
   const error =
     overviewQ.error ??
@@ -127,7 +155,11 @@ function Admin() {
     ticketsQ.error ??
     monitoringQ.error ??
     reconciliationQ.error ??
-    catalogQ.error;
+    catalogQ.error ??
+    curseForgeModpacksQ.error ??
+    curseForgeVersionsQ.error ??
+    curseForgeMappingsQ.error ??
+    curseForgePlansQ.error;
 
   return (
     <div className="xnt-page min-h-screen">
@@ -194,6 +226,17 @@ function Admin() {
           </TabsContent>
           <TabsContent value="catalog" className="mt-6">
             <AdminGameCatalogSection data={catalogQ.data as AdminGameCatalogData | undefined} />
+            <div className="mt-8">
+              <AdminCurseForgeCacheSection
+                data={{
+                  modpacks: (curseForgeModpacksQ.data?.modpacks ?? []) as AdminCurseForgeModpack[],
+                  versions: (curseForgeVersionsQ.data?.versions ?? []) as AdminCurseForgeVersion[],
+                  mappings: (curseForgeMappingsQ.data?.mappings ?? []) as AdminCurseForgeMapping[],
+                  compatibilities: (curseForgePlansQ.data?.compatibilities ??
+                    []) as AdminCurseForgePlanCompatibility[],
+                }}
+              />
+            </div>
           </TabsContent>
           <TabsContent value="users" className="mt-6">
             <AdminUsersSection
@@ -926,6 +969,72 @@ type AdminGameCatalogData = {
   versions: AdminCatalogVersion[];
   compatibilities: AdminCatalogCompatibility[];
 };
+type AdminCurseForgeModpack = {
+  id: string;
+  curseforge_mod_id: number;
+  game_id: string | null;
+  slug: string | null;
+  name: string;
+  summary: string | null;
+  logo_url: string | null;
+  website_url: string | null;
+  download_count: number | null;
+  class_id: number | null;
+  primary_category_id: number | null;
+  is_active: boolean;
+  is_featured: boolean;
+  last_synced_at: string | null;
+  created_at: string;
+  game_catalog?: { name?: string | null; slug?: string | null } | null;
+};
+type AdminCurseForgeVersion = {
+  id: string;
+  modpack_id: string;
+  curseforge_file_id: number;
+  display_name: string;
+  file_name: string | null;
+  release_type: number | null;
+  file_status: number | null;
+  minecraft_versions: string[];
+  loaders: string[];
+  server_pack_file_id: number | null;
+  is_server_pack: boolean;
+  file_date: string | null;
+  file_length: number | null;
+  download_url_cached: boolean;
+  is_active: boolean;
+  last_synced_at: string | null;
+  created_at: string;
+};
+type AdminCurseForgeMapping = {
+  id: string;
+  modpack_id: string;
+  template_id: string;
+  loader: string | null;
+  minecraft_version: string | null;
+  is_active: boolean;
+  priority: number;
+  created_at: string;
+  curseforge_modpacks?: { name?: string | null } | null;
+  server_templates?: { name?: string | null } | null;
+};
+type AdminCurseForgePlanCompatibility = {
+  id: string;
+  modpack_id: string;
+  plan_id: string;
+  min_ram_mb: number | null;
+  recommended_ram_mb: number | null;
+  is_active: boolean;
+  created_at: string;
+  curseforge_modpacks?: { name?: string | null } | null;
+  plans?: { name?: string | null; game?: string | null } | null;
+};
+type AdminCurseForgeCacheData = {
+  modpacks: AdminCurseForgeModpack[];
+  versions: AdminCurseForgeVersion[];
+  mappings: AdminCurseForgeMapping[];
+  compatibilities: AdminCurseForgePlanCompatibility[];
+};
 
 function AdminPlansSection({ plans }: { plans: AdminPlan[] }) {
   return (
@@ -1193,6 +1302,182 @@ function AdminGameCatalogSection({ data }: { data?: AdminGameCatalogData }) {
                       id={compatibility.id}
                       active={compatibility.is_active}
                     />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
+      </section>
+    </div>
+  );
+}
+
+function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData }) {
+  return (
+    <div className="grid gap-8">
+      <section>
+        <SectionTitle icon={<Package className="h-5 w-5" />} title="CurseForge Cache" />
+        <p className="mb-4 text-sm text-muted-foreground">
+          Cache local en lecture seule pour préparer l’import de modpacks. Aucun appel CurseForge
+          réel n’est effectué dans cette phase.
+        </p>
+        <TableShell empty={data.modpacks.length === 0 ? "Aucun modpack importé." : null}>
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Modpack</TableHead>
+                <TableHead>Jeu</TableHead>
+                <TableHead>Downloads</TableHead>
+                <TableHead>Sync</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.modpacks.map((modpack) => (
+                <TableRow key={modpack.id}>
+                  <TableCell>
+                    <div className="font-medium">{modpack.name}</div>
+                    <div className="font-mono text-xs text-muted-foreground">
+                      CF {modpack.curseforge_mod_id}
+                      {modpack.slug ? ` · ${modpack.slug}` : ""}
+                    </div>
+                    {modpack.summary ? (
+                      <div className="mt-1 max-w-xl truncate text-xs text-muted-foreground">
+                        {modpack.summary}
+                      </div>
+                    ) : null}
+                  </TableCell>
+                  <TableCell>{modpack.game_catalog?.name ?? "—"}</TableCell>
+                  <TableCell>{modpack.download_count?.toLocaleString() ?? "—"}</TableCell>
+                  <TableCell>{formatDateTime(modpack.last_synced_at)}</TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      <StatusBadge status={modpack.is_active ? "active" : "disabled"} />
+                      {modpack.is_featured ? <Badge variant="outline">featured</Badge> : null}
+                    </div>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
+      </section>
+
+      <section>
+        <SectionTitle icon={<ScrollText className="h-5 w-5" />} title="Modpack Versions" />
+        <TableShell empty={data.versions.length === 0 ? "Aucune version de modpack." : null}>
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Version</TableHead>
+                <TableHead>Minecraft</TableHead>
+                <TableHead>Loaders</TableHead>
+                <TableHead>Server Pack</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.versions.map((version) => (
+                <TableRow key={version.id}>
+                  <TableCell>
+                    <div className="font-medium">{version.display_name}</div>
+                    <div className="font-mono text-xs text-muted-foreground">
+                      file {version.curseforge_file_id}
+                    </div>
+                  </TableCell>
+                  <TableCell>{version.minecraft_versions.join(", ") || "—"}</TableCell>
+                  <TableCell>{version.loaders.join(", ") || "—"}</TableCell>
+                  <TableCell>
+                    {version.is_server_pack ? (
+                      <Badge variant="outline">server pack</Badge>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={version.is_active ? "active" : "disabled"} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
+      </section>
+
+      <section>
+        <SectionTitle icon={<Server className="h-5 w-5" />} title="Template Mappings" />
+        <TableShell empty={data.mappings.length === 0 ? "Aucun mapping template." : null}>
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Modpack</TableHead>
+                <TableHead>Template</TableHead>
+                <TableHead>Loader</TableHead>
+                <TableHead>Minecraft</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.mappings.map((mapping) => (
+                <TableRow key={mapping.id}>
+                  <TableCell>
+                    {mapping.curseforge_modpacks?.name ?? shortId(mapping.modpack_id)}
+                  </TableCell>
+                  <TableCell>
+                    {mapping.server_templates?.name ?? shortId(mapping.template_id)}
+                  </TableCell>
+                  <TableCell>{mapping.loader ?? "—"}</TableCell>
+                  <TableCell>{mapping.minecraft_version ?? "—"}</TableCell>
+                  <TableCell>
+                    <StatusBadge status={mapping.is_active ? "active" : "disabled"} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
+      </section>
+
+      <section>
+        <SectionTitle
+          icon={<ClipboardList className="h-5 w-5" />}
+          title="Modpack / Plan Compatibilities"
+        />
+        <TableShell
+          empty={data.compatibilities.length === 0 ? "Aucune compatibilité modpack." : null}
+        >
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Modpack</TableHead>
+                <TableHead>Plan</TableHead>
+                <TableHead>RAM min.</TableHead>
+                <TableHead>RAM recommandée</TableHead>
+                <TableHead>Status</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.compatibilities.map((compatibility) => (
+                <TableRow key={compatibility.id}>
+                  <TableCell>
+                    {compatibility.curseforge_modpacks?.name ?? shortId(compatibility.modpack_id)}
+                  </TableCell>
+                  <TableCell>
+                    {compatibility.plans?.game ?? "—"} · {compatibility.plans?.name ?? "—"}
+                  </TableCell>
+                  <TableCell>
+                    {compatibility.min_ram_mb
+                      ? `${(compatibility.min_ram_mb / 1024).toFixed(0)} GB`
+                      : "—"}
+                  </TableCell>
+                  <TableCell>
+                    {compatibility.recommended_ram_mb
+                      ? `${(compatibility.recommended_ram_mb / 1024).toFixed(0)} GB`
+                      : "—"}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={compatibility.is_active ? "active" : "disabled"} />
                   </TableCell>
                 </TableRow>
               ))}

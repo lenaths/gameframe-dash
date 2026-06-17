@@ -154,6 +154,66 @@ type AdminCatalogCompatibility = {
   sort_order: number;
   plans?: { name?: string | null; game?: string | null } | null;
 };
+type AdminCurseForgeModpack = {
+  id: string;
+  curseforge_mod_id: number;
+  game_id: string | null;
+  slug: string | null;
+  name: string;
+  summary: string | null;
+  logo_url: string | null;
+  website_url: string | null;
+  download_count: number | null;
+  class_id: number | null;
+  primary_category_id: number | null;
+  is_active: boolean;
+  is_featured: boolean;
+  last_synced_at: string | null;
+  created_at: string;
+  game_catalog?: { name?: string | null; slug?: string | null } | null;
+};
+type AdminCurseForgeVersion = {
+  id: string;
+  modpack_id: string;
+  curseforge_file_id: number;
+  display_name: string;
+  file_name: string | null;
+  release_type: number | null;
+  file_status: number | null;
+  minecraft_versions: string[];
+  loaders: string[];
+  server_pack_file_id: number | null;
+  is_server_pack: boolean;
+  file_date: string | null;
+  file_length: number | null;
+  download_url_cached: boolean;
+  is_active: boolean;
+  last_synced_at: string | null;
+  created_at: string;
+};
+type AdminCurseForgeMapping = {
+  id: string;
+  modpack_id: string;
+  template_id: string;
+  loader: string | null;
+  minecraft_version: string | null;
+  is_active: boolean;
+  priority: number;
+  created_at: string;
+  curseforge_modpacks?: { name?: string | null } | null;
+  server_templates?: { name?: string | null } | null;
+};
+type AdminCurseForgePlanCompatibility = {
+  id: string;
+  modpack_id: string;
+  plan_id: string;
+  min_ram_mb: number | null;
+  recommended_ram_mb: number | null;
+  is_active: boolean;
+  created_at: string;
+  curseforge_modpacks?: { name?: string | null } | null;
+  plans?: { name?: string | null; game?: string | null } | null;
+};
 type ReconciliationAnomaly = {
   id: string;
   type: string;
@@ -529,6 +589,74 @@ export const adminToggleCatalogActive = createServerFn({ method: "POST" })
       after: { isActive: data.isActive },
     });
     return { ok: true };
+  });
+
+export const listCurseForgeModpacks = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { data, error } = await db
+      .from("curseforge_modpacks")
+      .select(
+        "id, curseforge_mod_id, game_id, slug, name, summary, logo_url, website_url, download_count, class_id, primary_category_id, is_active, is_featured, last_synced_at, created_at, game_catalog(name, slug)",
+      )
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (error) throw new Error(error.message);
+    return { modpacks: (data ?? []) as AdminCurseForgeModpack[] };
+  });
+
+export const listCurseForgeModpackVersions = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { data, error } = await db
+      .from("curseforge_modpack_versions")
+      .select(
+        "id, modpack_id, curseforge_file_id, display_name, file_name, release_type, file_status, minecraft_versions, loaders, server_pack_file_id, is_server_pack, file_date, file_length, download_url_cached, is_active, last_synced_at, created_at",
+      )
+      .order("created_at", { ascending: false })
+      .limit(300);
+    if (error) throw new Error(error.message);
+    return { versions: (data ?? []) as AdminCurseForgeVersion[] };
+  });
+
+export const listCurseForgeMappings = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { data, error } = await db
+      .from("curseforge_template_mappings")
+      .select(
+        "id, modpack_id, template_id, loader, minecraft_version, is_active, priority, created_at, curseforge_modpacks(name), server_templates(name)",
+      )
+      .order("priority", { ascending: true })
+      .limit(300);
+    if (error) throw new Error(error.message);
+    return { mappings: (data ?? []) as AdminCurseForgeMapping[] };
+  });
+
+export const listCurseForgePlanCompatibilities = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { data, error } = await db
+      .from("curseforge_plan_compatibilities")
+      .select(
+        "id, modpack_id, plan_id, min_ram_mb, recommended_ram_mb, is_active, created_at, curseforge_modpacks(name), plans(name, game)",
+      )
+      .order("created_at", { ascending: false })
+      .limit(300);
+    if (error) throw new Error(error.message);
+    return { compatibilities: (data ?? []) as AdminCurseForgePlanCompatibility[] };
   });
 
 export const adminListProvisioningQueue = createServerFn({ method: "GET" })
