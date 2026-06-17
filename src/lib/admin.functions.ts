@@ -17,7 +17,9 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
   limit: (count: number) => SupabaseQuery<T>;
   insert: (values: unknown) => SupabaseQuery<T>;
+  upsert: (values: unknown, options?: Record<string, unknown>) => SupabaseQuery<T>;
   update: (values: unknown) => SupabaseQuery<T>;
+  single: () => SupabaseQuery<T>;
   maybeSingle: () => SupabaseQuery<T>;
 };
 
@@ -213,6 +215,17 @@ type AdminCurseForgePlanCompatibility = {
   created_at: string;
   curseforge_modpacks?: { name?: string | null } | null;
   plans?: { name?: string | null; game?: string | null } | null;
+};
+type CurseForgeSearchResult = {
+  curseforge_mod_id: number;
+  slug: string | null;
+  name: string;
+  summary: string | null;
+  logo_url: string | null;
+  website_url: string | null;
+  download_count: number | null;
+  class_id: number | null;
+  primary_category_id: number | null;
 };
 type ReconciliationAnomaly = {
   id: string;
@@ -657,6 +670,207 @@ export const listCurseForgePlanCompatibilities = createServerFn({ method: "GET" 
       .limit(300);
     if (error) throw new Error(error.message);
     return { compatibilities: (data ?? []) as AdminCurseForgePlanCompatibility[] };
+  });
+
+export const adminSearchCurseForgeModpacks = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) =>
+    z
+      .object({
+        query: z.string().trim().min(2).max(80),
+        minecraftVersion: z.string().trim().max(20).optional(),
+        loader: z.enum(["forge", "fabric", "quilt", "neoforge"]).optional(),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { searchCurseForgeModpacks } = await import("@/lib/curseforge.server");
+    const results = await searchCurseForgeModpacks({
+      query: data.query,
+      minecraftVersion: data.minecraftVersion,
+      loader: data.loader,
+      pageSize: 20,
+    });
+
+    return {
+      results: results.map(
+        (mod): CurseForgeSearchResult => ({
+          curseforge_mod_id: mod.id,
+          slug: mod.slug ?? null,
+          name: mod.name,
+          summary: mod.summary ?? null,
+          logo_url: mod.logo?.url ?? null,
+          website_url: mod.links?.websiteUrl ?? null,
+          download_count: mod.downloadCount ?? null,
+          class_id: mod.classId ?? null,
+          primary_category_id: mod.primaryCategoryId ?? null,
+        }),
+      ),
+    };
+  });
+
+async function getMinecraftGameId(db: SupabaseAny) {
+  const { data } = await db.from("game_catalog").select("id").eq("slug", "minecraft").maybeSingle();
+  return ((data as { id?: string } | null)?.id ?? null) as string | null;
+}
+
+export const adminImportCurseForgeModpack = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => z.object({ modId: z.number().int().positive() }).parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { getCurseForgeMod } = await import("@/lib/curseforge.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const mod = await getCurseForgeMod(data.modId);
+    const gameId = await getMinecraftGameId(db);
+
+    const { data: saved, error } = await db
+      .from("curseforge_modpacks")
+      .upsert(
+        {
+          curseforge_mod_id: mod.id,
+          game_id: gameId,
+          slug: mod.slug ?? null,
+          name: mod.name,
+          summary: mod.summary ?? null,
+          logo_url: mod.logo?.url ?? null,
+          website_url: mod.links?.websiteUrl ?? null,
+          download_count: mod.downloadCount ?? null,
+          class_id: mod.classId ?? null,
+          primary_category_id: mod.primaryCategoryId ?? null,
+          is_active: false,
+          raw_payload: mod,
+          last_synced_at: new Date().toISOString(),
+        },
+        { onConflict: "curseforge_mod_id" },
+      )
+      .select("id")
+      .single();
+    if (error) throw new Error(error.message);
+
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.curseforge.import_modpack",
+      entityType: "curseforge_modpack",
+      entityId: (saved as { id?: string } | null)?.id ?? null,
+      after: { curseforgeModId: mod.id, name: mod.name },
+    });
+
+    return { ok: true, id: (saved as { id?: string } | null)?.id ?? null };
+  });
+
+export const adminSyncCurseForgeModpackVersions = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => z.object({ modpackId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { extractLoaders, extractMinecraftVersions, listCurseForgeModFiles } =
+      await import("@/lib/curseforge.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+
+    const { data: modpack, error: modpackError } = await db
+      .from("curseforge_modpacks")
+      .select("id, curseforge_mod_id")
+      .eq("id", data.modpackId)
+      .maybeSingle();
+    if (modpackError) throw new Error(modpackError.message);
+    const row = modpack as { id: string; curseforge_mod_id: number } | null;
+    if (!row) throw new Error("Modpack CurseForge introuvable.");
+
+    const files = await listCurseForgeModFiles(row.curseforge_mod_id);
+    const payloads = files.map((file) => ({
+      modpack_id: row.id,
+      curseforge_file_id: file.id,
+      display_name: file.displayName ?? file.fileName ?? `File ${file.id}`,
+      file_name: file.fileName ?? null,
+      release_type: file.releaseType ?? null,
+      file_status: file.fileStatus ?? null,
+      minecraft_versions: extractMinecraftVersions(file),
+      loaders: extractLoaders(file),
+      server_pack_file_id: file.serverPackFileId ?? null,
+      is_server_pack: Boolean(file.serverPackFileId),
+      file_date: file.fileDate ?? null,
+      file_length: file.fileLength ?? null,
+      download_url_cached: false,
+      hashes: file.hashes ?? {},
+      dependencies: file.dependencies ?? [],
+      raw_payload: file,
+      last_synced_at: new Date().toISOString(),
+    }));
+
+    if (payloads.length > 0) {
+      const { error } = await db
+        .from("curseforge_modpack_versions")
+        .upsert(payloads, { onConflict: "curseforge_file_id" });
+      if (error) throw new Error(error.message);
+    }
+
+    const { error: updateError } = await db
+      .from("curseforge_modpacks")
+      .update({ last_synced_at: new Date().toISOString() })
+      .eq("id", row.id);
+    if (updateError) throw new Error(updateError.message);
+
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.curseforge.sync_versions",
+      entityType: "curseforge_modpack",
+      entityId: row.id,
+      after: { importedVersions: payloads.length },
+    });
+
+    return { ok: true, imported: payloads.length };
+  });
+
+export const adminToggleCurseForgeModpack = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) =>
+    z.object({ modpackId: z.string().uuid(), isActive: z.boolean() }).parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { error } = await db
+      .from("curseforge_modpacks")
+      .update({ is_active: data.isActive })
+      .eq("id", data.modpackId);
+    if (error) throw new Error(error.message);
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.curseforge.toggle_modpack",
+      entityType: "curseforge_modpack",
+      entityId: data.modpackId,
+      after: { isActive: data.isActive },
+    });
+    return { ok: true };
+  });
+
+export const adminToggleCurseForgeModpackVersion = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) =>
+    z.object({ versionId: z.string().uuid(), isActive: z.boolean() }).parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { error } = await db
+      .from("curseforge_modpack_versions")
+      .update({ is_active: data.isActive })
+      .eq("id", data.versionId);
+    if (error) throw new Error(error.message);
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.curseforge.toggle_version",
+      entityType: "curseforge_modpack_version",
+      entityId: data.versionId,
+      after: { isActive: data.isActive },
+    });
+    return { ok: true };
   });
 
 export const adminListProvisioningQueue = createServerFn({ method: "GET" })

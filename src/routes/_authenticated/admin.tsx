@@ -43,6 +43,7 @@ import {
   adminListAll,
   adminListLogsDetailed,
   adminGetMonitoring,
+  adminImportCurseForgeModpack,
   adminListReconciliation,
   listCurseForgeMappings,
   listCurseForgeModpacks,
@@ -55,8 +56,12 @@ import {
   adminListServersDetailed,
   adminRepairReconciliation,
   adminRetryProvisioning,
+  adminSearchCurseForgeModpacks,
   adminSyncServerStatus,
+  adminSyncCurseForgeModpackVersions,
   adminToggleCatalogActive,
+  adminToggleCurseForgeModpack,
+  adminToggleCurseForgeModpackVersion,
   adminUpdatePlanEggs,
 } from "@/lib/admin.functions";
 import { adminListTickets, adminReplyToTicket } from "@/lib/support.functions";
@@ -1029,6 +1034,17 @@ type AdminCurseForgePlanCompatibility = {
   curseforge_modpacks?: { name?: string | null } | null;
   plans?: { name?: string | null; game?: string | null } | null;
 };
+type AdminCurseForgeSearchResult = {
+  curseforge_mod_id: number;
+  slug: string | null;
+  name: string;
+  summary: string | null;
+  logo_url: string | null;
+  website_url: string | null;
+  download_count: number | null;
+  class_id: number | null;
+  primary_category_id: number | null;
+};
 type AdminCurseForgeCacheData = {
   modpacks: AdminCurseForgeModpack[];
   versions: AdminCurseForgeVersion[];
@@ -1314,14 +1330,164 @@ function AdminGameCatalogSection({ data }: { data?: AdminGameCatalogData }) {
 }
 
 function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData }) {
+  const qc = useQueryClient();
+  const searchFn = useServerFn(adminSearchCurseForgeModpacks);
+  const importFn = useServerFn(adminImportCurseForgeModpack);
+  const syncFn = useServerFn(adminSyncCurseForgeModpackVersions);
+  const toggleModpackFn = useServerFn(adminToggleCurseForgeModpack);
+  const toggleVersionFn = useServerFn(adminToggleCurseForgeModpackVersion);
+  const [query, setQuery] = useState("");
+  const [minecraftVersion, setMinecraftVersion] = useState("");
+  const [loader, setLoader] = useState("");
+  const [results, setResults] = useState<AdminCurseForgeSearchResult[]>([]);
+
+  const refreshCache = () => {
+    qc.invalidateQueries({ queryKey: ["admin-curseforge-modpacks"] });
+    qc.invalidateQueries({ queryKey: ["admin-curseforge-versions"] });
+    qc.invalidateQueries({ queryKey: ["admin-curseforge-mappings"] });
+    qc.invalidateQueries({ queryKey: ["admin-curseforge-plans"] });
+  };
+
+  const search = useMutation({
+    mutationFn: () =>
+      searchFn({
+        data: {
+          query,
+          minecraftVersion: minecraftVersion.trim() || undefined,
+          loader: loader.trim()
+            ? (loader.trim().toLowerCase() as "forge" | "fabric" | "quilt" | "neoforge")
+            : undefined,
+        },
+      }),
+    onSuccess: (payload) => setResults((payload.results ?? []) as AdminCurseForgeSearchResult[]),
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const importModpack = useMutation({
+    mutationFn: (modId: number) => importFn({ data: { modId } }),
+    onSuccess: () => {
+      toast.success("Modpack importé dans le cache");
+      refreshCache();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const syncVersions = useMutation({
+    mutationFn: (modpackId: string) => syncFn({ data: { modpackId } }),
+    onSuccess: (payload) => {
+      toast.success(`${payload.imported} version(s) synchronisée(s)`);
+      refreshCache();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const toggleModpack = useMutation({
+    mutationFn: (input: { modpackId: string; isActive: boolean }) =>
+      toggleModpackFn({ data: input }),
+    onSuccess: () => {
+      toast.success("Modpack mis à jour");
+      refreshCache();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const toggleVersion = useMutation({
+    mutationFn: (input: { versionId: string; isActive: boolean }) =>
+      toggleVersionFn({ data: input }),
+    onSuccess: () => {
+      toast.success("Version mise à jour");
+      refreshCache();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
   return (
     <div className="grid gap-8">
       <section>
         <SectionTitle icon={<Package className="h-5 w-5" />} title="CurseForge Cache" />
         <p className="mb-4 text-sm text-muted-foreground">
-          Cache local en lecture seule pour préparer l’import de modpacks. Aucun appel CurseForge
-          réel n’est effectué dans cette phase.
+          Recherche et import admin server-only. La clé API reste côté serveur et aucune URL de
+          téléchargement n’est stockée.
         </p>
+
+        <form
+          className="xnt-card mb-4 grid gap-3 rounded-lg p-4 md:grid-cols-[1fr_160px_160px_auto]"
+          onSubmit={(e) => {
+            e.preventDefault();
+            search.mutate();
+          }}
+        >
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Rechercher un modpack..."
+            minLength={2}
+          />
+          <Input
+            value={minecraftVersion}
+            onChange={(e) => setMinecraftVersion(e.target.value)}
+            placeholder="Minecraft 1.20.1"
+          />
+          <Input value={loader} onChange={(e) => setLoader(e.target.value)} placeholder="Forge" />
+          <Button type="submit" disabled={search.isPending || query.trim().length < 2}>
+            {search.isPending ? "Recherche..." : "Rechercher"}
+          </Button>
+        </form>
+
+        {(search.error || results.length > 0) && (
+          <div className="mb-6">
+            <SectionTitle icon={<ScrollText className="h-5 w-5" />} title="Résultats CurseForge" />
+            <TableShell
+              empty={
+                !search.isPending && results.length === 0
+                  ? "Aucun résultat pour cette recherche."
+                  : null
+              }
+            >
+              <Table>
+                <TableHeader className="bg-surface-2">
+                  <TableRow>
+                    <TableHead>Modpack</TableHead>
+                    <TableHead>Downloads</TableHead>
+                    <TableHead>Class</TableHead>
+                    <TableHead className="text-right">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {results.map((result) => (
+                    <TableRow key={result.curseforge_mod_id}>
+                      <TableCell>
+                        <div className="font-medium">{result.name}</div>
+                        <div className="font-mono text-xs text-muted-foreground">
+                          CF {result.curseforge_mod_id}
+                          {result.slug ? ` · ${result.slug}` : ""}
+                        </div>
+                        {result.summary ? (
+                          <div className="mt-1 max-w-xl truncate text-xs text-muted-foreground">
+                            {result.summary}
+                          </div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell>{result.download_count?.toLocaleString() ?? "—"}</TableCell>
+                      <TableCell>{result.class_id ?? "—"}</TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={importModpack.isPending}
+                          onClick={() => importModpack.mutate(result.curseforge_mod_id)}
+                        >
+                          Importer
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableShell>
+          </div>
+        )}
+
         <TableShell empty={data.modpacks.length === 0 ? "Aucun modpack importé." : null}>
           <Table>
             <TableHeader className="bg-surface-2">
@@ -1331,6 +1497,7 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
                 <TableHead>Downloads</TableHead>
                 <TableHead>Sync</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1357,6 +1524,31 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
                       {modpack.is_featured ? <Badge variant="outline">featured</Badge> : null}
                     </div>
                   </TableCell>
+                  <TableCell>
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={syncVersions.isPending}
+                        onClick={() => syncVersions.mutate(modpack.id)}
+                      >
+                        Sync versions
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={toggleModpack.isPending}
+                        onClick={() =>
+                          toggleModpack.mutate({
+                            modpackId: modpack.id,
+                            isActive: !modpack.is_active,
+                          })
+                        }
+                      >
+                        {modpack.is_active ? "Désactiver" : "Activer"}
+                      </Button>
+                    </div>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -1375,6 +1567,7 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
                 <TableHead>Loaders</TableHead>
                 <TableHead>Server Pack</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="text-right">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1397,6 +1590,21 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
                   </TableCell>
                   <TableCell>
                     <StatusBadge status={version.is_active ? "active" : "disabled"} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={toggleVersion.isPending}
+                      onClick={() =>
+                        toggleVersion.mutate({
+                          versionId: version.id,
+                          isActive: !version.is_active,
+                        })
+                      }
+                    >
+                      {version.is_active ? "Désactiver" : "Activer"}
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))}
