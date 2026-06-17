@@ -289,9 +289,9 @@ insert into public.plan_template_compatibilities (
 select distinct
   pv.plan_id,
   st.id,
-  null,
-  pv.ram_mb,
-  pv.variant_index,
+  null::integer,
+  pv.ram_mb::integer,
+  pv.variant_index::integer,
   jsonb_build_object(
     'backfilled_from', 'plans.allowed_eggs',
     'legacy_variant_index', pv.variant_index
@@ -318,19 +318,19 @@ insert into public.server_template_versions (
 )
 select
   st.id,
-  'latest',
-  'latest',
+  'latest'::text,
+  'latest'::text,
   case
-    when lower(st.name) like '%paper%' then 'paper'
-    when lower(st.name) like '%forge%' then 'forge'
-    when lower(st.name) like '%fabric%' then 'fabric'
-    when lower(st.name) like '%purpur%' then 'purpur'
-    when lower(st.name) like '%spigot%' then 'spigot'
-    when lower(st.name) like '%vanilla%' then 'vanilla'
-    else null
+    when lower(st.name) like '%paper%' then 'paper'::text
+    when lower(st.name) like '%forge%' then 'forge'::text
+    when lower(st.name) like '%fabric%' then 'fabric'::text
+    when lower(st.name) like '%purpur%' then 'purpur'::text
+    when lower(st.name) like '%spigot%' then 'spigot'::text
+    when lower(st.name) like '%vanilla%' then 'vanilla'::text
+    else null::text
   end,
   '{}'::jsonb,
-  0,
+  0::integer,
   jsonb_build_object('backfilled_from', 'default_latest')
 from public.server_templates st
 join public.game_catalog g on g.id = st.game_id
