@@ -274,6 +274,7 @@ type AdminOrder = {
   currency: string;
   stripe_subscription_id: string | null;
   selected_template_label?: string | null;
+  selected_modpack_label?: string | null;
   created_at: string;
   profile?: AdminProfileRef | null;
   plans?: AdminPlanRef;
@@ -284,6 +285,7 @@ type AdminOrder = {
     pterodactyl_server_id: number | null;
     pterodactyl_server_identifier: string | null;
     selected_template_label?: string | null;
+    selected_modpack_label?: string | null;
   } | null;
 };
 
@@ -296,6 +298,7 @@ type AdminServer = {
   pterodactyl_server_id: number | null;
   pterodactyl_server_identifier: string | null;
   selected_template_label?: string | null;
+  selected_modpack_label?: string | null;
   error_message: string | null;
   created_at: string;
   profile?: AdminProfileRef | null;
@@ -570,7 +573,14 @@ function AdminOrdersSection({ orders }: { orders: AdminOrder[] }) {
                   <TableCell className="min-w-40">
                     {order.plans?.game ?? "—"} · {order.plans?.name ?? "—"}
                   </TableCell>
-                  <TableCell>{order.selected_template_label ?? "—"}</TableCell>
+                  <TableCell>
+                    <div>{order.selected_template_label ?? "—"}</div>
+                    {order.selected_modpack_label ? (
+                      <div className="text-xs text-accent">
+                        Modpack: {order.selected_modpack_label}
+                      </div>
+                    ) : null}
+                  </TableCell>
                   <TableCell>{formatMoney(order.total_cents, order.currency)}</TableCell>
                   <TableCell className="font-mono text-xs">
                     {order.stripe_subscription_id ? shortId(order.stripe_subscription_id, 18) : "—"}
@@ -657,7 +667,14 @@ function AdminServersSection({ servers }: { servers: AdminServer[] }) {
                 <TableCell className="min-w-40">
                   {server.plans?.game ?? "—"} · {server.plans?.name ?? "—"}
                 </TableCell>
-                <TableCell>{server.selected_template_label ?? "—"}</TableCell>
+                <TableCell>
+                  <div>{server.selected_template_label ?? "—"}</div>
+                  {server.selected_modpack_label ? (
+                    <div className="text-xs text-accent">
+                      Modpack: {server.selected_modpack_label}
+                    </div>
+                  ) : null}
+                </TableCell>
                 <TableCell>
                   <StatusBadge status={server.status} />
                 </TableCell>

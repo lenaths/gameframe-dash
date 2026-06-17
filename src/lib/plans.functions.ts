@@ -5,6 +5,7 @@ export type PlanVariant = {
   nest_id: number;
   egg_id: number;
   label: string;
+  templateId?: string | null;
   docker_image?: string;
   startup?: string;
   environment?: Record<string, string>;
@@ -141,6 +142,7 @@ export async function loadPlanTemplateVariants(plan: PlanRowForTemplates): Promi
       .flatMap((compatibility) => {
         const template = compatibility.server_templates as
           | {
+              id?: string | null;
               name?: string | null;
               description?: string | null;
               internal_nest_id?: number | null;
@@ -173,6 +175,7 @@ export async function loadPlanTemplateVariants(plan: PlanRowForTemplates): Promi
           nest_id: template.internal_nest_id,
           egg_id: template.internal_egg_id,
           label: template.name || "Template serveur",
+          templateId: template.id ?? null,
           docker_image: template.docker_image ?? undefined,
           startup: template.startup ?? undefined,
           environment: normalizeEnvironment(template.environment),

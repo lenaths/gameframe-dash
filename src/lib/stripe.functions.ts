@@ -50,6 +50,12 @@ const checkoutInput = z.object({
   serverName: z.string().trim().min(2).max(40).optional(),
   variantIndex: z.number().int().min(0).optional(),
   environment: z.record(z.string(), z.string()).optional(),
+  selectedModpack: z
+    .object({
+      modpackId: z.string().uuid(),
+      versionId: z.string().uuid(),
+    })
+    .optional(),
 });
 
 export const createCheckoutSession = createServerFn({ method: "POST" })
@@ -106,9 +112,19 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
 
     const currency = (plan.currency ?? "EUR").toLowerCase();
     const { loadPlanTemplateVariants } = await import("@/lib/plans.functions");
+    const modpackSelection = data.selectedModpack
+      ? await (
+          await import("@/lib/modpacks.functions")
+        ).resolveSelectedModpackForCheckout({
+          planId: plan.id,
+          modpackId: data.selectedModpack.modpackId,
+          versionId: data.selectedModpack.versionId,
+        })
+      : null;
     const variants = await loadPlanTemplateVariants(plan);
     const requestedVariantIndex =
-      typeof data.variantIndex === "number" && data.variantIndex >= 0 ? data.variantIndex : 0;
+      modpackSelection?.variantIndex ??
+      (typeof data.variantIndex === "number" && data.variantIndex >= 0 ? data.variantIndex : 0);
     const selectedVariantIndex = variants[requestedVariantIndex] ? requestedVariantIndex : 0;
     const selectedVariant = variants[selectedVariantIndex] ?? variants[0] ?? null;
     const selectedTemplateLabel = selectedVariant?.label ?? plan.name;
@@ -137,7 +153,14 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
             label: selectedTemplateLabel,
             version: selectedVersionLabel,
             source: selectedVariant?.source ?? "allowed_eggs",
+            ...(modpackSelection ? { selection_source: "curseforge_modpack" } : {}),
           },
+          ...(modpackSelection
+            ? {
+                selected_modpack: modpackSelection.modpack,
+                selected_modpack_version: modpackSelection.version,
+              }
+            : {}),
           environment: data.environment ?? {},
         },
       })
@@ -180,6 +203,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
         plan_id: plan.id,
         template: selectedTemplateLabel,
         ...(selectedVersionLabel ? { version: selectedVersionLabel } : {}),
+        ...(modpackSelection ? { modpack: modpackSelection.modpack.name } : {}),
         provisioning_deferred: "true",
       },
       subscription_data: {
@@ -189,6 +213,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
           plan_id: plan.id,
           template: selectedTemplateLabel,
           ...(selectedVersionLabel ? { version: selectedVersionLabel } : {}),
+          ...(modpackSelection ? { modpack: modpackSelection.modpack.name } : {}),
           provisioning_deferred: "true",
         },
       },

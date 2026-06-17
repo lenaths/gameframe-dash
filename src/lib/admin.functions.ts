@@ -35,6 +35,7 @@ type OrderRow = {
   stripe_subscription_id: string | null;
   stripe_checkout_session_id: string | null;
   selected_template_label?: string | null;
+  selected_modpack_label?: string | null;
   created_at: string;
   plans?: PlanRef;
 };
@@ -46,6 +47,7 @@ type ServerLinkRow = {
   pterodactyl_server_id: number | null;
   pterodactyl_server_identifier: string | null;
   selected_template_label?: string | null;
+  selected_modpack_label?: string | null;
 };
 type ServerDetailRow = ServerLinkRow & {
   user_id: string | null;
@@ -64,6 +66,18 @@ function selectedTemplateLabel(metadata: unknown) {
       : null;
   return typeof selectedTemplate?.label === "string" && selectedTemplate.label.trim()
     ? selectedTemplate.label
+    : null;
+}
+
+function selectedModpackLabel(metadata: unknown) {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const selectedModpack =
+    root.selected_modpack && typeof root.selected_modpack === "object"
+      ? (root.selected_modpack as Record<string, unknown>)
+      : null;
+  return typeof selectedModpack?.name === "string" && selectedModpack.name.trim()
+    ? selectedModpack.name
     : null;
 }
 type PaymentDetailRow = {
@@ -1137,6 +1151,7 @@ export const adminListOrdersDetailed = createServerFn({ method: "GET" })
       ({ metadata, ...order }) => ({
         ...order,
         selected_template_label: selectedTemplateLabel(metadata),
+        selected_modpack_label: selectedModpackLabel(metadata),
       }),
     );
     const profilesById = await getProfilesById(orderRows.map((order) => order.user_id));
@@ -1145,6 +1160,7 @@ export const adminListOrdersDetailed = createServerFn({ method: "GET" })
         .map(({ metadata, ...server }) => ({
           ...server,
           selected_template_label: selectedTemplateLabel(metadata),
+          selected_modpack_label: selectedModpackLabel(metadata),
         }))
         .filter((server) => server.order_id)
         .map((server) => [server.order_id as string, server]),
@@ -1177,6 +1193,7 @@ export const adminListServersDetailed = createServerFn({ method: "GET" })
       ({ metadata, ...server }) => ({
         ...server,
         selected_template_label: selectedTemplateLabel(metadata),
+        selected_modpack_label: selectedModpackLabel(metadata),
       }),
     );
     const profilesById = await getProfilesById(servers.map((server) => server.user_id));

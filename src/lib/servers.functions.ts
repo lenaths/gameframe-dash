@@ -50,6 +50,7 @@ type ServerListRow = {
   pterodactyl_server_id: number | null;
   error_message: string | null;
   selected_template_label?: string | null;
+  selected_modpack_label?: string | null;
   created_at: string;
   plans?: {
     name?: string | null;
@@ -75,6 +76,18 @@ function selectedTemplateLabel(metadata: unknown) {
       : null;
   return typeof selectedTemplate?.label === "string" && selectedTemplate.label.trim()
     ? selectedTemplate.label
+    : null;
+}
+
+function selectedModpackLabel(metadata: unknown) {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const selectedModpack =
+    root.selected_modpack && typeof root.selected_modpack === "object"
+      ? (root.selected_modpack as Record<string, unknown>)
+      : null;
+  return typeof selectedModpack?.name === "string" && selectedModpack.name.trim()
+    ? selectedModpack.name
     : null;
 }
 
@@ -417,6 +430,7 @@ export const listMyServers = createServerFn({ method: "GET" })
       ({ metadata, ...server }) => ({
         ...server,
         selected_template_label: selectedTemplateLabel(metadata),
+        selected_modpack_label: selectedModpackLabel(metadata),
       }),
     );
     const orderIds = servers

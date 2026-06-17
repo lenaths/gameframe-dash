@@ -152,8 +152,25 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
     selectedTemplate.source === "catalog" || selectedTemplate.source === "allowed_eggs"
       ? selectedTemplate.source
       : null;
+  const selectedModpack =
+    metadata.selected_modpack && typeof metadata.selected_modpack === "object"
+      ? (metadata.selected_modpack as Record<string, unknown>)
+      : null;
+  const selectedModpackVersion =
+    metadata.selected_modpack_version && typeof metadata.selected_modpack_version === "object"
+      ? (metadata.selected_modpack_version as Record<string, unknown>)
+      : null;
 
-  return { variantIndex, serverName, environment, templateLabel, templateVersion, templateSource };
+  return {
+    variantIndex,
+    serverName,
+    environment,
+    templateLabel,
+    templateVersion,
+    templateSource,
+    selectedModpack,
+    selectedModpackVersion,
+  };
 }
 
 async function ensurePanelUser(input: {
@@ -600,6 +617,10 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
             version: selection.templateVersion,
             source: selection.templateSource,
           },
+          ...(selection.selectedModpack ? { selected_modpack: selection.selectedModpack } : {}),
+          ...(selection.selectedModpackVersion
+            ? { selected_modpack_version: selection.selectedModpackVersion }
+            : {}),
         },
       })
       .select("id")
@@ -652,6 +673,10 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
           version: selection.templateVersion,
           source: selection.templateSource,
         },
+        ...(selection.selectedModpack ? { selected_modpack: selection.selectedModpack } : {}),
+        ...(selection.selectedModpackVersion
+          ? { selected_modpack_version: selection.selectedModpackVersion }
+          : {}),
       },
     })
     .eq("id", serverOrderId);

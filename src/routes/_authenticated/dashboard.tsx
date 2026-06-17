@@ -175,6 +175,7 @@ type DashboardServer = {
   last_payment_at?: string | null;
   next_renewal_at?: string | null;
   selected_template_label?: string | null;
+  selected_modpack_label?: string | null;
   plans?: {
     game?: string | null;
     name?: string | null;
@@ -208,6 +209,7 @@ function ServerCard({
 }) {
   const status = String(s.status);
   const template = s.selected_template_label;
+  const modpack = s.selected_modpack_label;
   const copyConnection = async () => {
     try {
       const detail = await onFetchDetail(s.id);
@@ -246,6 +248,9 @@ function ServerCard({
             </div>
             {template && (
               <div className="mt-1 text-xs text-primary">Template serveur : {template}</div>
+            )}
+            {modpack && (
+              <div className="mt-1 text-xs text-accent">Modpack sélectionné : {modpack}</div>
             )}
             <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
               <span>Créé: {formatDate(s.created_at)}</span>
