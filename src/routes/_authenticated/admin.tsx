@@ -44,6 +44,7 @@ import {
   adminListLogsDetailed,
   adminGetMonitoring,
   adminListReconciliation,
+  adminListGameCatalog,
   adminListOrdersDetailed,
   adminListPaymentsDetailed,
   adminListPlans,
@@ -51,6 +52,7 @@ import {
   adminRepairReconciliation,
   adminRetryProvisioning,
   adminSyncServerStatus,
+  adminToggleCatalogActive,
   adminUpdatePlanEggs,
 } from "@/lib/admin.functions";
 import { adminListTickets, adminReplyToTicket } from "@/lib/support.functions";
@@ -70,6 +72,7 @@ function Admin() {
   const fetchTickets = useServerFn(adminListTickets);
   const fetchMonitoring = useServerFn(adminGetMonitoring);
   const fetchReconciliation = useServerFn(adminListReconciliation);
+  const fetchCatalog = useServerFn(adminListGameCatalog);
 
   const overviewQ = useQuery({ queryKey: ["admin-all"], queryFn: () => fetchAll(), retry: false });
   const plansQ = useQuery({ queryKey: ["admin-plans"], queryFn: () => fetchPlans(), retry: false });
@@ -108,6 +111,11 @@ function Admin() {
     queryFn: () => fetchReconciliation(),
     retry: false,
   });
+  const catalogQ = useQuery({
+    queryKey: ["admin-game-catalog"],
+    queryFn: () => fetchCatalog(),
+    retry: false,
+  });
 
   const error =
     overviewQ.error ??
@@ -118,7 +126,8 @@ function Admin() {
     logsQ.error ??
     ticketsQ.error ??
     monitoringQ.error ??
-    reconciliationQ.error;
+    reconciliationQ.error ??
+    catalogQ.error;
 
   return (
     <div className="xnt-page min-h-screen">
@@ -149,6 +158,7 @@ function Admin() {
             <TabsTrigger value="payments">Payments</TabsTrigger>
             <TabsTrigger value="logs">Logs</TabsTrigger>
             <TabsTrigger value="plans">Plans</TabsTrigger>
+            <TabsTrigger value="catalog">Game Catalog</TabsTrigger>
             <TabsTrigger value="users">Users</TabsTrigger>
             <TabsTrigger value="support">Support</TabsTrigger>
           </TabsList>
@@ -181,6 +191,9 @@ function Admin() {
           </TabsContent>
           <TabsContent value="plans" className="mt-6">
             <AdminPlansSection plans={(plansQ.data?.plans ?? []) as AdminPlan[]} />
+          </TabsContent>
+          <TabsContent value="catalog" className="mt-6">
+            <AdminGameCatalogSection data={catalogQ.data as AdminGameCatalogData | undefined} />
           </TabsContent>
           <TabsContent value="users" className="mt-6">
             <AdminUsersSection
@@ -863,6 +876,57 @@ type AdminPlan = {
   allowed_eggs: unknown;
 };
 
+type AdminCatalogGame = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  icon_url: string | null;
+  is_active: boolean;
+  sort_order: number;
+};
+type AdminCatalogTemplate = {
+  id: string;
+  game_id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  provider: string;
+  internal_nest_id: number;
+  internal_egg_id: number;
+  docker_image: string | null;
+  startup: string | null;
+  is_active: boolean;
+  sort_order: number;
+};
+type AdminCatalogVersion = {
+  id: string;
+  template_id: string;
+  label: string;
+  minecraft_version: string | null;
+  loader: string | null;
+  loader_version: string | null;
+  java_version: string | null;
+  is_active: boolean;
+  sort_order: number;
+};
+type AdminCatalogCompatibility = {
+  id: string;
+  plan_id: string;
+  template_id: string;
+  min_ram_mb: number | null;
+  recommended_ram_mb: number | null;
+  is_active: boolean;
+  sort_order: number;
+  plans?: { name?: string | null; game?: string | null } | null;
+};
+type AdminGameCatalogData = {
+  games: AdminCatalogGame[];
+  templates: AdminCatalogTemplate[];
+  versions: AdminCatalogVersion[];
+  compatibilities: AdminCatalogCompatibility[];
+};
+
 function AdminPlansSection({ plans }: { plans: AdminPlan[] }) {
   return (
     <section>
@@ -908,6 +972,235 @@ function AdminPlansSection({ plans }: { plans: AdminPlan[] }) {
         </Table>
       </TableShell>
     </section>
+  );
+}
+
+function AdminGameCatalogSection({ data }: { data?: AdminGameCatalogData }) {
+  const qc = useQueryClient();
+  const toggleFn = useServerFn(adminToggleCatalogActive);
+  const toggle = useMutation({
+    mutationFn: (input: {
+      table:
+        | "game_catalog"
+        | "server_templates"
+        | "server_template_versions"
+        | "plan_template_compatibilities";
+      id: string;
+      isActive: boolean;
+    }) => toggleFn({ data: input }),
+    onSuccess: () => {
+      toast.success("Catalogue mis à jour");
+      qc.invalidateQueries({ queryKey: ["admin-game-catalog"] });
+      qc.invalidateQueries({ queryKey: ["plans"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const games = data?.games ?? [];
+  const templates = data?.templates ?? [];
+  const versions = data?.versions ?? [];
+  const compatibilities = data?.compatibilities ?? [];
+  const gamesById = new Map(games.map((game) => [game.id, game]));
+  const templatesById = new Map(templates.map((template) => [template.id, template]));
+
+  const ToggleButton = ({
+    table,
+    id,
+    active,
+  }: {
+    table:
+      | "game_catalog"
+      | "server_templates"
+      | "server_template_versions"
+      | "plan_template_compatibilities";
+    id: string;
+    active: boolean;
+  }) => (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={toggle.isPending}
+      onClick={() => toggle.mutate({ table, id, isActive: !active })}
+    >
+      {active ? "Désactiver" : "Activer"}
+    </Button>
+  );
+
+  return (
+    <div className="grid gap-8">
+      <section>
+        <SectionTitle icon={<Package className="h-5 w-5" />} title="Game Catalog" />
+        <TableShell empty={games.length === 0 ? "Aucun jeu dans le catalogue." : null}>
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Jeu</TableHead>
+                <TableHead>Slug</TableHead>
+                <TableHead>Description</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {games.map((game) => (
+                <TableRow key={game.id}>
+                  <TableCell className="font-medium">{game.name}</TableCell>
+                  <TableCell className="font-mono text-xs">{game.slug}</TableCell>
+                  <TableCell className="max-w-md text-muted-foreground">
+                    {game.description ?? "—"}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={game.is_active ? "active" : "disabled"} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <ToggleButton table="game_catalog" id={game.id} active={game.is_active} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
+      </section>
+
+      <section>
+        <SectionTitle icon={<Server className="h-5 w-5" />} title="Server Templates" />
+        <TableShell empty={templates.length === 0 ? "Aucun template." : null}>
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Template</TableHead>
+                <TableHead>Jeu</TableHead>
+                <TableHead>Configuration interne</TableHead>
+                <TableHead>Description</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {templates.map((template) => (
+                <TableRow key={template.id}>
+                  <TableCell>
+                    <div className="font-medium">{template.name}</div>
+                    <div className="font-mono text-xs text-muted-foreground">{template.slug}</div>
+                  </TableCell>
+                  <TableCell>{gamesById.get(template.game_id)?.name ?? "—"}</TableCell>
+                  <TableCell className="font-mono text-xs text-muted-foreground">
+                    nest {template.internal_nest_id} · egg {template.internal_egg_id}
+                    {template.docker_image ? (
+                      <div className="max-w-64 truncate">{template.docker_image}</div>
+                    ) : null}
+                  </TableCell>
+                  <TableCell className="max-w-md text-muted-foreground">
+                    {template.description ?? "—"}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={template.is_active ? "active" : "disabled"} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <ToggleButton
+                      table="server_templates"
+                      id={template.id}
+                      active={template.is_active}
+                    />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
+      </section>
+
+      <section>
+        <SectionTitle icon={<ScrollText className="h-5 w-5" />} title="Template Versions" />
+        <TableShell empty={versions.length === 0 ? "Aucune version." : null}>
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Version</TableHead>
+                <TableHead>Template</TableHead>
+                <TableHead>Loader</TableHead>
+                <TableHead>Java</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {versions.map((version) => (
+                <TableRow key={version.id}>
+                  <TableCell>
+                    <div className="font-medium">{version.label}</div>
+                    <div className="text-xs text-muted-foreground">
+                      Minecraft {version.minecraft_version ?? "—"}
+                    </div>
+                  </TableCell>
+                  <TableCell>{templatesById.get(version.template_id)?.name ?? "—"}</TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {version.loader ?? "—"}
+                    {version.loader_version ? ` ${version.loader_version}` : ""}
+                  </TableCell>
+                  <TableCell>{version.java_version ?? "—"}</TableCell>
+                  <TableCell>
+                    <StatusBadge status={version.is_active ? "active" : "disabled"} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <ToggleButton
+                      table="server_template_versions"
+                      id={version.id}
+                      active={version.is_active}
+                    />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
+      </section>
+
+      <section>
+        <SectionTitle
+          icon={<ClipboardList className="h-5 w-5" />}
+          title="Plan / Template Compatibilities"
+        />
+        <TableShell empty={compatibilities.length === 0 ? "Aucune compatibilité." : null}>
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Plan</TableHead>
+                <TableHead>Template</TableHead>
+                <TableHead>RAM recommandée</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Action</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {compatibilities.map((compatibility) => (
+                <TableRow key={compatibility.id}>
+                  <TableCell>
+                    {compatibility.plans?.game ?? "—"} · {compatibility.plans?.name ?? "—"}
+                  </TableCell>
+                  <TableCell>{templatesById.get(compatibility.template_id)?.name ?? "—"}</TableCell>
+                  <TableCell>
+                    {compatibility.recommended_ram_mb
+                      ? `${(compatibility.recommended_ram_mb / 1024).toFixed(0)} GB`
+                      : "—"}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={compatibility.is_active ? "active" : "disabled"} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <ToggleButton
+                      table="plan_template_compatibilities"
+                      id={compatibility.id}
+                      active={compatibility.is_active}
+                    />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
+      </section>
+    </div>
   );
 }
 

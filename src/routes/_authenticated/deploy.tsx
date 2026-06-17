@@ -169,7 +169,12 @@ function Deploy() {
                             : "border-border/70 bg-background/20 hover:border-primary/40"
                       }`}
                     >
-                      <div className="font-medium">{v.label}</div>
+                      <div className="font-medium">
+                        {v.label}
+                        {v.versionLabel ? (
+                          <span className="text-muted-foreground"> · {v.versionLabel}</span>
+                        ) : null}
+                      </div>
                       <div
                         className={`text-xs line-clamp-2 mt-0.5 ${v.error ? "text-destructive" : "text-muted-foreground"}`}
                       >

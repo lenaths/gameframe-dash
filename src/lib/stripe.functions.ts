@@ -31,6 +31,11 @@ type PlanForCheckout = {
   billing_interval?: string | null;
   stripe_price_id?: string | null;
   allowed_eggs?: unknown;
+  pterodactyl_nest_id: number;
+  pterodactyl_egg_id: number;
+  docker_image?: string | null;
+  startup?: string | null;
+  environment?: unknown;
 };
 
 type ProfileForCheckout = {
@@ -60,7 +65,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
     const planResult = await db
       .from("plans")
       .select(
-        "id, product_id, game, name, description, price_monthly_cents, currency, billing_interval, stripe_price_id, allowed_eggs",
+        "id, product_id, game, name, description, price_monthly_cents, currency, billing_interval, stripe_price_id, allowed_eggs, pterodactyl_nest_id, pterodactyl_egg_id, docker_image, startup, environment",
       )
       .eq("id", data.planId)
       .eq("is_active", true)
@@ -100,14 +105,14 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
     }
 
     const currency = (plan.currency ?? "EUR").toLowerCase();
-    const variants = Array.isArray((plan as Record<string, unknown>).allowed_eggs)
-      ? ((plan as Record<string, unknown>).allowed_eggs as Array<{ label?: string }>)
-      : [];
+    const { loadPlanTemplateVariants } = await import("@/lib/plans.functions");
+    const variants = await loadPlanTemplateVariants(plan);
     const requestedVariantIndex =
       typeof data.variantIndex === "number" && data.variantIndex >= 0 ? data.variantIndex : 0;
     const selectedVariantIndex = variants[requestedVariantIndex] ? requestedVariantIndex : 0;
     const selectedVariant = variants[selectedVariantIndex] ?? variants[0] ?? null;
     const selectedTemplateLabel = selectedVariant?.label ?? plan.name;
+    const selectedVersionLabel = selectedVariant?.versionLabel ?? null;
     const serverName = data.serverName?.trim() || `${plan.game} ${plan.name}`.slice(0, 40);
     const orderResult = await db
       .from("orders")
@@ -130,6 +135,8 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
           selected_template: {
             index: selectedVariantIndex,
             label: selectedTemplateLabel,
+            version: selectedVersionLabel,
+            source: selectedVariant?.source ?? "allowed_eggs",
           },
           environment: data.environment ?? {},
         },
@@ -172,6 +179,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
         user_id: context.userId,
         plan_id: plan.id,
         template: selectedTemplateLabel,
+        ...(selectedVersionLabel ? { version: selectedVersionLabel } : {}),
         provisioning_deferred: "true",
       },
       subscription_data: {
@@ -180,6 +188,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
           user_id: context.userId,
           plan_id: plan.id,
           template: selectedTemplateLabel,
+          ...(selectedVersionLabel ? { version: selectedVersionLabel } : {}),
           provisioning_deferred: "true",
         },
       },

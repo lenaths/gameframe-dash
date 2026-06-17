@@ -110,6 +110,50 @@ type InvoiceRow = {
   currency: string;
   created_at: string;
 };
+type AdminCatalogGame = {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  icon_url: string | null;
+  is_active: boolean;
+  sort_order: number;
+};
+type AdminCatalogTemplate = {
+  id: string;
+  game_id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  provider: string;
+  internal_nest_id: number;
+  internal_egg_id: number;
+  docker_image: string | null;
+  startup: string | null;
+  is_active: boolean;
+  sort_order: number;
+};
+type AdminCatalogVersion = {
+  id: string;
+  template_id: string;
+  label: string;
+  minecraft_version: string | null;
+  loader: string | null;
+  loader_version: string | null;
+  java_version: string | null;
+  is_active: boolean;
+  sort_order: number;
+};
+type AdminCatalogCompatibility = {
+  id: string;
+  plan_id: string;
+  template_id: string;
+  min_ram_mb: number | null;
+  recommended_ram_mb: number | null;
+  is_active: boolean;
+  sort_order: number;
+  plans?: { name?: string | null; game?: string | null } | null;
+};
 type ReconciliationAnomaly = {
   id: string;
   type: string;
@@ -403,6 +447,87 @@ export const adminUpdatePlanEggs = createServerFn({ method: "POST" })
       .update({ allowed_eggs: data.allowedEggs })
       .eq("id", data.planId);
     if (error) throw new Error(error.message);
+    return { ok: true };
+  });
+
+export const adminListGameCatalog = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const [
+      { data: games, error: gamesError },
+      { data: templates, error: templatesError },
+      { data: versions, error: versionsError },
+      { data: compatibilities, error: compatibilitiesError },
+    ] = await Promise.all([
+      db
+        .from("game_catalog")
+        .select("id, slug, name, description, icon_url, is_active, sort_order")
+        .order("sort_order", { ascending: true }),
+      db
+        .from("server_templates")
+        .select(
+          "id, game_id, slug, name, description, provider, internal_nest_id, internal_egg_id, docker_image, startup, is_active, sort_order",
+        )
+        .order("sort_order", { ascending: true }),
+      db
+        .from("server_template_versions")
+        .select(
+          "id, template_id, label, minecraft_version, loader, loader_version, java_version, is_active, sort_order",
+        )
+        .order("sort_order", { ascending: true }),
+      db
+        .from("plan_template_compatibilities")
+        .select(
+          "id, plan_id, template_id, min_ram_mb, recommended_ram_mb, is_active, sort_order, plans(name, game)",
+        )
+        .order("sort_order", { ascending: true }),
+    ]);
+    const firstError = gamesError ?? templatesError ?? versionsError ?? compatibilitiesError;
+    if (firstError) throw new Error(firstError.message);
+
+    return {
+      games: (games ?? []) as AdminCatalogGame[],
+      templates: (templates ?? []) as AdminCatalogTemplate[],
+      versions: (versions ?? []) as AdminCatalogVersion[],
+      compatibilities: (compatibilities ?? []) as AdminCatalogCompatibility[],
+    };
+  });
+
+export const adminToggleCatalogActive = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) =>
+    z
+      .object({
+        table: z.enum([
+          "game_catalog",
+          "server_templates",
+          "server_template_versions",
+          "plan_template_compatibilities",
+        ]),
+        id: z.string().uuid(),
+        isActive: z.boolean(),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { error } = await db
+      .from(data.table)
+      .update({ is_active: data.isActive })
+      .eq("id", data.id);
+    if (error) throw new Error(error.message);
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.game_catalog.toggle_active",
+      entityType: data.table,
+      entityId: data.id,
+      after: { isActive: data.isActive },
+    });
     return { ok: true };
   });
 

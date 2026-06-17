@@ -34,6 +34,10 @@ const planVariantSchema = z.object({
   label: z.string().optional(),
   docker_image: z.string().trim().min(1).optional(),
   startup: z.string().trim().min(1).optional(),
+  environment: z.record(z.string(), z.string()).optional(),
+  versionEnvironment: z.record(z.string(), z.string()).optional(),
+  source: z.enum(["catalog", "allowed_eggs"]).optional(),
+  versionLabel: z.string().nullable().optional(),
 });
 
 type ProvisionServerOrderInput = {
@@ -140,8 +144,16 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
     typeof selectedTemplate.label === "string" && selectedTemplate.label.trim()
       ? selectedTemplate.label.trim()
       : null;
+  const templateVersion =
+    typeof selectedTemplate.version === "string" && selectedTemplate.version.trim()
+      ? selectedTemplate.version.trim()
+      : null;
+  const templateSource =
+    selectedTemplate.source === "catalog" || selectedTemplate.source === "allowed_eggs"
+      ? selectedTemplate.source
+      : null;
 
-  return { variantIndex, serverName, environment, templateLabel };
+  return { variantIndex, serverName, environment, templateLabel, templateVersion, templateSource };
 }
 
 async function ensurePanelUser(input: {
@@ -337,10 +349,10 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
   if (planResult.error || !plan) throw new Error("Plan not found.");
 
   try {
-    const variantsRaw =
-      Array.isArray(plan.allowed_eggs) && plan.allowed_eggs.length > 0
-        ? plan.allowed_eggs
-        : [{ nest_id: plan.pterodactyl_nest_id, egg_id: plan.pterodactyl_egg_id }];
+    const { loadPlanTemplateVariants } = await import("@/lib/plans.functions");
+    const variantsRaw = await loadPlanTemplateVariants(
+      plan as Parameters<typeof loadPlanTemplateVariants>[0],
+    );
     const variant = variantsRaw[input.variantIndex ?? 0] ?? variantsRaw[0];
     const parsedVariant = planVariantSchema.parse(variant);
     const egg = await getEggDetails(parsedVariant.nest_id, parsedVariant.egg_id);
@@ -360,7 +372,11 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
     for (const v of egg.variables) eggDefaults[v.env_variable] = v.default_value ?? "";
     const allowedVariables = new Set(egg.variables.map((v) => v.env_variable));
     const planEnv = filterEnvironmentForEgg(
-      normalizeEnvironment((plan.environment as Record<string, unknown>) ?? {}),
+      normalizeEnvironment({
+        ...((plan.environment as Record<string, unknown>) ?? {}),
+        ...(parsedVariant.environment ?? {}),
+        ...(parsedVariant.versionEnvironment ?? {}),
+      }),
       allowedVariables,
       `plan ${String(plan.slug ?? plan.id)}`,
     );
@@ -581,6 +597,8 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
           selected_template: {
             index: selection.variantIndex,
             label: selection.templateLabel,
+            version: selection.templateVersion,
+            source: selection.templateSource,
           },
         },
       })
@@ -631,6 +649,8 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
         selected_template: {
           index: selection.variantIndex,
           label: selection.templateLabel,
+          version: selection.templateVersion,
+          source: selection.templateSource,
         },
       },
     })
