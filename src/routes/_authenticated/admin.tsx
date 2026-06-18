@@ -72,6 +72,8 @@ import { adminListTickets, adminReplyToTicket } from "@/lib/support.functions";
 import {
   adminCancelModpackInstallJob,
   adminListModpackInstallJobs,
+  adminProcessModpackInstallJob,
+  adminProcessNextModpackInstallJob,
   adminRetryModpackInstallJob,
 } from "@/lib/modpack-install.functions";
 
@@ -367,7 +369,10 @@ type AdminModpackInstallJob = {
   attempts: number;
   max_attempts: number;
   file_length: number | null;
+  started_at: string | null;
+  finished_at: string | null;
   error_message: string | null;
+  logs?: Array<{ at?: string; event?: string; message?: string }>;
   created_at: string;
   updated_at: string;
   curseforge_modpacks?: { name?: string | null } | null;
@@ -759,16 +764,22 @@ function AdminModpackJobsSection({ jobs }: { jobs: AdminModpackInstallJob[] }) {
   const qc = useQueryClient();
   const retryFn = useServerFn(adminRetryModpackInstallJob);
   const cancelFn = useServerFn(adminCancelModpackInstallJob);
+  const processJobFn = useServerFn(adminProcessModpackInstallJob);
+  const processNextFn = useServerFn(adminProcessNextModpackInstallJob);
   const [status, setStatus] = useState("");
   const filtered = status ? jobs.filter((job) => job.status === status) : jobs;
+  const refreshJobs = () => {
+    qc.invalidateQueries({ queryKey: ["admin-modpack-install-jobs"] });
+    qc.invalidateQueries({ queryKey: ["my-servers"] });
+    qc.invalidateQueries({ queryKey: ["my-notifications"] });
+  };
 
   const retry = useMutation({
     mutationFn: (jobId: string) => retryFn({ data: { jobId } }),
     onSuccess: (result) => {
       if (result.skipped) toast.info(`Job inchangé: ${result.status}`);
       else toast.success("Job remis en file d’attente");
-      qc.invalidateQueries({ queryKey: ["admin-modpack-install-jobs"] });
-      qc.invalidateQueries({ queryKey: ["my-servers"] });
+      refreshJobs();
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -778,8 +789,30 @@ function AdminModpackJobsSection({ jobs }: { jobs: AdminModpackInstallJob[] }) {
     onSuccess: (result) => {
       if (result.skipped) toast.info(`Job inchangé: ${result.status}`);
       else toast.success("Job annulé");
-      qc.invalidateQueries({ queryKey: ["admin-modpack-install-jobs"] });
-      qc.invalidateQueries({ queryKey: ["my-servers"] });
+      refreshJobs();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const processJob = useMutation({
+    mutationFn: (jobId: string) => processJobFn({ data: { jobId } }),
+    onSuccess: (result) => {
+      if ("skipped" in result && result.skipped) toast.info(`Worker inchangé: ${result.status}`);
+      else if (result.ok) toast.success("Job validé par le worker MVP");
+      else toast.error(result.error ?? "Validation échouée");
+      refreshJobs();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const processNext = useMutation({
+    mutationFn: () => processNextFn(),
+    onSuccess: (result) => {
+      if ("skipped" in result && result.skipped)
+        toast.info(`Aucun job à traiter: ${result.status}`);
+      else if (result.ok) toast.success("Prochain job traité");
+      else toast.error(result.error ?? "Validation échouée");
+      refreshJobs();
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -791,27 +824,37 @@ function AdminModpackJobsSection({ jobs }: { jobs: AdminModpackInstallJob[] }) {
           icon={<Package className="h-5 w-5" />}
           title={`Modpack Jobs (${filtered.length})`}
         />
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className="rounded-md border border-border bg-background px-3 py-2 text-sm"
-        >
-          <option value="">Tous les statuts</option>
-          {[
-            "queued",
-            "downloading",
-            "extracting",
-            "installing",
-            "configuring",
-            "ready",
-            "failed",
-            "cancelled",
-          ].map((item) => (
-            <option key={item} value={item}>
-              {modpackInstallLabel(item)}
-            </option>
-          ))}
-        </select>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+            disabled={processNext.isPending}
+            onClick={() => processNext.mutate()}
+          >
+            Process next
+          </Button>
+          <select
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            className="rounded-md border border-border bg-background px-3 py-2 text-sm"
+          >
+            <option value="">Tous les statuts</option>
+            {[
+              "queued",
+              "downloading",
+              "extracting",
+              "installing",
+              "configuring",
+              "ready",
+              "failed",
+              "cancelled",
+            ].map((item) => (
+              <option key={item} value={item}>
+                {modpackInstallLabel(item)}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
       <TableShell empty={filtered.length === 0 ? "Aucun job modpack." : null}>
         <Table>
@@ -823,6 +866,8 @@ function AdminModpackJobsSection({ jobs }: { jobs: AdminModpackInstallJob[] }) {
               <TableHead>Status</TableHead>
               <TableHead>Attempts</TableHead>
               <TableHead>Taille</TableHead>
+              <TableHead>Timing</TableHead>
+              <TableHead>Logs</TableHead>
               <TableHead>Error</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
@@ -857,11 +902,39 @@ function AdminModpackJobsSection({ jobs }: { jobs: AdminModpackInstallJob[] }) {
                   {job.attempts}/{job.max_attempts}
                 </TableCell>
                 <TableCell>{formatBytes(job.file_length)}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  <div>Start: {formatDate(job.started_at)}</div>
+                  <div>End: {formatDate(job.finished_at)}</div>
+                </TableCell>
+                <TableCell className="min-w-72">
+                  <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border border-border/70 bg-background/30 p-2 text-xs">
+                    {(job.logs ?? []).length === 0 ? (
+                      <div className="text-muted-foreground">Aucun log.</div>
+                    ) : (
+                      (job.logs ?? []).map((log, index) => (
+                        <div key={`${job.id}-log-${index}`} className="text-muted-foreground">
+                          <span className="text-primary">{log.event ?? "log"}</span>
+                          {log.message ? ` · ${log.message}` : ""}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </TableCell>
                 <TableCell className="max-w-64 truncate text-muted-foreground">
                   {job.error_message ?? "—"}
                 </TableCell>
                 <TableCell>
                   <div className="flex justify-end gap-2">
+                    {job.status === "queued" ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={processJob.isPending}
+                        onClick={() => processJob.mutate(job.id)}
+                      >
+                        Process
+                      </Button>
+                    ) : null}
                     {["failed", "cancelled"].includes(job.status) ? (
                       <Button
                         size="sm"

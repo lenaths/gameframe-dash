@@ -37,10 +37,20 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   single: () => SupabaseQuery<T>;
 };
 
+type JobLogExtra = Record<string, string | number | boolean | null>;
+type JobLog = {
+  at?: string;
+  event?: string;
+  message?: string;
+  extra?: JobLogExtra;
+};
+
 type ServerOrderForJob = {
   id: string;
   order_id: string | null;
   user_id: string;
+  status?: string | null;
+  pterodactyl_server_id?: number | null;
   metadata?: Record<string, unknown> | null;
 };
 
@@ -61,6 +71,7 @@ type ModpackJobRow = {
   started_at: string | null;
   finished_at: string | null;
   error_message: string | null;
+  logs?: JobLog[] | null;
   created_at: string;
   updated_at: string;
   curseforge_modpacks?: { name?: string | null; logo_url?: string | null } | null;
@@ -107,6 +118,19 @@ function selectedModpackFromMetadata(metadata: unknown) {
     versionName:
       typeof selectedVersion.display_name === "string" ? selectedVersion.display_name : null,
   };
+}
+
+function appendLog(logs: unknown, event: string, message: string, extra?: JobLogExtra) {
+  const current = Array.isArray(logs) ? (logs as JobLog[]) : [];
+  return [
+    ...current,
+    {
+      at: new Date().toISOString(),
+      event,
+      message,
+      ...(extra ? { extra } : {}),
+    },
+  ];
 }
 
 async function getDb() {
@@ -188,6 +212,263 @@ async function writeAuditLog(
     after: values.after ?? null,
   });
   if (error) console.warn(`[Audit] Failed to write ${values.action}: ${error.message}`);
+}
+
+async function createJobNotification(
+  db: SupabaseAny,
+  values: {
+    userId?: string | null;
+    serverOrderId?: string | null;
+    type: string;
+    title: string;
+    body: string;
+  },
+) {
+  if (!values.userId) return;
+  const { error } = await db.from("notifications").insert({
+    user_id: values.userId,
+    type: values.type,
+    title: values.title,
+    body: values.body,
+    href: values.serverOrderId ? `/manage/${values.serverOrderId}` : "/dashboard",
+  });
+  if (error && error.code !== "23505") {
+    console.warn(`[Notifications] Failed to write ${values.type}: ${error.message}`);
+  }
+}
+
+type FullJobRow = ModpackJobRow & {
+  logs?: JobLog[] | null;
+};
+
+async function loadJobForProcessing(db: SupabaseAny, jobId: string) {
+  const { data, error } = await db
+    .from("modpack_install_jobs")
+    .select(
+      "id, order_id, server_order_id, user_id, modpack_id, modpack_version_id, curseforge_mod_id, curseforge_file_id, server_pack_file_id, status, attempts, max_attempts, file_length, started_at, finished_at, error_message, logs, created_at, updated_at",
+    )
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data as FullJobRow | null;
+}
+
+async function failJob(
+  db: SupabaseAny,
+  job: FullJobRow,
+  message: string,
+  event = "validation_failed",
+) {
+  const logs = appendLog(job.logs, event, message);
+  const finishedAt = new Date().toISOString();
+  const { error } = await db
+    .from("modpack_install_jobs")
+    .update({
+      status: "failed",
+      error_message: message,
+      finished_at: finishedAt,
+      logs,
+    })
+    .eq("id", job.id);
+  if (error) throw new Error(error.message);
+  await writeActivityLog(db, {
+    userId: job.user_id,
+    orderId: job.order_id,
+    serverOrderId: job.server_order_id,
+    action: "modpack_install_failed",
+    description: message,
+    metadata: { jobId: job.id, phase: "4H" },
+  });
+  await createJobNotification(db, {
+    userId: job.user_id,
+    serverOrderId: job.server_order_id,
+    type: "modpack_install_failed",
+    title: "Installation modpack échouée",
+    body: message,
+  });
+  return { ok: false as const, status: "failed" as const, error: message };
+}
+
+async function processJob(db: SupabaseAny, jobId: string) {
+  const job = await loadJobForProcessing(db, jobId);
+  if (!job) throw new Error("Job modpack introuvable.");
+  if (job.status === "ready") return { ok: true as const, skipped: true, status: "ready" as const };
+  if (job.status === "failed" || job.status === "cancelled") {
+    return { ok: false as const, skipped: true, status: job.status, error: "Job non traitable." };
+  }
+  if (job.status !== "queued") {
+    return { ok: true as const, skipped: true, status: job.status };
+  }
+  if ((job.attempts ?? 0) >= (job.max_attempts ?? 3)) {
+    return failJob(db, job, "Nombre maximal de tentatives atteint.", "max_attempts_reached");
+  }
+
+  const startedAt = new Date().toISOString();
+  const downloadingLogs = appendLog(
+    job.logs,
+    "downloading",
+    "Worker MVP démarré: validation du modpack sans téléchargement réel.",
+  );
+  const { error: markError } = await db
+    .from("modpack_install_jobs")
+    .update({
+      status: "downloading",
+      attempts: (job.attempts ?? 0) + 1,
+      started_at: startedAt,
+      finished_at: null,
+      error_message: null,
+      logs: downloadingLogs,
+    })
+    .eq("id", job.id);
+  if (markError) throw new Error(markError.message);
+
+  const workingJob: FullJobRow = {
+    ...job,
+    status: "downloading",
+    attempts: (job.attempts ?? 0) + 1,
+    started_at: startedAt,
+    logs: downloadingLogs,
+  };
+
+  if (!workingJob.server_order_id) {
+    return failJob(db, workingJob, "Serveur lié introuvable.");
+  }
+  if (!workingJob.modpack_id || !workingJob.modpack_version_id) {
+    return failJob(db, workingJob, "Sélection modpack incomplète.");
+  }
+
+  const { data: serverOrderData, error: serverOrderError } = await db
+    .from("server_orders")
+    .select("id, order_id, user_id, status, pterodactyl_server_id, metadata")
+    .eq("id", workingJob.server_order_id)
+    .maybeSingle();
+  if (serverOrderError) throw new Error(serverOrderError.message);
+  const serverOrder = serverOrderData as ServerOrderForJob | null;
+  if (!serverOrder) return failJob(db, workingJob, "Serveur XNT introuvable.");
+  if (!serverOrder.pterodactyl_server_id) {
+    return failJob(db, workingJob, "Serveur pas encore prêt pour une installation modpack.");
+  }
+
+  const [{ data: modpackData, error: modpackError }, { data: versionData, error: versionError }] =
+    await Promise.all([
+      db
+        .from("curseforge_modpacks")
+        .select("id, name, curseforge_mod_id, is_active")
+        .eq("id", workingJob.modpack_id)
+        .maybeSingle(),
+      db
+        .from("curseforge_modpack_versions")
+        .select(
+          "id, modpack_id, curseforge_file_id, display_name, minecraft_versions, loaders, server_pack_file_id, is_server_pack, file_length, is_active",
+        )
+        .eq("id", workingJob.modpack_version_id)
+        .maybeSingle(),
+    ]);
+  if (modpackError) throw new Error(modpackError.message);
+  if (versionError) throw new Error(versionError.message);
+  const modpack = modpackData as {
+    id: string;
+    name?: string | null;
+    curseforge_mod_id?: number | null;
+    is_active?: boolean;
+  } | null;
+  const version = versionData as {
+    id: string;
+    modpack_id: string;
+    curseforge_file_id?: number | null;
+    display_name?: string | null;
+    minecraft_versions?: string[] | null;
+    loaders?: string[] | null;
+    server_pack_file_id?: number | null;
+    is_server_pack?: boolean | null;
+    file_length?: number | null;
+    is_active?: boolean;
+  } | null;
+
+  if (!modpack || !modpack.is_active)
+    return failJob(db, workingJob, "Modpack inactif ou supprimé.");
+  if (!version || !version.is_active || version.modpack_id !== modpack.id) {
+    return failJob(db, workingJob, "Version modpack inactive ou invalide.");
+  }
+  if (!version.server_pack_file_id && !workingJob.server_pack_file_id) {
+    return failJob(db, workingJob, "Aucun server pack disponible pour cette version.");
+  }
+
+  const { data: mappingsData, error: mappingsError } = await db
+    .from("curseforge_template_mappings")
+    .select("id, loader, minecraft_version, is_active")
+    .eq("modpack_id", modpack.id)
+    .eq("is_active", true);
+  if (mappingsError) throw new Error(mappingsError.message);
+  const versionLoaders = new Set((version.loaders ?? []).map((item) => item.toLowerCase()));
+  const versionMinecraft = new Set(
+    (version.minecraft_versions ?? []).map((item) => item.toLowerCase()),
+  );
+  const mappings = (mappingsData ?? []) as Array<{
+    id: string;
+    loader?: string | null;
+    minecraft_version?: string | null;
+  }>;
+  const matchingMapping = mappings.find((mapping) => {
+    const loaderOk = !mapping.loader || versionLoaders.has(mapping.loader.toLowerCase());
+    const versionOk =
+      !mapping.minecraft_version || versionMinecraft.has(mapping.minecraft_version.toLowerCase());
+    return loaderOk && versionOk;
+  });
+  if (!matchingMapping) {
+    return failJob(db, workingJob, "Aucun template serveur actif ne correspond à cette version.");
+  }
+
+  const readyLogs = appendLog(
+    workingJob.logs,
+    "ready",
+    "Validation modpack OK. Installation réelle non activée dans cette phase.",
+    {
+      modpack: modpack.name ?? null,
+      version: version.display_name ?? null,
+      serverPackFileId: version.server_pack_file_id ?? workingJob.server_pack_file_id,
+      mappingId: matchingMapping.id,
+    },
+  );
+  const finishedAt = new Date().toISOString();
+  const { error: readyError } = await db
+    .from("modpack_install_jobs")
+    .update({
+      status: "ready",
+      curseforge_mod_id: modpack.curseforge_mod_id ?? workingJob.curseforge_mod_id,
+      curseforge_file_id: version.curseforge_file_id ?? workingJob.curseforge_file_id,
+      server_pack_file_id: version.server_pack_file_id ?? workingJob.server_pack_file_id,
+      file_length: version.file_length ?? workingJob.file_length,
+      finished_at: finishedAt,
+      error_message: null,
+      logs: readyLogs,
+      metadata: {
+        phase: "4H",
+        install_enabled: false,
+        validation_only: true,
+        mapping_id: matchingMapping.id,
+      },
+    })
+    .eq("id", workingJob.id);
+  if (readyError) throw new Error(readyError.message);
+
+  await writeActivityLog(db, {
+    userId: workingJob.user_id,
+    orderId: workingJob.order_id,
+    serverOrderId: workingJob.server_order_id,
+    action: "modpack_install_ready",
+    description: "Installation modpack préparée.",
+    metadata: { jobId: workingJob.id, phase: "4H", validationOnly: true },
+  });
+  await createJobNotification(db, {
+    userId: workingJob.user_id,
+    serverOrderId: workingJob.server_order_id,
+    type: "modpack_install_ready",
+    title: "Installation modpack préparée",
+    body: "Validation modpack OK. L’installation réelle sera activée dans une prochaine phase.",
+  });
+
+  return { ok: true as const, skipped: false, status: "ready" as const };
 }
 
 export async function enqueueModpackInstallJob(serverOrderId: string) {
@@ -306,7 +587,7 @@ export const adminListModpackInstallJobs = createServerFn({ method: "POST" })
     let query = db
       .from("modpack_install_jobs")
       .select(
-        "id, order_id, server_order_id, user_id, modpack_id, modpack_version_id, curseforge_mod_id, curseforge_file_id, server_pack_file_id, status, attempts, max_attempts, file_length, started_at, finished_at, error_message, created_at, updated_at, curseforge_modpacks(name, logo_url), curseforge_modpack_versions(display_name, minecraft_versions, loaders), server_orders(server_name, status), orders(status)",
+        "id, order_id, server_order_id, user_id, modpack_id, modpack_version_id, curseforge_mod_id, curseforge_file_id, server_pack_file_id, status, attempts, max_attempts, file_length, started_at, finished_at, error_message, logs, created_at, updated_at, curseforge_modpacks(name, logo_url), curseforge_modpack_versions(display_name, minecraft_versions, loaders), server_orders(server_name, status), orders(status)",
       )
       .order("created_at", { ascending: false })
       .limit(200);
@@ -330,14 +611,14 @@ export const adminRetryModpackInstallJob = createServerFn({ method: "POST" })
       .eq("id", data.jobId)
       .maybeSingle();
     if (jobError) throw new Error(jobError.message);
-    const job = jobData as (ModpackJobRow & { logs?: Array<Record<string, unknown>> }) | null;
+    const job = jobData as FullJobRow | null;
     if (!job) throw new Error("Job modpack introuvable.");
     if (!["failed", "cancelled"].includes(job.status)) {
       return { ok: true, skipped: true, status: job.status };
     }
 
     const nextLogs = [
-      ...((Array.isArray(job.logs) ? job.logs : []) as unknown[]),
+      ...((Array.isArray(job.logs) ? job.logs : []) as JobLog[]),
       {
         at: new Date().toISOString(),
         event: "admin_retry",
@@ -381,12 +662,12 @@ export const adminCancelModpackInstallJob = createServerFn({ method: "POST" })
       .eq("id", data.jobId)
       .maybeSingle();
     if (jobError) throw new Error(jobError.message);
-    const job = jobData as (ModpackJobRow & { logs?: Array<Record<string, unknown>> }) | null;
+    const job = jobData as FullJobRow | null;
     if (!job) throw new Error("Job modpack introuvable.");
     if (job.status !== "queued") return { ok: true, skipped: true, status: job.status };
 
     const logs = [
-      ...((Array.isArray(job.logs) ? job.logs : []) as unknown[]),
+      ...((Array.isArray(job.logs) ? job.logs : []) as JobLog[]),
       {
         at: new Date().toISOString(),
         event: "admin_cancel",
@@ -412,4 +693,57 @@ export const adminCancelModpackInstallJob = createServerFn({ method: "POST" })
       after: { status: "cancelled" },
     });
     return { ok: true, skipped: false, status: "cancelled" };
+  });
+
+export async function processModpackInstallJob(jobId: string) {
+  const db = await getDb();
+  return processJob(db, jobId);
+}
+
+export async function processNextModpackInstallJob() {
+  const db = await getDb();
+  const { data, error } = await db
+    .from("modpack_install_jobs")
+    .select("id")
+    .eq("status", "queued")
+    .order("created_at", { ascending: true })
+    .limit(1);
+  if (error) throw new Error(error.message);
+  const next = ((data as Array<{ id: string }> | null) ?? [])[0] ?? null;
+  if (!next) return { ok: true as const, skipped: true, status: "idle" as const };
+  return processJob(db, next.id);
+}
+
+export const adminProcessModpackInstallJob = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => jobInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { assertAdmin } = await import("@/lib/admin.functions");
+    await assertAdmin(context.userId);
+    const result = await processModpackInstallJob(data.jobId);
+    const db = await getDb();
+    await writeAuditLog(db, {
+      actorUserId: context.userId,
+      entityType: "modpack_install_job",
+      entityId: data.jobId,
+      action: "admin.modpack_install.process_job",
+      after: result,
+    });
+    return result;
+  });
+
+export const adminProcessNextModpackInstallJob = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { assertAdmin } = await import("@/lib/admin.functions");
+    await assertAdmin(context.userId);
+    const result = await processNextModpackInstallJob();
+    const db = await getDb();
+    await writeAuditLog(db, {
+      actorUserId: context.userId,
+      entityType: "modpack_install_job",
+      action: "admin.modpack_install.process_next",
+      after: result,
+    });
+    return result;
   });
