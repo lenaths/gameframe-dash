@@ -10,6 +10,7 @@ import {
   ShieldAlert,
   Settings,
   Copy,
+  PackageSearch,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
@@ -176,12 +177,25 @@ type DashboardServer = {
   next_renewal_at?: string | null;
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
+  modpack_install_job?: ModpackInstallJob | null;
   plans?: {
     game?: string | null;
     name?: string | null;
     ram_mb?: number | null;
     cpu_percent?: number | null;
     disk_mb?: number | null;
+  } | null;
+};
+
+type ModpackInstallJob = {
+  id: string;
+  status: string;
+  error_message: string | null;
+  curseforge_modpacks?: { name?: string | null; logo_url?: string | null } | null;
+  curseforge_modpack_versions?: {
+    display_name?: string | null;
+    minecraft_versions?: string[] | null;
+    loaders?: string[] | null;
   } | null;
 };
 
@@ -210,6 +224,7 @@ function ServerCard({
   const status = String(s.status);
   const template = s.selected_template_label;
   const modpack = s.selected_modpack_label;
+  const installJob = s.modpack_install_job;
   const copyConnection = async () => {
     try {
       const detail = await onFetchDetail(s.id);
@@ -237,9 +252,17 @@ function ServerCard({
     <div className="xnt-card xnt-card-hover rounded-xl p-5">
       <div className="flex flex-wrap items-center justify-between gap-5">
         <div className="flex items-center gap-4">
-          <div className="grid h-14 w-14 place-items-center rounded-lg border border-primary/25 bg-primary/10 text-primary shadow-[0_0_24px_rgba(0,191,255,0.12)]">
-            <ServerIcon className="h-6 w-6" />
-          </div>
+          {installJob?.curseforge_modpacks?.logo_url ? (
+            <img
+              src={installJob.curseforge_modpacks.logo_url}
+              alt=""
+              className="h-14 w-14 rounded-lg object-cover shadow-[0_0_24px_rgba(0,191,255,0.12)]"
+            />
+          ) : (
+            <div className="grid h-14 w-14 place-items-center rounded-lg border border-primary/25 bg-primary/10 text-primary shadow-[0_0_24px_rgba(0,191,255,0.12)]">
+              {modpack ? <PackageSearch className="h-6 w-6" /> : <ServerIcon className="h-6 w-6" />}
+            </div>
+          )}
           <div>
             <div className="font-display text-xl font-semibold">{s.server_name}</div>
             <div className="text-sm text-muted-foreground">
@@ -251,6 +274,15 @@ function ServerCard({
             )}
             {modpack && (
               <div className="mt-1 text-xs text-accent">Modpack sélectionné : {modpack}</div>
+            )}
+            {installJob && (
+              <div className="mt-2 rounded-lg border border-accent/25 bg-accent/10 px-3 py-2 text-xs text-accent">
+                Installation modpack : {modpackInstallLabel(installJob.status)}
+                {installJob.curseforge_modpack_versions?.display_name
+                  ? ` · ${installJob.curseforge_modpack_versions.display_name}`
+                  : ""}
+                {installJob.error_message ? ` · ${installJob.error_message}` : ""}
+              </div>
             )}
             <div className="mt-2 grid gap-2 text-xs text-muted-foreground sm:grid-cols-3">
               <span>Créé: {formatDate(s.created_at)}</span>
@@ -336,7 +368,9 @@ function ServerCard({
             </Button>
           </>
         )}
-        {(status === "failed" || status === "provisioning_failed") && (
+        {(status === "failed" ||
+          status === "provisioning_failed" ||
+          installJob?.status === "failed") && (
           <Button asChild size="sm" variant="outline">
             <Link
               to="/support"
@@ -354,6 +388,20 @@ function ServerCard({
       </div>
     </div>
   );
+}
+
+function modpackInstallLabel(status: string) {
+  const labels: Record<string, string> = {
+    queued: "Installation planifiée",
+    downloading: "Téléchargement",
+    extracting: "Extraction",
+    installing: "Installation",
+    configuring: "Configuration",
+    ready: "Prêt",
+    failed: "Échec",
+    cancelled: "Annulé",
+  };
+  return labels[status] ?? status;
 }
 
 function ResourcePill({ label, value }: { label: string; value: string }) {

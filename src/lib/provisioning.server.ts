@@ -690,6 +690,27 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     environment: selection.environment,
   });
 
+  if (selection.selectedModpack && result.ok) {
+    try {
+      const { enqueueModpackInstallJob } = await import("@/lib/modpack-install.functions");
+      const jobResult = await enqueueModpackInstallJob(serverOrderId);
+      if (jobResult.queued) {
+        console.info("[ModpackInstall] Job queued after provisioning", {
+          orderId: order.id,
+          serverOrderId,
+          jobId: jobResult.job?.id ?? null,
+          reused: "reused" in jobResult ? jobResult.reused : false,
+        });
+      }
+    } catch (error) {
+      console.warn("[ModpackInstall] Could not enqueue job after provisioning", {
+        orderId: order.id,
+        serverOrderId,
+        error: cleanProvisioningError(error),
+      });
+    }
+  }
+
   if (result.ok && (result.pterodactylServerId || result.pterodactylServerIdentifier)) {
     await db
       .from("orders")

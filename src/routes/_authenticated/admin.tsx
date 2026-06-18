@@ -61,6 +61,7 @@ import {
   adminSearchCurseForgeModpacks,
   adminSyncServerStatus,
   adminSyncCurseForgeModpackVersions,
+  adminTestCurseForgeConnection,
   adminToggleCatalogActive,
   adminToggleCurseForgeModpack,
   adminToggleCurseForgeModpackVersion,
@@ -68,6 +69,11 @@ import {
   adminUpdatePlanEggs,
 } from "@/lib/admin.functions";
 import { adminListTickets, adminReplyToTicket } from "@/lib/support.functions";
+import {
+  adminCancelModpackInstallJob,
+  adminListModpackInstallJobs,
+  adminRetryModpackInstallJob,
+} from "@/lib/modpack-install.functions";
 
 export const Route = createFileRoute("/_authenticated/admin")({
   head: () => ({ meta: [{ title: "Admin · XntServers" }] }),
@@ -89,6 +95,7 @@ function Admin() {
   const fetchCurseForgeVersions = useServerFn(listCurseForgeModpackVersions);
   const fetchCurseForgeMappings = useServerFn(listCurseForgeMappings);
   const fetchCurseForgePlans = useServerFn(listCurseForgePlanCompatibilities);
+  const fetchModpackJobs = useServerFn(adminListModpackInstallJobs);
 
   const overviewQ = useQuery({ queryKey: ["admin-all"], queryFn: () => fetchAll(), retry: false });
   const plansQ = useQuery({ queryKey: ["admin-plans"], queryFn: () => fetchPlans(), retry: false });
@@ -152,6 +159,11 @@ function Admin() {
     queryFn: () => fetchCurseForgePlans(),
     retry: false,
   });
+  const modpackJobsQ = useQuery({
+    queryKey: ["admin-modpack-install-jobs"],
+    queryFn: () => fetchModpackJobs({ data: {} }),
+    retry: false,
+  });
 
   const error =
     overviewQ.error ??
@@ -167,7 +179,8 @@ function Admin() {
     curseForgeModpacksQ.error ??
     curseForgeVersionsQ.error ??
     curseForgeMappingsQ.error ??
-    curseForgePlansQ.error;
+    curseForgePlansQ.error ??
+    modpackJobsQ.error;
 
   return (
     <div className="xnt-page min-h-screen">
@@ -199,6 +212,7 @@ function Admin() {
             <TabsTrigger value="logs">Logs</TabsTrigger>
             <TabsTrigger value="plans">Plans</TabsTrigger>
             <TabsTrigger value="catalog">Game Catalog</TabsTrigger>
+            <TabsTrigger value="modpack-jobs">Modpack Jobs</TabsTrigger>
             <TabsTrigger value="users">Users</TabsTrigger>
             <TabsTrigger value="support">Support</TabsTrigger>
           </TabsList>
@@ -247,6 +261,11 @@ function Admin() {
                 }}
               />
             </div>
+          </TabsContent>
+          <TabsContent value="modpack-jobs" className="mt-6">
+            <AdminModpackJobsSection
+              jobs={(modpackJobsQ.data?.jobs ?? []) as AdminModpackInstallJob[]}
+            />
           </TabsContent>
           <TabsContent value="users" className="mt-6">
             <AdminUsersSection
@@ -334,6 +353,31 @@ type AdminInvoice = {
   stripe_invoice_pdf: string | null;
   created_at: string;
   profile?: AdminProfileRef | null;
+};
+
+type AdminModpackInstallJob = {
+  id: string;
+  order_id: string | null;
+  server_order_id: string | null;
+  user_id: string | null;
+  curseforge_mod_id: number | null;
+  curseforge_file_id: number | null;
+  server_pack_file_id: number | null;
+  status: string;
+  attempts: number;
+  max_attempts: number;
+  file_length: number | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  curseforge_modpacks?: { name?: string | null } | null;
+  curseforge_modpack_versions?: {
+    display_name?: string | null;
+    minecraft_versions?: string[] | null;
+    loaders?: string[] | null;
+  } | null;
+  server_orders?: { server_name?: string | null; status?: string | null } | null;
+  orders?: { status?: string | null } | null;
 };
 
 type ActivityLog = {
@@ -711,6 +755,144 @@ function AdminServersSection({ servers }: { servers: AdminServer[] }) {
   );
 }
 
+function AdminModpackJobsSection({ jobs }: { jobs: AdminModpackInstallJob[] }) {
+  const qc = useQueryClient();
+  const retryFn = useServerFn(adminRetryModpackInstallJob);
+  const cancelFn = useServerFn(adminCancelModpackInstallJob);
+  const [status, setStatus] = useState("");
+  const filtered = status ? jobs.filter((job) => job.status === status) : jobs;
+
+  const retry = useMutation({
+    mutationFn: (jobId: string) => retryFn({ data: { jobId } }),
+    onSuccess: (result) => {
+      if (result.skipped) toast.info(`Job inchangé: ${result.status}`);
+      else toast.success("Job remis en file d’attente");
+      qc.invalidateQueries({ queryKey: ["admin-modpack-install-jobs"] });
+      qc.invalidateQueries({ queryKey: ["my-servers"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const cancel = useMutation({
+    mutationFn: (jobId: string) => cancelFn({ data: { jobId } }),
+    onSuccess: (result) => {
+      if (result.skipped) toast.info(`Job inchangé: ${result.status}`);
+      else toast.success("Job annulé");
+      qc.invalidateQueries({ queryKey: ["admin-modpack-install-jobs"] });
+      qc.invalidateQueries({ queryKey: ["my-servers"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <section>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <SectionTitle
+          icon={<Package className="h-5 w-5" />}
+          title={`Modpack Jobs (${filtered.length})`}
+        />
+        <select
+          value={status}
+          onChange={(e) => setStatus(e.target.value)}
+          className="rounded-md border border-border bg-background px-3 py-2 text-sm"
+        >
+          <option value="">Tous les statuts</option>
+          {[
+            "queued",
+            "downloading",
+            "extracting",
+            "installing",
+            "configuring",
+            "ready",
+            "failed",
+            "cancelled",
+          ].map((item) => (
+            <option key={item} value={item}>
+              {modpackInstallLabel(item)}
+            </option>
+          ))}
+        </select>
+      </div>
+      <TableShell empty={filtered.length === 0 ? "Aucun job modpack." : null}>
+        <Table>
+          <TableHeader className="bg-surface-2">
+            <TableRow>
+              <TableHead>Job</TableHead>
+              <TableHead>Modpack</TableHead>
+              <TableHead>Server</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead>Attempts</TableHead>
+              <TableHead>Taille</TableHead>
+              <TableHead>Error</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {filtered.map((job) => (
+              <TableRow key={job.id}>
+                <TableCell>
+                  <div className="font-mono text-xs">{shortId(job.id)}</div>
+                  <div className="text-xs text-muted-foreground">{formatDate(job.created_at)}</div>
+                </TableCell>
+                <TableCell className="min-w-56">
+                  <div className="font-medium">
+                    {job.curseforge_modpacks?.name ?? `CF ${job.curseforge_mod_id ?? "—"}`}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {job.curseforge_modpack_versions?.display_name ??
+                      `file ${job.curseforge_file_id ?? "—"}`}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  <div>{job.server_orders?.server_name ?? shortId(job.server_order_id)}</div>
+                  <div className="text-xs text-muted-foreground">order {shortId(job.order_id)}</div>
+                </TableCell>
+                <TableCell>
+                  <StatusBadge status={job.status} />
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {modpackInstallLabel(job.status)}
+                  </div>
+                </TableCell>
+                <TableCell>
+                  {job.attempts}/{job.max_attempts}
+                </TableCell>
+                <TableCell>{formatBytes(job.file_length)}</TableCell>
+                <TableCell className="max-w-64 truncate text-muted-foreground">
+                  {job.error_message ?? "—"}
+                </TableCell>
+                <TableCell>
+                  <div className="flex justify-end gap-2">
+                    {["failed", "cancelled"].includes(job.status) ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={retry.isPending}
+                        onClick={() => retry.mutate(job.id)}
+                      >
+                        Retry
+                      </Button>
+                    ) : null}
+                    {job.status === "queued" ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={cancel.isPending}
+                        onClick={() => cancel.mutate(job.id)}
+                      >
+                        Cancel
+                      </Button>
+                    ) : null}
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableShell>
+    </section>
+  );
+}
+
 function AdminPaymentsSection({
   payments,
   invoices,
@@ -1070,6 +1252,28 @@ type AdminCurseForgeSearchResult = {
   class_id: number | null;
   primary_category_id: number | null;
 };
+type AdminCurseForgeDiagnostic = {
+  endpoint: string;
+  baseUrl: string;
+  url: string;
+  cwd: string;
+  nodeEnv: string | null;
+  apiKeyPresent: boolean;
+  keyLength: number;
+  keyPrefix: string | null;
+  keySuffix: string | null;
+  hasQuotes: boolean;
+  hasWhitespace: boolean;
+  keySource: "process.env" | ".env";
+  envFilePath: string | null;
+  processKeyLength: number;
+  envFileKeyLength: number | null;
+  method: "GET";
+  status: number | null;
+  ok: boolean;
+  message: string;
+  body: string | null;
+};
 type AdminCurseForgeCacheData = {
   modpacks: AdminCurseForgeModpack[];
   versions: AdminCurseForgeVersion[];
@@ -1368,6 +1572,7 @@ function AdminGameCatalogSection({ data }: { data?: AdminGameCatalogData }) {
 function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData }) {
   const qc = useQueryClient();
   const searchFn = useServerFn(adminSearchCurseForgeModpacks);
+  const testConnectionFn = useServerFn(adminTestCurseForgeConnection);
   const importFn = useServerFn(adminImportCurseForgeModpack);
   const syncFn = useServerFn(adminSyncCurseForgeModpackVersions);
   const toggleModpackFn = useServerFn(adminToggleCurseForgeModpack);
@@ -1379,6 +1584,7 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
   const [minecraftVersion, setMinecraftVersion] = useState("");
   const [loader, setLoader] = useState("");
   const [results, setResults] = useState<AdminCurseForgeSearchResult[]>([]);
+  const [diagnostic, setDiagnostic] = useState<AdminCurseForgeDiagnostic | null>(null);
   const [mappingDrafts, setMappingDrafts] = useState<Record<string, CurseForgeMappingDraft>>({});
   const gamesById = new Map(data.games.map((game) => [game.id, game]));
   const versionsByModpack = new Map<string, AdminCurseForgeVersion[]>();
@@ -1407,6 +1613,17 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
         },
       }),
     onSuccess: (payload) => setResults((payload.results ?? []) as AdminCurseForgeSearchResult[]),
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const testConnection = useMutation({
+    mutationFn: () => testConnectionFn(),
+    onSuccess: (payload) => {
+      const result = payload as AdminCurseForgeDiagnostic;
+      setDiagnostic(result);
+      if (result.ok) toast.success("Connexion CurseForge OK");
+      else toast.warning(result.message);
+    },
     onError: (e: Error) => toast.error(e.message),
   });
 
@@ -1521,6 +1738,60 @@ function AdminCurseForgeCacheSection({ data }: { data: AdminCurseForgeCacheData 
           Recherche et import admin server-only. La clé API reste côté serveur et aucune URL de
           téléchargement n’est stockée.
         </p>
+
+        <div className="xnt-card mb-4 rounded-lg p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="font-medium">Diagnostic API CurseForge</div>
+              <p className="text-sm text-muted-foreground">
+                Test server-only avec endpoint public de recherche. La clé n’est jamais affichée.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={testConnection.isPending}
+              onClick={() => testConnection.mutate()}
+            >
+              {testConnection.isPending ? "Test..." : "Tester connexion CurseForge"}
+            </Button>
+          </div>
+          {diagnostic ? (
+            <div className="mt-4 grid gap-2 rounded-lg border border-primary/15 bg-background/40 p-3 text-sm md:grid-cols-2">
+              <div>
+                API key détectée :{" "}
+                <span className={diagnostic.apiKeyPresent ? "text-success" : "text-destructive"}>
+                  {diagnostic.apiKeyPresent ? "oui" : "non"}
+                </span>
+              </div>
+              <div>Status HTTP : {diagnostic.status ?? "—"}</div>
+              <div>Longueur clé : {diagnostic.keyLength}</div>
+              <div>Source clé : {diagnostic.keySource}</div>
+              <div>Longueur process.env : {diagnostic.processKeyLength}</div>
+              <div>Longueur .env : {diagnostic.envFileKeyLength ?? "—"}</div>
+              <div>
+                Empreinte : {diagnostic.keyPrefix ?? "—"}...{diagnostic.keySuffix ?? "—"}
+              </div>
+              <div>Quotes : {diagnostic.hasQuotes ? "oui" : "non"}</div>
+              <div>Whitespace : {diagnostic.hasWhitespace ? "oui" : "non"}</div>
+              <div>NODE_ENV : {diagnostic.nodeEnv ?? "—"}</div>
+              <div className="break-all">cwd : {diagnostic.cwd}</div>
+              <div className="break-all">Fichier env : {diagnostic.envFilePath ?? "—"}</div>
+              <div>Endpoint : {diagnostic.endpoint}</div>
+              <div>Base URL : {diagnostic.baseUrl}</div>
+              <div>Méthode : {diagnostic.method}</div>
+              <div className="md:col-span-2">Message : {diagnostic.message}</div>
+              <div className="md:col-span-2 break-all text-xs text-muted-foreground">
+                URL testée : {diagnostic.url}
+              </div>
+              {diagnostic.body ? (
+                <pre className="max-h-40 overflow-auto rounded-md border border-border/70 bg-black/30 p-3 text-xs md:col-span-2">
+                  {diagnostic.body}
+                </pre>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
 
         <form
           className="xnt-card mb-4 grid gap-3 rounded-lg p-4 md:grid-cols-[1fr_160px_160px_auto]"
@@ -2336,6 +2607,32 @@ function ExternalUrl({ href }: { href?: string | null }) {
 function formatMoney(cents: number | null | undefined, currency: string | null | undefined) {
   if (typeof cents !== "number") return "—";
   return `${(cents / 100).toFixed(2)} ${(currency ?? "EUR").toUpperCase()}`;
+}
+
+function formatBytes(bytes: number | null | undefined) {
+  if (!bytes) return "—";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
+
+function modpackInstallLabel(status: string) {
+  const labels: Record<string, string> = {
+    queued: "Installation planifiée",
+    downloading: "Téléchargement",
+    extracting: "Extraction",
+    installing: "Installation",
+    configuring: "Configuration",
+    ready: "Prêt",
+    failed: "Échec",
+    cancelled: "Annulé",
+  };
+  return labels[status] ?? status;
 }
 
 function formatDate(value: string | null | undefined) {

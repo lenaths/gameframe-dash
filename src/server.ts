@@ -49,6 +49,10 @@ export default {
         const { handleWsCheckRequest } = await import("@/lib/ws-debug.server");
         return handleWsCheckRequest(request);
       }
+      if (request.method === "GET" && url.pathname === "/api/debug/curseforge") {
+        const { testCurseForgeConnection } = await import("@/lib/curseforge.server");
+        return Response.json(await testCurseForgeConnection());
+      }
       if (request.method === "GET" && url.pathname === "/api/health") {
         const { handleHealthRequest } = await import("@/lib/status.functions");
         return handleHealthRequest();

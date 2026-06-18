@@ -65,6 +65,22 @@ type ServerListItem = ServerListRow & {
   billing_status: string | null;
   last_payment_at: string | null;
   next_renewal_at: string | null;
+  modpack_install_job?: ModpackInstallJob | null;
+};
+
+type ModpackInstallJob = {
+  id: string;
+  server_order_id?: string | null;
+  status: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  curseforge_modpacks?: { name?: string | null; logo_url?: string | null } | null;
+  curseforge_modpack_versions?: {
+    display_name?: string | null;
+    minecraft_versions?: string[] | null;
+    loaders?: string[] | null;
+  } | null;
 };
 
 function selectedTemplateLabel(metadata: unknown) {
@@ -444,6 +460,7 @@ export const listMyServers = createServerFn({ method: "GET" })
         { status: string; current_period_end: string | null; renews_at: string | null }
       >(),
       latestPaymentByOrder = new Map<string, string>(),
+      latestJobByServer = new Map<string, ModpackInstallJob>(),
     ): ServerListItem[] =>
       rows.map((server) => {
         const order = server.order_id ? ordersById.get(server.order_id) : null;
@@ -454,17 +471,28 @@ export const listMyServers = createServerFn({ method: "GET" })
             ? (latestPaymentByOrder.get(server.order_id) ?? null)
             : null,
           next_renewal_at: order?.current_period_end ?? order?.renews_at ?? null,
+          modpack_install_job: latestJobByServer.get(server.id) ?? null,
         };
       });
 
     if (orderIds.length === 0) return { servers: withBilling(servers) };
 
-    const [{ data: orders }, { data: payments }] = await Promise.all([
+    const [{ data: orders }, { data: payments }, { data: jobs }] = await Promise.all([
       db.from("orders").select("id, status, current_period_end, renews_at").in("id", orderIds),
       db
         .from("payments")
         .select("id, order_id, paid_at, created_at")
         .in("order_id", orderIds)
+        .order("created_at", { ascending: false }),
+      db
+        .from("modpack_install_jobs")
+        .select(
+          "id, server_order_id, status, error_message, created_at, updated_at, curseforge_modpacks(name, logo_url), curseforge_modpack_versions(display_name, minecraft_versions, loaders)",
+        )
+        .in(
+          "server_order_id",
+          servers.map((server) => server.id),
+        )
         .order("created_at", { ascending: false }),
     ]);
     const ordersById = new Map(
@@ -487,8 +515,16 @@ export const listMyServers = createServerFn({ method: "GET" })
         latestPaymentByOrder.set(payment.order_id, payment.paid_at ?? payment.created_at);
       }
     }
+    const latestJobByServer = new Map<string, ModpackInstallJob>();
+    for (const job of (jobs ?? []) as Array<
+      ModpackInstallJob & { server_order_id?: string | null }
+    >) {
+      if (job.server_order_id && !latestJobByServer.has(job.server_order_id)) {
+        latestJobByServer.set(job.server_order_id, job);
+      }
+    }
 
-    return { servers: withBilling(servers, ordersById, latestPaymentByOrder) };
+    return { servers: withBilling(servers, ordersById, latestPaymentByOrder, latestJobByServer) };
   });
 
 export const deployServer = createServerFn({ method: "POST" })
@@ -562,7 +598,11 @@ export const getServerDetail = createServerFn({ method: "POST" })
       .eq("user_id", context.userId)
       .single();
     if (error || !order) throw new Error("Server not found.");
-    if (!order.pterodactyl_server_identifier) return { order, live: null };
+    const { loadLatestModpackInstallJob } = await import("@/lib/modpack-install.functions");
+    const modpackInstallJob = await loadLatestModpackInstallJob(order.id);
+    if (!order.pterodactyl_server_identifier) {
+      return { order, live: null, modpackInstallJob };
+    }
 
     try {
       const { ptero, assertPteroClientConfigured, assertPteroAppConfigured } =
@@ -627,6 +667,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
       );
       return {
         order,
+        modpackInstallJob,
         live: {
           state: res.attributes.current_state,
           memoryMb: Math.round(res.attributes.resources.memory_bytes / 1024 / 1024),
@@ -643,6 +684,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
     } catch (err) {
       return {
         order,
+        modpackInstallJob,
         live: null,
         warning: publicServerServiceError(err, "Données serveur en direct indisponibles."),
       };

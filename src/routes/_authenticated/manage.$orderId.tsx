@@ -264,6 +264,52 @@ function ServerDetail() {
               </div>
             )}
 
+            {data.modpackInstallJob && (
+              <div className="xnt-card mb-6 rounded-xl p-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-muted-foreground">
+                      Installation modpack
+                    </div>
+                    <h3 className="mt-1 font-display text-xl font-semibold">
+                      {data.modpackInstallJob.curseforge_modpacks?.name ?? "Modpack sélectionné"}
+                    </h3>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {data.modpackInstallJob.curseforge_modpack_versions?.display_name ??
+                        "Version sélectionnée"}
+                    </p>
+                  </div>
+                  <Badge variant="outline" className="capitalize">
+                    {modpackInstallLabel(data.modpackInstallJob.status)}
+                  </Badge>
+                </div>
+                <p className="mt-3 text-sm text-muted-foreground">
+                  {modpackInstallDescription(data.modpackInstallJob.status)}
+                </p>
+                {data.modpackInstallJob.error_message && (
+                  <div className="mt-3 rounded-lg border border-destructive/35 bg-destructive/10 p-3 text-sm text-destructive">
+                    {data.modpackInstallJob.error_message}
+                  </div>
+                )}
+                {data.modpackInstallJob.status === "failed" && (
+                  <Button asChild size="sm" variant="outline" className="mt-4">
+                    <Link
+                      to="/support"
+                      search={
+                        {
+                          subject: `Échec installation modpack ${order.server_name}`,
+                          orderId: order.id,
+                        } as never
+                      }
+                    >
+                      <LifeBuoy className="mr-1.5 h-4 w-4" />
+                      Contacter le support
+                    </Link>
+                  </Button>
+                )}
+              </div>
+            )}
+
             <Tabs defaultValue="console">
               <TabsList>
                 <TabsTrigger value="console">Console</TabsTrigger>
@@ -349,6 +395,35 @@ function NetworkStat({ label, value }: { label: string; value: string | number }
       <div className="mt-1 truncate font-mono text-sm text-primary">{value}</div>
     </div>
   );
+}
+
+function modpackInstallLabel(status: string) {
+  const labels: Record<string, string> = {
+    queued: "Installation planifiée",
+    downloading: "Téléchargement",
+    extracting: "Extraction",
+    installing: "Installation",
+    configuring: "Configuration",
+    ready: "Prêt",
+    failed: "Échec",
+    cancelled: "Annulé",
+  };
+  return labels[status] ?? status;
+}
+
+function modpackInstallDescription(status: string) {
+  const descriptions: Record<string, string> = {
+    queued:
+      "Le job est prêt pour la future installation automatique. Aucun téléchargement n’est lancé dans cette phase.",
+    downloading: "Téléchargement du pack en cours.",
+    extracting: "Extraction des fichiers du pack.",
+    installing: "Installation du modpack.",
+    configuring: "Configuration finale du serveur.",
+    ready: "Le modpack est prêt.",
+    failed: "L’installation du modpack a échoué.",
+    cancelled: "Le job d’installation a été annulé.",
+  };
+  return descriptions[status] ?? "Statut d’installation modpack en cours.";
 }
 
 /* ---------------- Stats ---------------- */

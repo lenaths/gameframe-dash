@@ -18,7 +18,12 @@ import {
 import { createCheckoutSession } from "@/lib/stripe.functions";
 import { toast } from "sonner";
 
-const searchSchema = z.object({ plan: z.string().optional() });
+const searchSchema = z.object({
+  plan: z.string().optional(),
+  type: z.enum(["classic", "modpack"]).optional(),
+  modpack: z.string().optional(),
+  version: z.string().optional(),
+});
 
 export const Route = createFileRoute("/_authenticated/deploy")({
   validateSearch: searchSchema,
@@ -27,7 +32,12 @@ export const Route = createFileRoute("/_authenticated/deploy")({
 });
 
 function Deploy() {
-  const { plan: preselected } = Route.useSearch();
+  const {
+    plan: preselected,
+    type: preselectedType,
+    modpack: preselectedModpack,
+    version: preselectedVersion,
+  } = Route.useSearch();
   const navigate = useNavigate();
   const fetchPlans = useServerFn(listPlans);
   const fetchOptions = useServerFn(getDeployOptions);
@@ -45,10 +55,12 @@ function Deploy() {
   const [name, setName] = useState("");
   const [variantIndex, setVariantIndex] = useState(0);
   const [env, setEnv] = useState<Record<string, string>>({});
-  const [deployType, setDeployType] = useState<"classic" | "modpack">("classic");
+  const [deployType, setDeployType] = useState<"classic" | "modpack">(
+    preselectedType === "modpack" ? "modpack" : "classic",
+  );
   const [modpackSearch, setModpackSearch] = useState("");
-  const [selectedModpackId, setSelectedModpackId] = useState("");
-  const [selectedVersionId, setSelectedVersionId] = useState("");
+  const [selectedModpackId, setSelectedModpackId] = useState(preselectedModpack ?? "");
+  const [selectedVersionId, setSelectedVersionId] = useState(preselectedVersion ?? "");
 
   const opts = useQuery({
     queryKey: ["deploy-options", planId],
@@ -71,18 +83,20 @@ function Deploy() {
     if (deployType === "classic") setVariantIndex(0);
   }, [deployType, planId]);
   useEffect(() => {
+    if (deployType === "modpack" && preselectedModpack) return;
     setSelectedModpackId("");
     setSelectedVersionId("");
     if (deployType === "modpack") {
       setPlanId("");
       setVariantIndex(0);
     }
-  }, [deployType]);
+  }, [deployType, preselectedModpack]);
   useEffect(() => {
+    if (selectedModpackId === preselectedModpack && preselectedVersion) return;
     setSelectedVersionId("");
     setPlanId("");
     setVariantIndex(0);
-  }, [selectedModpackId]);
+  }, [preselectedModpack, preselectedVersion, selectedModpackId]);
   const currentVariant = opts.data?.variants[variantIndex];
   useEffect(() => {
     if (!currentVariant) return;
@@ -123,7 +137,16 @@ function Deploy() {
     (modpack) => modpack.id === selectedModpackId,
   );
   const versions = versionsQ.data?.versions ?? [];
-  const compatiblePlans = compatiblePlansQ.data?.plans ?? [];
+  const compatiblePlans = useMemo(
+    () => compatiblePlansQ.data?.plans ?? [],
+    [compatiblePlansQ.data?.plans],
+  );
+  useEffect(() => {
+    if (deployType !== "modpack" || planId || compatiblePlans.length === 0) return;
+    const firstPlan = compatiblePlans[0];
+    setPlanId(firstPlan.plan.id);
+    setVariantIndex(firstPlan.variantIndex);
+  }, [compatiblePlans, deployType, planId]);
   const canSubmit =
     Boolean(planId) &&
     !checkout.isPending &&

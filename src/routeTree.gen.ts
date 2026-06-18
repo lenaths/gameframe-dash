@@ -11,9 +11,11 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as StatusRouteImport } from './routes/status'
 import { Route as PricingRouteImport } from './routes/pricing'
+import { Route as ModpacksRouteImport } from './routes/modpacks'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ModpacksSlugRouteImport } from './routes/modpacks.$slug'
 import { Route as AuthenticatedSupportRouteImport } from './routes/_authenticated/support'
 import { Route as AuthenticatedDeployRouteImport } from './routes/_authenticated/deploy'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
@@ -31,6 +33,11 @@ const PricingRoute = PricingRouteImport.update({
   path: '/pricing',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ModpacksRoute = ModpacksRouteImport.update({
+  id: '/modpacks',
+  path: '/modpacks',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
   path: '/auth',
@@ -44,6 +51,11 @@ const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const ModpacksSlugRoute = ModpacksSlugRouteImport.update({
+  id: '/$slug',
+  path: '/$slug',
+  getParentRoute: () => ModpacksRoute,
 } as any)
 const AuthenticatedSupportRoute = AuthenticatedSupportRouteImport.update({
   id: '/support',
@@ -80,6 +92,7 @@ const AuthenticatedManageOrderIdRoute =
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/modpacks': typeof ModpacksRouteWithChildren
   '/pricing': typeof PricingRoute
   '/status': typeof StatusRoute
   '/admin': typeof AuthenticatedAdminRoute
@@ -87,11 +100,13 @@ export interface FileRoutesByFullPath {
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/deploy': typeof AuthenticatedDeployRoute
   '/support': typeof AuthenticatedSupportRoute
+  '/modpacks/$slug': typeof ModpacksSlugRoute
   '/manage/$orderId': typeof AuthenticatedManageOrderIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/modpacks': typeof ModpacksRouteWithChildren
   '/pricing': typeof PricingRoute
   '/status': typeof StatusRoute
   '/admin': typeof AuthenticatedAdminRoute
@@ -99,6 +114,7 @@ export interface FileRoutesByTo {
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/deploy': typeof AuthenticatedDeployRoute
   '/support': typeof AuthenticatedSupportRoute
+  '/modpacks/$slug': typeof ModpacksSlugRoute
   '/manage/$orderId': typeof AuthenticatedManageOrderIdRoute
 }
 export interface FileRoutesById {
@@ -106,6 +122,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
   '/auth': typeof AuthRoute
+  '/modpacks': typeof ModpacksRouteWithChildren
   '/pricing': typeof PricingRoute
   '/status': typeof StatusRoute
   '/_authenticated/admin': typeof AuthenticatedAdminRoute
@@ -113,6 +130,7 @@ export interface FileRoutesById {
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
   '/_authenticated/deploy': typeof AuthenticatedDeployRoute
   '/_authenticated/support': typeof AuthenticatedSupportRoute
+  '/modpacks/$slug': typeof ModpacksSlugRoute
   '/_authenticated/manage/$orderId': typeof AuthenticatedManageOrderIdRoute
 }
 export interface FileRouteTypes {
@@ -120,6 +138,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/auth'
+    | '/modpacks'
     | '/pricing'
     | '/status'
     | '/admin'
@@ -127,11 +146,13 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/deploy'
     | '/support'
+    | '/modpacks/$slug'
     | '/manage/$orderId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/auth'
+    | '/modpacks'
     | '/pricing'
     | '/status'
     | '/admin'
@@ -139,12 +160,14 @@ export interface FileRouteTypes {
     | '/dashboard'
     | '/deploy'
     | '/support'
+    | '/modpacks/$slug'
     | '/manage/$orderId'
   id:
     | '__root__'
     | '/'
     | '/_authenticated'
     | '/auth'
+    | '/modpacks'
     | '/pricing'
     | '/status'
     | '/_authenticated/admin'
@@ -152,6 +175,7 @@ export interface FileRouteTypes {
     | '/_authenticated/dashboard'
     | '/_authenticated/deploy'
     | '/_authenticated/support'
+    | '/modpacks/$slug'
     | '/_authenticated/manage/$orderId'
   fileRoutesById: FileRoutesById
 }
@@ -159,6 +183,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthenticatedRouteRoute: typeof AuthenticatedRouteRouteWithChildren
   AuthRoute: typeof AuthRoute
+  ModpacksRoute: typeof ModpacksRouteWithChildren
   PricingRoute: typeof PricingRoute
   StatusRoute: typeof StatusRoute
 }
@@ -177,6 +202,13 @@ declare module '@tanstack/react-router' {
       path: '/pricing'
       fullPath: '/pricing'
       preLoaderRoute: typeof PricingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/modpacks': {
+      id: '/modpacks'
+      path: '/modpacks'
+      fullPath: '/modpacks'
+      preLoaderRoute: typeof ModpacksRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/auth': {
@@ -199,6 +231,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/modpacks/$slug': {
+      id: '/modpacks/$slug'
+      path: '/$slug'
+      fullPath: '/modpacks/$slug'
+      preLoaderRoute: typeof ModpacksSlugRouteImport
+      parentRoute: typeof ModpacksRoute
     }
     '/_authenticated/support': {
       id: '/_authenticated/support'
@@ -266,10 +305,23 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
 const AuthenticatedRouteRouteWithChildren =
   AuthenticatedRouteRoute._addFileChildren(AuthenticatedRouteRouteChildren)
 
+interface ModpacksRouteChildren {
+  ModpacksSlugRoute: typeof ModpacksSlugRoute
+}
+
+const ModpacksRouteChildren: ModpacksRouteChildren = {
+  ModpacksSlugRoute: ModpacksSlugRoute,
+}
+
+const ModpacksRouteWithChildren = ModpacksRoute._addFileChildren(
+  ModpacksRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthenticatedRouteRoute: AuthenticatedRouteRouteWithChildren,
   AuthRoute: AuthRoute,
+  ModpacksRoute: ModpacksRouteWithChildren,
   PricingRoute: PricingRoute,
   StatusRoute: StatusRoute,
 }

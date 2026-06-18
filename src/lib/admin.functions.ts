@@ -274,7 +274,7 @@ async function getProfilesById(userIds: Array<string | null | undefined>) {
   return new Map((data ?? []).map((profile) => [profile.id, profile satisfies ProfileRef]));
 }
 
-async function assertAdmin(userId: string) {
+export async function assertAdmin(userId: string) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { data } = await supabaseAdmin
     .from("user_roles")
@@ -722,6 +722,14 @@ export const adminSearchCurseForgeModpacks = createServerFn({ method: "POST" })
         }),
       ),
     };
+  });
+
+export const adminTestCurseForgeConnection = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { testCurseForgeConnection } = await import("@/lib/curseforge.server");
+    return testCurseForgeConnection();
   });
 
 async function getMinecraftGameId(db: SupabaseAny) {

@@ -38,6 +38,13 @@ export function SiteHeader() {
             Pricing
           </Link>
           <Link
+            to={"/modpacks" as never}
+            className="text-muted-foreground hover:text-foreground transition-colors"
+            activeProps={{ className: "text-foreground" }}
+          >
+            Modpacks
+          </Link>
+          <Link
             to={"/status" as never}
             className="text-muted-foreground hover:text-foreground transition-colors"
             activeProps={{ className: "text-foreground" }}
