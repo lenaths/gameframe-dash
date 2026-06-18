@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  printf '[xnt-install-modpack] %s\n' "$*"
+}
+
+fail() {
+  log "ERROR: $*"
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  xnt-install-modpack --url URL --modpack-id ID --file-id ID --server-pack-file-id ID --name NAME
+
+Environment:
+  XNT_SERVER_DIR=/home/container
+  XNT_MODPACK_WORK_ROOT=/home/container/.xnt-modpack-install
+  XNT_MODPACK_MAX_BYTES=2147483648
+  XNT_MODPACK_OVERWRITE=false
+  XNT_MODPACK_CLEANUP=true
+USAGE
+}
+
+DOWNLOAD_URL=""
+MODPACK_ID=""
+FILE_ID=""
+SERVER_PACK_FILE_ID=""
+MODPACK_NAME=""
+SERVER_DIR="${XNT_SERVER_DIR:-/home/container}"
+WORK_ROOT="${XNT_MODPACK_WORK_ROOT:-/home/container/.xnt-modpack-install}"
+MAX_BYTES="${XNT_MODPACK_MAX_BYTES:-2147483648}"
+OVERWRITE="${XNT_MODPACK_OVERWRITE:-false}"
+CLEANUP="${XNT_MODPACK_CLEANUP:-true}"
+RUN_ID="$(date +%s)-$$"
+WORK_DIR="$WORK_ROOT/run-$RUN_ID"
+ARCHIVE="$WORK_DIR/server-pack.zip"
+EXTRACT_DIR="$WORK_DIR/extract"
+
+cleanup() {
+  if [ "${CLEANUP}" = "true" ] && [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+    rm -rf "$WORK_DIR"
+  fi
+}
+trap cleanup EXIT
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is required"
+}
+
+is_positive_integer() {
+  [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
+}
+
+safe_rel_path() {
+  local path="$1"
+  case "$path" in
+    ""|/*|../*|*/../*|*"/.."|*"/../"*|*"..\\"*|*"\\.."*|*":"*)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --url)
+      DOWNLOAD_URL="${2:-}"
+      shift 2
+      ;;
+    --modpack-id)
+      MODPACK_ID="${2:-}"
+      shift 2
+      ;;
+    --file-id)
+      FILE_ID="${2:-}"
+      shift 2
+      ;;
+    --server-pack-file-id)
+      SERVER_PACK_FILE_ID="${2:-}"
+      shift 2
+      ;;
+    --name)
+      MODPACK_NAME="${2:-}"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[ -n "$DOWNLOAD_URL" ] || fail "missing --url"
+is_positive_integer "$MODPACK_ID" || fail "invalid --modpack-id"
+is_positive_integer "$FILE_ID" || fail "invalid --file-id"
+is_positive_integer "$SERVER_PACK_FILE_ID" || fail "invalid --server-pack-file-id"
+is_positive_integer "$MAX_BYTES" || fail "invalid XNT_MODPACK_MAX_BYTES"
+
+case "$DOWNLOAD_URL" in
+  https://*) ;;
+  *) fail "download URL must use https" ;;
+esac
+
+case "$OVERWRITE" in
+  true|false) ;;
+  *) fail "XNT_MODPACK_OVERWRITE must be true or false" ;;
+esac
+
+require_tool curl
+require_tool unzip
+require_tool find
+require_tool wc
+require_tool cp
+
+[ -d "$SERVER_DIR" ] || fail "server directory does not exist: $SERVER_DIR"
+mkdir -p "$EXTRACT_DIR"
+
+log "preparing modpack install"
+log "modpack_id=$MODPACK_ID file_id=$FILE_ID server_pack_file_id=$SERVER_PACK_FILE_ID name=${MODPACK_NAME:-unknown}"
+log "server_dir=$SERVER_DIR overwrite=$OVERWRITE"
+
+log "downloading server pack"
+if command -v timeout >/dev/null 2>&1; then
+  timeout 20m curl --fail --location --silent --show-error --max-time 900 --output "$ARCHIVE" "$DOWNLOAD_URL"
+else
+  curl --fail --location --silent --show-error --max-time 900 --output "$ARCHIVE" "$DOWNLOAD_URL"
+fi
+
+[ -s "$ARCHIVE" ] || fail "downloaded archive is empty"
+SIZE="$(wc -c < "$ARCHIVE" | tr -d ' ')"
+log "archive size: $SIZE bytes"
+[ "$SIZE" -le "$MAX_BYTES" ] || fail "archive exceeds max size $MAX_BYTES bytes"
+
+log "testing zip readability"
+unzip -tq "$ARCHIVE" >/dev/null
+
+log "validating archive paths"
+while IFS= read -r path; do
+  safe_rel_path "$path" || fail "unsafe archive path: $path"
+done < <(unzip -Z1 "$ARCHIVE")
+
+log "extracting archive"
+unzip -q "$ARCHIVE" -d "$EXTRACT_DIR"
+
+if [ -f "$EXTRACT_DIR/eula.txt" ]; then
+  log "server pack includes eula.txt"
+else
+  log "creating eula.txt"
+  printf 'eula=true\n' > "$EXTRACT_DIR/eula.txt"
+fi
+
+log "copying files"
+cd "$EXTRACT_DIR"
+while IFS= read -r file; do
+  rel="${file#./}"
+  safe_rel_path "$rel" || fail "unsafe extracted file path: $rel"
+  target="$SERVER_DIR/$rel"
+  mkdir -p "$(dirname "$target")"
+  if [ -e "$target" ] && [ "$OVERWRITE" != "true" ]; then
+    log "keeping existing file: $rel"
+    continue
+  fi
+  cp "$file" "$target"
+  log "installed: $rel"
+done < <(find . -type f -print)
+
+log "modpack installation files prepared"
+log "done"

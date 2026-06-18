@@ -65,6 +65,7 @@ import {
   adminToggleCatalogActive,
   adminToggleCurseForgeModpack,
   adminToggleCurseForgeModpackVersion,
+  adminUpdateTemplateModpackInstall,
   adminUpdateCurseForgeTemplateMapping,
   adminUpdatePlanEggs,
 } from "@/lib/admin.functions";
@@ -829,9 +830,17 @@ function AdminModpackJobsSection({ jobs }: { jobs: AdminModpackInstallJob[] }) {
             size="sm"
             className="bg-primary text-primary-foreground hover:bg-primary/90"
             disabled={processNext.isPending}
-            onClick={() => processNext.mutate()}
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Lancer le worker modpack sur le prochain job queued ? Aucun upload backend ne sera fait, mais une commande serveur peut être envoyée si le template l’autorise.",
+                )
+              ) {
+                processNext.mutate();
+              }
+            }}
           >
-            Process next
+            Install next
           </Button>
           <select
             value={status}
@@ -930,9 +939,17 @@ function AdminModpackJobsSection({ jobs }: { jobs: AdminModpackInstallJob[] }) {
                         size="sm"
                         variant="outline"
                         disabled={processJob.isPending}
-                        onClick={() => processJob.mutate(job.id)}
+                        onClick={() => {
+                          if (
+                            window.confirm(
+                              "Lancer l’installation MVP pour ce job ? Une commande serveur contrôlée peut être envoyée uniquement si le template l’autorise.",
+                            )
+                          ) {
+                            processJob.mutate(job.id);
+                          }
+                        }}
                       >
-                        Process
+                        Install
                       </Button>
                     ) : null}
                     {["failed", "cancelled"].includes(job.status) ? (
@@ -1210,6 +1227,17 @@ type AdminCatalogGame = {
   is_active: boolean;
   sort_order: number;
 };
+type AdminTemplateModpackInstallConfig = {
+  enabled?: boolean;
+  command_template?: string;
+  max_file_size_mb?: number | null;
+  requires_server_pack?: boolean;
+  supported_loaders?: string[];
+  notes?: string;
+};
+type AdminTemplateMetadata = {
+  modpack_install?: AdminTemplateModpackInstallConfig | null;
+};
 type AdminCatalogTemplate = {
   id: string;
   game_id: string;
@@ -1221,6 +1249,7 @@ type AdminCatalogTemplate = {
   internal_egg_id: number;
   docker_image: string | null;
   startup: string | null;
+  metadata: AdminTemplateMetadata | null;
   is_active: boolean;
   sort_order: number;
 };
@@ -1364,6 +1393,201 @@ type CurseForgeMappingDraft = {
 };
 
 const CURSEFORGE_MAPPING_LOADERS = ["Forge", "Fabric", "Quilt", "NeoForge", "Vanilla", "Other"];
+const MODPACK_INSTALL_LOADERS = ["Forge", "Fabric", "Quilt", "NeoForge", "Vanilla"];
+
+type ModpackInstallConfig = {
+  enabled: boolean;
+  command_template: string;
+  max_file_size_mb: number | null;
+  requires_server_pack: boolean;
+  supported_loaders: string[];
+  notes: string;
+};
+
+function readTemplateModpackInstall(template: AdminCatalogTemplate): ModpackInstallConfig {
+  const metadata =
+    template.metadata && typeof template.metadata === "object" ? template.metadata : {};
+  const raw =
+    metadata.modpack_install && typeof metadata.modpack_install === "object"
+      ? metadata.modpack_install
+      : {};
+  return {
+    enabled: raw.enabled === true,
+    command_template: typeof raw.command_template === "string" ? raw.command_template : "",
+    max_file_size_mb:
+      typeof raw.max_file_size_mb === "number" && Number.isFinite(raw.max_file_size_mb)
+        ? raw.max_file_size_mb
+        : null,
+    requires_server_pack: raw.requires_server_pack !== false,
+    supported_loaders: Array.isArray(raw.supported_loaders)
+      ? raw.supported_loaders.filter((item): item is string => typeof item === "string")
+      : [],
+    notes: typeof raw.notes === "string" ? raw.notes : "",
+  };
+}
+
+function ModpackInstallBadge({ template }: { template: AdminCatalogTemplate }) {
+  const config = readTemplateModpackInstall(template);
+  return (
+    <div className="space-y-1">
+      <Badge variant={config.enabled ? "default" : "outline"}>
+        {config.enabled ? "Installation modpack activée" : "Désactivée"}
+      </Badge>
+      {config.supported_loaders.length > 0 ? (
+        <div className="text-xs text-muted-foreground">{config.supported_loaders.join(", ")}</div>
+      ) : null}
+    </div>
+  );
+}
+
+function EditTemplateModpackInstallDialog({ template }: { template: AdminCatalogTemplate }) {
+  const qc = useQueryClient();
+  const updateFn = useServerFn(adminUpdateTemplateModpackInstall);
+  const initial = readTemplateModpackInstall(template);
+  const [open, setOpen] = useState(false);
+  const [enabled, setEnabled] = useState(initial.enabled);
+  const [commandTemplate, setCommandTemplate] = useState(initial.command_template);
+  const [maxFileSizeMb, setMaxFileSizeMb] = useState(
+    initial.max_file_size_mb ? String(initial.max_file_size_mb) : "",
+  );
+  const [requiresServerPack, setRequiresServerPack] = useState(initial.requires_server_pack);
+  const [supportedLoaders, setSupportedLoaders] = useState<string[]>(initial.supported_loaders);
+  const [notes, setNotes] = useState(initial.notes);
+
+  const save = useMutation({
+    mutationFn: () =>
+      updateFn({
+        data: {
+          templateId: template.id,
+          config: {
+            enabled,
+            command_template: commandTemplate,
+            max_file_size_mb: maxFileSizeMb ? Number(maxFileSizeMb) : null,
+            requires_server_pack: requiresServerPack,
+            supported_loaders: supportedLoaders,
+            notes,
+          },
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Configuration modpack sauvegardée");
+      qc.invalidateQueries({ queryKey: ["admin-game-catalog"] });
+      setOpen(false);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const toggleLoader = (loader: string) => {
+    setSupportedLoaders((current) =>
+      current.includes(loader) ? current.filter((item) => item !== loader) : [...current, loader],
+    );
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline">
+          Modpack
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Installation modpack · {template.name}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            Cette commande sera exécutée côté serveur client. Utiliser uniquement des scripts
+            internes contrôlés. Ne pas coller de commande shell arbitraire.
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(event) => setEnabled(event.target.checked)}
+              className="accent-[color:var(--primary)]"
+            />
+            Activer l’installation modpack pour ce template
+          </label>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Command template</label>
+            <Textarea
+              value={commandTemplate}
+              onChange={(event) => setCommandTemplate(event.target.value)}
+              rows={4}
+              placeholder="Exemple interne uniquement : xnt-install-modpack --url {download_url} --server-pack {server_pack_file_id}"
+            />
+            <div className="text-xs text-muted-foreground">
+              Placeholders autorisés : {"{download_url}"}, {"{modpack_name}"}, {"{modpack_id}"},{" "}
+              {"{file_id}"}, {"{server_pack_file_id}"}.
+            </div>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Taille max fichier (MB)</label>
+              <Input
+                type="number"
+                min={1}
+                max={4096}
+                value={maxFileSizeMb}
+                onChange={(event) => setMaxFileSizeMb(event.target.value)}
+                placeholder="1024"
+              />
+            </div>
+            <label className="flex items-end gap-2 pb-2 text-sm">
+              <input
+                type="checkbox"
+                checked={requiresServerPack}
+                onChange={(event) => setRequiresServerPack(event.target.checked)}
+                className="accent-[color:var(--primary)]"
+              />
+              Server pack obligatoire
+            </label>
+          </div>
+          <div className="space-y-2">
+            <div className="text-sm font-medium">Loaders supportés</div>
+            <div className="flex flex-wrap gap-2">
+              {MODPACK_INSTALL_LOADERS.map((loader) => (
+                <button
+                  key={loader}
+                  type="button"
+                  onClick={() => toggleLoader(loader)}
+                  className={`rounded-full border px-3 py-1 text-sm ${
+                    supportedLoaders.includes(loader)
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-background/30 text-muted-foreground"
+                  }`}
+                >
+                  {loader}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Notes admin</label>
+            <Textarea
+              value={notes}
+              onChange={(event) => setNotes(event.target.value)}
+              rows={3}
+              placeholder="Script attendu dans l’image, contraintes, rollback manuel..."
+            />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Annuler
+          </Button>
+          <Button
+            disabled={save.isPending}
+            onClick={() => save.mutate()}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+          >
+            Sauvegarder
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 function AdminPlansSection({ plans }: { plans: AdminPlan[] }) {
   return (
@@ -1475,6 +1699,7 @@ function AdminGameCatalogSection({ data }: { data?: AdminGameCatalogData }) {
                 <TableHead>Jeu</TableHead>
                 <TableHead>Slug</TableHead>
                 <TableHead>Description</TableHead>
+                <TableHead>Installation modpack</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Action</TableHead>
               </TableRow>
@@ -1532,14 +1757,20 @@ function AdminGameCatalogSection({ data }: { data?: AdminGameCatalogData }) {
                     {template.description ?? "—"}
                   </TableCell>
                   <TableCell>
+                    <ModpackInstallBadge template={template} />
+                  </TableCell>
+                  <TableCell>
                     <StatusBadge status={template.is_active ? "active" : "disabled"} />
                   </TableCell>
-                  <TableCell className="text-right">
-                    <ToggleButton
-                      table="server_templates"
-                      id={template.id}
-                      active={template.is_active}
-                    />
+                  <TableCell>
+                    <div className="flex justify-end gap-2">
+                      <EditTemplateModpackInstallDialog template={template} />
+                      <ToggleButton
+                        table="server_templates"
+                        id={template.id}
+                        active={template.is_active}
+                      />
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}

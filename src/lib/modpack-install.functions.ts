@@ -51,6 +51,8 @@ type ServerOrderForJob = {
   user_id: string;
   status?: string | null;
   pterodactyl_server_id?: number | null;
+  pterodactyl_server_identifier?: string | null;
+  plans?: { disk_mb?: number | null; name?: string | null } | null;
   metadata?: Record<string, unknown> | null;
 };
 
@@ -241,6 +243,60 @@ type FullJobRow = ModpackJobRow & {
   logs?: JobLog[] | null;
 };
 
+function safeDownloadUrlForCommand(url: string) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") throw new Error("URL de téléchargement non sécurisée.");
+  if (/\s/.test(url)) throw new Error("URL de téléchargement invalide.");
+  return url;
+}
+
+function readInstallConfig(metadata: unknown) {
+  const root = asRecord(metadata);
+  const config = asRecord(root.modpack_install);
+  const enabled = config.enabled === true;
+  const commandTemplate =
+    typeof config.command_template === "string" ? config.command_template.trim() : "";
+  const supportedLoaders = Array.isArray(config.supported_loaders)
+    ? config.supported_loaders
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.toLowerCase())
+    : [];
+  return {
+    enabled,
+    commandTemplate,
+    maxFileSizeMb:
+      typeof config.max_file_size_mb === "number" && Number.isFinite(config.max_file_size_mb)
+        ? config.max_file_size_mb
+        : null,
+    requiresServerPack: config.requires_server_pack !== false,
+    supportedLoaders,
+  };
+}
+
+function buildInstallCommand(
+  template: string,
+  input: {
+    downloadUrl: string;
+    modpackName: string;
+    modpackId: number;
+    fileId: number;
+    serverPackFileId: number;
+  },
+) {
+  if (!template || template.length > 500) return null;
+  const downloadUrl = safeDownloadUrlForCommand(input.downloadUrl);
+  const modpackName = input.modpackName.replace(/[^a-zA-Z0-9._ -]/g, "").slice(0, 120);
+  const command = template
+    .replaceAll("{download_url}", downloadUrl)
+    .replaceAll("{modpack_name}", modpackName)
+    .replaceAll("{modpack_id}", String(input.modpackId))
+    .replaceAll("{file_id}", String(input.fileId))
+    .replaceAll("{server_pack_file_id}", String(input.serverPackFileId));
+  if (/\{[^{}]+\}/.test(command)) return null;
+  if (command.length > 1000) return null;
+  return command;
+}
+
 async function loadJobForProcessing(db: SupabaseAny, jobId: string) {
   const { data, error } = await db
     .from("modpack_install_jobs")
@@ -339,13 +395,15 @@ async function processJob(db: SupabaseAny, jobId: string) {
 
   const { data: serverOrderData, error: serverOrderError } = await db
     .from("server_orders")
-    .select("id, order_id, user_id, status, pterodactyl_server_id, metadata")
+    .select(
+      "id, order_id, user_id, status, pterodactyl_server_id, pterodactyl_server_identifier, metadata, plans(name, disk_mb)",
+    )
     .eq("id", workingJob.server_order_id)
     .maybeSingle();
   if (serverOrderError) throw new Error(serverOrderError.message);
   const serverOrder = serverOrderData as ServerOrderForJob | null;
   if (!serverOrder) return failJob(db, workingJob, "Serveur XNT introuvable.");
-  if (!serverOrder.pterodactyl_server_id) {
+  if (!serverOrder.pterodactyl_server_id || !serverOrder.pterodactyl_server_identifier) {
     return failJob(db, workingJob, "Serveur pas encore prêt pour une installation modpack.");
   }
 
@@ -390,13 +448,19 @@ async function processJob(db: SupabaseAny, jobId: string) {
   if (!version || !version.is_active || version.modpack_id !== modpack.id) {
     return failJob(db, workingJob, "Version modpack inactive ou invalide.");
   }
-  if (!version.server_pack_file_id && !workingJob.server_pack_file_id) {
-    return failJob(db, workingJob, "Aucun server pack disponible pour cette version.");
+  const serverPackFileId = version.server_pack_file_id ?? workingJob.server_pack_file_id;
+  const fileLength = version.file_length ?? workingJob.file_length;
+  const diskLimitBytes = (serverOrder.plans?.disk_mb ?? 0) * 1024 * 1024;
+  if (fileLength && diskLimitBytes && fileLength > diskLimitBytes * 0.8) {
+    return failJob(db, workingJob, "Server pack trop volumineux pour ce plan.");
+  }
+  if (fileLength && fileLength > 2_147_483_648) {
+    return failJob(db, workingJob, "Server pack trop volumineux pour le worker MVP.");
   }
 
   const { data: mappingsData, error: mappingsError } = await db
     .from("curseforge_template_mappings")
-    .select("id, loader, minecraft_version, is_active")
+    .select("id, loader, minecraft_version, is_active, server_templates(name, metadata)")
     .eq("modpack_id", modpack.id)
     .eq("is_active", true);
   if (mappingsError) throw new Error(mappingsError.message);
@@ -408,6 +472,7 @@ async function processJob(db: SupabaseAny, jobId: string) {
     id: string;
     loader?: string | null;
     minecraft_version?: string | null;
+    server_templates?: { name?: string | null; metadata?: Record<string, unknown> | null } | null;
   }>;
   const matchingMapping = mappings.find((mapping) => {
     const loaderOk = !mapping.loader || versionLoaders.has(mapping.loader.toLowerCase());
@@ -418,15 +483,129 @@ async function processJob(db: SupabaseAny, jobId: string) {
   if (!matchingMapping) {
     return failJob(db, workingJob, "Aucun template serveur actif ne correspond à cette version.");
   }
+  const installConfig = readInstallConfig(matchingMapping.server_templates?.metadata);
+  if (installConfig.requiresServerPack && !serverPackFileId) {
+    return failJob(db, workingJob, "Aucun server pack disponible pour cette version.");
+  }
+  if (!serverPackFileId) {
+    return failJob(db, workingJob, "Installation sans server pack non supportée dans ce MVP.");
+  }
+  if (
+    fileLength &&
+    installConfig.maxFileSizeMb &&
+    fileLength > installConfig.maxFileSizeMb * 1024 * 1024
+  ) {
+    return failJob(db, workingJob, "Server pack trop volumineux pour ce template.");
+  }
+  if (installConfig.supportedLoaders.length > 0) {
+    const supported = new Set(installConfig.supportedLoaders);
+    const hasSupportedLoader = [...versionLoaders].some((loader) => supported.has(loader));
+    if (!hasSupportedLoader) {
+      return failJob(db, workingJob, "Loader modpack non supporté par ce template.");
+    }
+  }
+
+  const extractingLogs = appendLog(
+    workingJob.logs,
+    "extracting",
+    "Server pack détecté. Récupération de l’URL de téléchargement côté serveur.",
+    {
+      serverPackFileId,
+      fileLength: fileLength ?? null,
+    },
+  );
+  await db
+    .from("modpack_install_jobs")
+    .update({
+      status: "extracting",
+      server_pack_file_id: serverPackFileId,
+      file_length: fileLength ?? workingJob.file_length,
+      logs: extractingLogs,
+    })
+    .eq("id", workingJob.id);
+
+  const { getCurseForgeDownloadUrl } = await import("@/lib/curseforge-download.server");
+  let downloadUrl: string;
+  try {
+    downloadUrl = await getCurseForgeDownloadUrl(
+      modpack.curseforge_mod_id ?? workingJob.curseforge_mod_id ?? 0,
+      serverPackFileId ?? 0,
+    );
+  } catch (error) {
+    return failJob(
+      db,
+      { ...workingJob, status: "extracting", logs: extractingLogs },
+      (error as Error).message,
+      "download_url_failed",
+    );
+  }
+
+  if (!installConfig.enabled || !installConfig.commandTemplate) {
+    return failJob(
+      db,
+      { ...workingJob, status: "extracting", logs: extractingLogs },
+      "Installation automatique réelle non activée pour ce template.",
+      "template_install_disabled",
+    );
+  }
+
+  const command = buildInstallCommand(installConfig.commandTemplate, {
+    downloadUrl,
+    modpackName: modpack.name ?? "modpack",
+    modpackId: modpack.curseforge_mod_id ?? workingJob.curseforge_mod_id ?? 0,
+    fileId: version.curseforge_file_id ?? workingJob.curseforge_file_id ?? 0,
+    serverPackFileId,
+  });
+  if (!command) {
+    return failJob(
+      db,
+      { ...workingJob, status: "extracting", logs: extractingLogs },
+      "Commande d’installation template invalide.",
+      "template_install_command_invalid",
+    );
+  }
+
+  const installingLogs = appendLog(
+    extractingLogs,
+    "installing",
+    "Commande d’installation contrôlée envoyée au serveur. L’URL n’est pas stockée.",
+    {
+      template: matchingMapping.server_templates?.name ?? null,
+    },
+  );
+  const { error: installingError } = await db
+    .from("modpack_install_jobs")
+    .update({
+      status: "installing",
+      logs: installingLogs,
+    })
+    .eq("id", workingJob.id);
+  if (installingError) throw new Error(installingError.message);
+
+  try {
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    await ptero.client(`/servers/${serverOrder.pterodactyl_server_identifier}/command`, {
+      method: "POST",
+      body: JSON.stringify({ command }),
+    });
+  } catch (error) {
+    return failJob(
+      db,
+      { ...workingJob, status: "installing", logs: installingLogs },
+      `Commande d’installation refusée: ${(error as Error).message}`,
+      "install_command_failed",
+    );
+  }
 
   const readyLogs = appendLog(
-    workingJob.logs,
+    installingLogs,
     "ready",
-    "Validation modpack OK. Installation réelle non activée dans cette phase.",
+    "Commande d’installation envoyée. Vérifiez la console serveur pour la progression réelle.",
     {
       modpack: modpack.name ?? null,
       version: version.display_name ?? null,
-      serverPackFileId: version.server_pack_file_id ?? workingJob.server_pack_file_id,
+      serverPackFileId,
       mappingId: matchingMapping.id,
     },
   );
@@ -437,15 +616,15 @@ async function processJob(db: SupabaseAny, jobId: string) {
       status: "ready",
       curseforge_mod_id: modpack.curseforge_mod_id ?? workingJob.curseforge_mod_id,
       curseforge_file_id: version.curseforge_file_id ?? workingJob.curseforge_file_id,
-      server_pack_file_id: version.server_pack_file_id ?? workingJob.server_pack_file_id,
-      file_length: version.file_length ?? workingJob.file_length,
+      server_pack_file_id: serverPackFileId,
+      file_length: fileLength ?? workingJob.file_length,
       finished_at: finishedAt,
       error_message: null,
       logs: readyLogs,
       metadata: {
-        phase: "4H",
-        install_enabled: false,
-        validation_only: true,
+        phase: "4I",
+        install_enabled: true,
+        command_dispatched: true,
         mapping_id: matchingMapping.id,
       },
     })
@@ -457,15 +636,15 @@ async function processJob(db: SupabaseAny, jobId: string) {
     orderId: workingJob.order_id,
     serverOrderId: workingJob.server_order_id,
     action: "modpack_install_ready",
-    description: "Installation modpack préparée.",
-    metadata: { jobId: workingJob.id, phase: "4H", validationOnly: true },
+    description: "Commande d’installation modpack envoyée.",
+    metadata: { jobId: workingJob.id, phase: "4I", commandDispatched: true },
   });
   await createJobNotification(db, {
     userId: workingJob.user_id,
     serverOrderId: workingJob.server_order_id,
     type: "modpack_install_ready",
-    title: "Installation modpack préparée",
-    body: "Validation modpack OK. L’installation réelle sera activée dans une prochaine phase.",
+    title: "Installation modpack lancée",
+    body: "Commande d’installation envoyée. Suivez la progression depuis la console serveur.",
   });
 
   return { ok: true as const, skipped: false, status: "ready" as const };

@@ -135,6 +135,17 @@ type AdminCatalogGame = {
   is_active: boolean;
   sort_order: number;
 };
+type AdminTemplateModpackInstallConfig = {
+  enabled?: boolean;
+  command_template?: string;
+  max_file_size_mb?: number | null;
+  requires_server_pack?: boolean;
+  supported_loaders?: string[];
+  notes?: string;
+};
+type AdminTemplateMetadata = {
+  modpack_install?: AdminTemplateModpackInstallConfig | null;
+};
 type AdminCatalogTemplate = {
   id: string;
   game_id: string;
@@ -146,6 +157,7 @@ type AdminCatalogTemplate = {
   internal_egg_id: number;
   docker_image: string | null;
   startup: string | null;
+  metadata: AdminTemplateMetadata | null;
   is_active: boolean;
   sort_order: number;
 };
@@ -556,7 +568,7 @@ export const adminListGameCatalog = createServerFn({ method: "GET" })
       db
         .from("server_templates")
         .select(
-          "id, game_id, slug, name, description, provider, internal_nest_id, internal_egg_id, docker_image, startup, is_active, sort_order",
+          "id, game_id, slug, name, description, provider, internal_nest_id, internal_egg_id, docker_image, startup, metadata, is_active, sort_order",
         )
         .order("sort_order", { ascending: true }),
       db
@@ -581,6 +593,86 @@ export const adminListGameCatalog = createServerFn({ method: "GET" })
       versions: (versions ?? []) as AdminCatalogVersion[],
       compatibilities: (compatibilities ?? []) as AdminCatalogCompatibility[],
     };
+  });
+
+const ALLOWED_MODPACK_INSTALL_PLACEHOLDERS = new Set([
+  "download_url",
+  "modpack_name",
+  "modpack_id",
+  "file_id",
+  "server_pack_file_id",
+]);
+
+const modpackInstallConfigInput = z.object({
+  templateId: z.string().uuid(),
+  config: z.object({
+    enabled: z.boolean(),
+    command_template: z.string().trim().max(1000).optional().default(""),
+    max_file_size_mb: z.number().int().min(1).max(4096).optional().nullable(),
+    requires_server_pack: z.boolean().optional().default(true),
+    supported_loaders: z.array(z.string().trim().min(1).max(32)).max(10).optional().default([]),
+    notes: z.string().trim().max(1000).optional().default(""),
+  }),
+});
+
+function assertAllowedInstallPlaceholders(command: string) {
+  const matches = command.matchAll(/\{([^{}]+)\}/g);
+  const unknown = new Set<string>();
+  for (const match of matches) {
+    const name = (match[1] ?? "").trim();
+    if (!ALLOWED_MODPACK_INSTALL_PLACEHOLDERS.has(name)) unknown.add(name);
+  }
+  if (unknown.size > 0) {
+    throw new Error(`Placeholders inconnus: ${Array.from(unknown).join(", ")}`);
+  }
+}
+
+export const adminUpdateTemplateModpackInstall = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => modpackInstallConfigInput.parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    assertAllowedInstallPlaceholders(data.config.command_template);
+    if (data.config.enabled && !data.config.command_template) {
+      throw new Error("Une commande contrôlée est requise pour activer l’installation modpack.");
+    }
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { data: currentData, error: currentError } = await db
+      .from("server_templates")
+      .select("id, metadata")
+      .eq("id", data.templateId)
+      .maybeSingle();
+    if (currentError) throw new Error(currentError.message);
+    const current = currentData as { id: string; metadata?: AdminTemplateMetadata | null } | null;
+    if (!current) throw new Error("Template serveur introuvable.");
+    const currentMetadata =
+      current.metadata && typeof current.metadata === "object" ? current.metadata : {};
+    const nextMetadata = {
+      ...currentMetadata,
+      modpack_install: {
+        enabled: data.config.enabled,
+        command_template: data.config.command_template,
+        max_file_size_mb: data.config.max_file_size_mb ?? null,
+        requires_server_pack: data.config.requires_server_pack,
+        supported_loaders: data.config.supported_loaders,
+        notes: data.config.notes,
+      },
+    };
+    const { error } = await db
+      .from("server_templates")
+      .update({ metadata: nextMetadata })
+      .eq("id", data.templateId);
+    if (error) throw new Error(error.message);
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.game_catalog.update_modpack_install",
+      entityType: "server_template",
+      entityId: data.templateId,
+      after: { modpack_install: nextMetadata.modpack_install },
+    });
+    return { ok: true };
   });
 
 export const adminToggleCatalogActive = createServerFn({ method: "POST" })
