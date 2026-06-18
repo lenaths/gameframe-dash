@@ -105,6 +105,23 @@ Build local :
 docker build -t ghcr.io/xntservers/yolks:java_17-modpack ./docker/minecraft-modpack
 ```
 
+Procedure de test staging :
+
+```text
+docs/modpack-staging-test.md
+```
+
+Test script optionnel sur une machine avec Docker :
+
+```sh
+CURSEFORGE_SERVER_PACK_URL="https://..." \
+CURSEFORGE_MOD_ID="123" \
+CURSEFORGE_FILE_ID="456" \
+CURSEFORGE_SERVER_PACK_FILE_ID="789" \
+MODPACK_NAME="Small Test Pack" \
+scripts/test-modpack-installer.sh
+```
+
 Metadata admin recommandee :
 
 ```json

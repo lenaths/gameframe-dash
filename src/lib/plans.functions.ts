@@ -51,8 +51,10 @@ const TEMPLATE_DESCRIPTIONS: Record<string, string> = {
 export function getTemplateKey(label: string) {
   const normalized = label.toLowerCase();
   if (normalized.includes("paper")) return "paper";
+  if (normalized.includes("neoforge")) return "neoforge";
   if (normalized.includes("forge")) return "forge";
   if (normalized.includes("fabric")) return "fabric";
+  if (normalized.includes("quilt")) return "quilt";
   if (normalized.includes("purpur")) return "purpur";
   if (normalized.includes("spigot")) return "spigot";
   if (normalized.includes("vanilla")) return "vanilla";

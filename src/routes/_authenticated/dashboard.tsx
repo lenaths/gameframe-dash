@@ -177,6 +177,12 @@ type DashboardServer = {
   next_renewal_at?: string | null;
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
+  minecraft_settings?: {
+    server_type?: string | null;
+    minecraft_version?: string | null;
+    max_players?: number | null;
+    max_players_applied?: boolean;
+  } | null;
   modpack_install_job?: ModpackInstallJob | null;
   plans?: {
     game?: string | null;
@@ -347,6 +353,22 @@ function ServerCard({
         <ResourcePill label="RAM" value={`${((s.plans?.ram_mb ?? 0) / 1024).toFixed(0)} GB`} />
         <ResourcePill label="CPU" value={`${s.plans?.cpu_percent ?? 0}%`} />
         <ResourcePill label="Disque" value={`${((s.plans?.disk_mb ?? 0) / 1024).toFixed(0)} GB`} />
+        <ResourcePill
+          label="Joueurs"
+          value={
+            s.minecraft_settings?.max_players
+              ? `${s.minecraft_settings.max_players} max`
+              : "Géré auto"
+          }
+        />
+        <ResourcePill
+          label="Version"
+          value={s.minecraft_settings?.minecraft_version ?? "Gérée auto"}
+        />
+        <ResourcePill
+          label="Type"
+          value={s.minecraft_settings?.server_type ?? template ?? "Serveur Minecraft"}
+        />
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
         <Button asChild size="sm" variant="outline">

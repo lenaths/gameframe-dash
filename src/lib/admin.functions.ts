@@ -36,6 +36,7 @@ type OrderRow = {
   stripe_checkout_session_id: string | null;
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
+  minecraft_settings?: MinecraftSettings | null;
   created_at: string;
   plans?: PlanRef;
 };
@@ -48,6 +49,7 @@ type ServerLinkRow = {
   pterodactyl_server_identifier: string | null;
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
+  minecraft_settings?: MinecraftSettings | null;
 };
 type ServerDetailRow = ServerLinkRow & {
   user_id: string | null;
@@ -55,6 +57,14 @@ type ServerDetailRow = ServerLinkRow & {
   server_name: string;
   created_at: string;
   plans?: PlanRef;
+};
+type MinecraftSettings = {
+  server_type: string | null;
+  minecraft_version: string | null;
+  max_players: number | null;
+  max_players_applied: boolean;
+  extra_price_cents: number | null;
+  total_price_cents: number | null;
 };
 
 function selectedTemplateLabel(metadata: unknown) {
@@ -79,6 +89,44 @@ function selectedModpackLabel(metadata: unknown) {
   return typeof selectedModpack?.name === "string" && selectedModpack.name.trim()
     ? selectedModpack.name
     : null;
+}
+
+function selectedMinecraftSettings(metadata: unknown): MinecraftSettings | null {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const settings =
+    root.minecraft_settings && typeof root.minecraft_settings === "object"
+      ? (root.minecraft_settings as Record<string, unknown>)
+      : root;
+  const rawMax = settings.max_players ?? root.max_players;
+  const maxPlayers =
+    typeof rawMax === "number"
+      ? rawMax
+      : typeof rawMax === "string" && rawMax.trim()
+        ? Number(rawMax)
+        : null;
+  return {
+    server_type:
+      typeof settings.server_type === "string"
+        ? settings.server_type
+        : selectedTemplateLabel(metadata),
+    minecraft_version:
+      typeof settings.minecraft_version === "string" ? settings.minecraft_version : null,
+    max_players: Number.isFinite(maxPlayers) ? Math.round(Number(maxPlayers)) : null,
+    max_players_applied: settings.max_players_applied === true,
+    extra_price_cents:
+      root.player_pricing &&
+      typeof root.player_pricing === "object" &&
+      typeof (root.player_pricing as Record<string, unknown>).extra_price_cents === "number"
+        ? ((root.player_pricing as Record<string, unknown>).extra_price_cents as number)
+        : null,
+    total_price_cents:
+      root.player_pricing &&
+      typeof root.player_pricing === "object" &&
+      typeof (root.player_pricing as Record<string, unknown>).total_price_cents === "number"
+        ? ((root.player_pricing as Record<string, unknown>).total_price_cents as number)
+        : null,
+  };
 }
 type PaymentDetailRow = {
   id: string;
@@ -1252,6 +1300,7 @@ export const adminListOrdersDetailed = createServerFn({ method: "GET" })
         ...order,
         selected_template_label: selectedTemplateLabel(metadata),
         selected_modpack_label: selectedModpackLabel(metadata),
+        minecraft_settings: selectedMinecraftSettings(metadata),
       }),
     );
     const profilesById = await getProfilesById(orderRows.map((order) => order.user_id));
@@ -1261,6 +1310,7 @@ export const adminListOrdersDetailed = createServerFn({ method: "GET" })
           ...server,
           selected_template_label: selectedTemplateLabel(metadata),
           selected_modpack_label: selectedModpackLabel(metadata),
+          minecraft_settings: selectedMinecraftSettings(metadata),
         }))
         .filter((server) => server.order_id)
         .map((server) => [server.order_id as string, server]),
@@ -1294,6 +1344,7 @@ export const adminListServersDetailed = createServerFn({ method: "GET" })
         ...server,
         selected_template_label: selectedTemplateLabel(metadata),
         selected_modpack_label: selectedModpackLabel(metadata),
+        minecraft_settings: selectedMinecraftSettings(metadata),
       }),
     );
     const profilesById = await getProfilesById(servers.map((server) => server.user_id));

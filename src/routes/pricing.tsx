@@ -1,15 +1,13 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
 import { getTemplateDescription, listPlans } from "@/lib/plans.functions";
-import { createCheckoutSession } from "@/lib/stripe.functions";
 import { useAuth } from "@/hooks/use-auth";
-import { toast } from "sonner";
 
 export const Route = createFileRoute("/pricing")({
   head: () => ({
@@ -27,20 +25,11 @@ export const Route = createFileRoute("/pricing")({
 
 function Pricing() {
   const fetchPlans = useServerFn(listPlans);
-  const startCheckout = useServerFn(createCheckoutSession);
   const { user } = useAuth();
   const navigate = useNavigate();
   const { data, isLoading } = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
   const [game, setGame] = useState<string>("All");
   const [selectedTemplates, setSelectedTemplates] = useState<Record<string, number>>({});
-  const checkout = useMutation({
-    mutationFn: (input: { planId: string; variantIndex?: number }) =>
-      startCheckout({ data: input }),
-    onSuccess: ({ url }) => {
-      window.location.assign(url);
-    },
-    onError: (error: Error) => toast.error(error.message),
-  });
 
   const games = useMemo(
     () => ["All", ...Array.from(new Set((data?.plans ?? []).map((p) => p.game)))],
@@ -142,19 +131,33 @@ function Pricing() {
                     </div>
                   </div>
                 )}
+                <div className="mt-6 rounded-lg border border-primary/15 bg-background/35 p-4">
+                  <div className="text-xs uppercase tracking-wider text-primary">
+                    Capacité joueurs
+                  </div>
+                  <div className="mt-2 text-sm text-muted-foreground">
+                    Inclus : {getIncludedPlayers(p.name, p.ram_mb)} joueurs · Maximum :{" "}
+                    {getMaxPlayersLimit(p.name, p.ram_mb)}
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    Configure le nombre exact de joueurs avant paiement.
+                  </div>
+                </div>
                 <Button
                   className="mt-6 bg-primary text-primary-foreground shadow-[0_0_28px_rgba(0,191,255,0.22)] hover:bg-primary/90"
-                  disabled={checkout.isPending}
                   onClick={() => {
                     if (!user) navigate({ to: "/auth", search: { redirect: "/pricing" } as never });
                     else
-                      checkout.mutate({
-                        planId: p.id,
-                        variantIndex: selectedTemplates[p.id] ?? 0,
+                      navigate({
+                        to: "/deploy",
+                        search: {
+                          plan: p.id,
+                          variant: selectedTemplates[p.id] ?? 0,
+                        } as never,
                       });
                   }}
                 >
-                  {checkout.isPending ? "Redirecting…" : `Commander ${p.name}`}
+                  Configurer mon serveur
                 </Button>
               </div>
             ))}
@@ -168,4 +171,26 @@ function Pricing() {
       <SiteFooter />
     </div>
   );
+}
+
+function getIncludedPlayers(name: string, ramMb: number) {
+  const lower = name.toLowerCase();
+  if (lower.includes("netherite")) return 80;
+  if (lower.includes("diamond")) return 40;
+  if (lower.includes("iron")) return 20;
+  if (ramMb >= 16384) return 80;
+  if (ramMb >= 8192) return 40;
+  if (ramMb >= 4096) return 20;
+  return 10;
+}
+
+function getMaxPlayersLimit(name: string, ramMb: number) {
+  const lower = name.toLowerCase();
+  if (lower.includes("netherite")) return 100;
+  if (lower.includes("diamond")) return 60;
+  if (lower.includes("iron")) return 30;
+  if (ramMb >= 16384) return 100;
+  if (ramMb >= 8192) return 60;
+  if (ramMb >= 4096) return 30;
+  return 10;
 }

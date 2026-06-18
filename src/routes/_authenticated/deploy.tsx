@@ -20,6 +20,7 @@ import { toast } from "sonner";
 
 const searchSchema = z.object({
   plan: z.string().optional(),
+  variant: z.coerce.number().int().min(0).optional(),
   type: z.enum(["classic", "modpack"]).optional(),
   modpack: z.string().optional(),
   version: z.string().optional(),
@@ -34,6 +35,7 @@ export const Route = createFileRoute("/_authenticated/deploy")({
 function Deploy() {
   const {
     plan: preselected,
+    variant: preselectedVariant,
     type: preselectedType,
     modpack: preselectedModpack,
     version: preselectedVersion,
@@ -53,7 +55,7 @@ function Deploy() {
   });
   const [planId, setPlanId] = useState<string>(preselected ?? "");
   const [name, setName] = useState("");
-  const [variantIndex, setVariantIndex] = useState(0);
+  const [variantIndex, setVariantIndex] = useState(preselectedVariant ?? 0);
   const [env, setEnv] = useState<Record<string, string>>({});
   const [deployType, setDeployType] = useState<"classic" | "modpack">(
     preselectedType === "modpack" ? "modpack" : "classic",
@@ -61,6 +63,7 @@ function Deploy() {
   const [modpackSearch, setModpackSearch] = useState("");
   const [selectedModpackId, setSelectedModpackId] = useState(preselectedModpack ?? "");
   const [selectedVersionId, setSelectedVersionId] = useState(preselectedVersion ?? "");
+  const [maxPlayers, setMaxPlayers] = useState(10);
 
   const opts = useQuery({
     queryKey: ["deploy-options", planId],
@@ -110,9 +113,10 @@ function Deploy() {
       startCheckout({
         data: {
           planId,
-          serverName: name.trim() || undefined,
+          serverName: name.trim(),
           variantIndex,
           environment: env,
+          maxPlayers,
           selectedModpack:
             deployType === "modpack" && selectedModpackId && selectedVersionId
               ? { modpackId: selectedModpackId, versionId: selectedVersionId }
@@ -125,7 +129,23 @@ function Deploy() {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const variants = opts.data?.variants ?? [];
+  const variants = useMemo(() => opts.data?.variants ?? [], [opts.data?.variants]);
+  const serverTypeOptions = useMemo(
+    () =>
+      [
+        { key: "vanilla", label: "Vanilla", description: "Expérience officielle Minecraft." },
+        { key: "paper", label: "Paper", description: "Performance optimisée pour plugins." },
+        { key: "purpur", label: "Purpur", description: "Réglages et performances avancés." },
+        { key: "fabric", label: "Fabric", description: "Mods Fabric légers et modernes." },
+        { key: "forge", label: "Forge", description: "Mods Forge classiques." },
+        { key: "neoforge", label: "NeoForge", description: "Mods NeoForge récents." },
+        { key: "quilt", label: "Quilt", description: "Mods Quilt." },
+      ].map((option) => ({
+        ...option,
+        variant: variants.find((variant) => variant.templateKey === option.key),
+      })),
+    [variants],
+  );
   const filteredModpacks = useMemo(() => {
     const query = modpackSearch.trim().toLowerCase();
     return (modpacksQ.data?.modpacks ?? []).filter((modpack) => {
@@ -141,14 +161,35 @@ function Deploy() {
     () => compatiblePlansQ.data?.plans ?? [],
     [compatiblePlansQ.data?.plans],
   );
+  const selectedPlan = (
+    deployType === "modpack" ? compatiblePlans.map((item) => item.plan) : (plansData?.plans ?? [])
+  ).find((plan) => plan.id === planId);
+  const maxPlayersLimit = selectedPlan ? getMaxPlayersLimit(selectedPlan.ram_mb) : 10;
+  const recommendedPlayers = selectedPlan ? getRecommendedPlayers(selectedPlan.ram_mb) : 10;
+  const playerPrice = selectedPlan
+    ? getPlayerPricing(
+        selectedPlan.name,
+        selectedPlan.ram_mb,
+        selectedPlan.price_monthly_cents,
+        maxPlayers,
+      )
+    : null;
   useEffect(() => {
     if (deployType !== "modpack" || planId || compatiblePlans.length === 0) return;
     const firstPlan = compatiblePlans[0];
     setPlanId(firstPlan.plan.id);
     setVariantIndex(firstPlan.variantIndex);
   }, [compatiblePlans, deployType, planId]);
+  useEffect(() => {
+    if (!selectedPlan) return;
+    setMaxPlayers((current) => {
+      if (current < 1 || current > maxPlayersLimit) return recommendedPlayers;
+      return current;
+    });
+  }, [maxPlayersLimit, recommendedPlayers, selectedPlan]);
   const canSubmit =
     Boolean(planId) &&
+    name.trim().length >= 2 &&
     !checkout.isPending &&
     !opts.isLoading &&
     (deployType === "classic" || Boolean(selectedModpackId && selectedVersionId));
@@ -186,6 +227,9 @@ function Deploy() {
               onChange={(e) => setName(e.target.value)}
               placeholder="The Adventurer's Guild"
             />
+            <p className="text-xs text-muted-foreground">
+              Obligatoire. 2 à 40 caractères, visible dans ton espace XNT.
+            </p>
           </div>
 
           <div className="space-y-2">
@@ -383,42 +427,40 @@ function Deploy() {
 
           {planId && deployType === "classic" && (
             <div className="space-y-3">
-              <Label>Template serveur</Label>
+              <Label>Type serveur Minecraft</Label>
               {opts.isLoading && (
                 <div className="text-sm text-muted-foreground">Chargement des templates…</div>
               )}
               {opts.error && (
                 <div className="text-sm text-destructive">{(opts.error as Error).message}</div>
               )}
-              {variants.length > 0 && (
-                <div className="grid sm:grid-cols-2 gap-2">
-                  {variants.map((v) => (
-                    <button
-                      type="button"
-                      key={v.index}
-                      onClick={() => setVariantIndex(v.index)}
-                      disabled={!!v.error}
-                      className={`text-left rounded-lg border p-3 transition-colors ${
-                        v.error
-                          ? "border-destructive/40 bg-destructive/10 cursor-not-allowed"
-                          : variantIndex === v.index
-                            ? "border-primary bg-primary/10"
-                            : "border-border/70 bg-background/20 hover:border-primary/40"
-                      }`}
-                    >
-                      <div className="font-medium">
-                        {v.label}
-                        {v.versionLabel ? (
-                          <span className="text-muted-foreground"> · {v.versionLabel}</span>
-                        ) : null}
-                      </div>
-                      <div
-                        className={`text-xs line-clamp-2 mt-0.5 ${v.error ? "text-destructive" : "text-muted-foreground"}`}
+              {serverTypeOptions.length > 0 && (
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {serverTypeOptions.map((option) => {
+                    const v = option.variant;
+                    return (
+                      <button
+                        type="button"
+                        key={option.key}
+                        onClick={() => v && setVariantIndex(v.index)}
+                        disabled={!v || !!v.error}
+                        className={`text-left rounded-lg border p-3 transition-colors ${
+                          !v || v.error
+                            ? "border-destructive/40 bg-destructive/10 cursor-not-allowed"
+                            : variantIndex === v.index
+                              ? "border-primary bg-primary/10"
+                              : "border-border/70 bg-background/20 hover:border-primary/40"
+                        }`}
                       >
-                        {v.error || v.templateDescription}
-                      </div>
-                    </button>
-                  ))}
+                        <div className="font-medium">{option.label}</div>
+                        <div
+                          className={`text-xs line-clamp-2 mt-0.5 ${!v || v.error ? "text-destructive" : "text-muted-foreground"}`}
+                        >
+                          {v?.error || v?.templateDescription || option.description}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -435,6 +477,67 @@ function Deploy() {
                     Sélection de version bientôt disponible pour ce template.
                   </p>
                 )}
+              </div>
+            </div>
+          )}
+
+          {selectedPlan && (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Label htmlFor="maxPlayers">Nombre de joueurs maximum</Label>
+                <span className="rounded-full border border-primary/25 bg-primary/10 px-3 py-1 text-sm text-primary">
+                  {maxPlayers} joueur{maxPlayers > 1 ? "s" : ""}
+                </span>
+              </div>
+              <div className="rounded-lg border border-primary/15 bg-background/40 p-4">
+                <input
+                  id="maxPlayers"
+                  type="range"
+                  min={1}
+                  max={maxPlayersLimit}
+                  value={maxPlayers}
+                  onChange={(event) => setMaxPlayers(Number(event.target.value))}
+                  className="w-full accent-[color:var(--primary)]"
+                />
+                <div className="mt-3 flex items-center gap-3">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={maxPlayersLimit}
+                    value={maxPlayers}
+                    onChange={(event) => {
+                      const value = Number(event.target.value);
+                      setMaxPlayers(Math.min(maxPlayersLimit, Math.max(1, value || 1)));
+                    }}
+                    className="w-28"
+                  />
+                  <p className="text-sm text-muted-foreground">
+                    Inclus : {playerPrice?.includedPlayers ?? recommendedPlayers}. Limite :{" "}
+                    {maxPlayersLimit}. Cette valeur sera appliquée par les templates XNT
+                    compatibles.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {selectedPlan && playerPrice && (
+            <div className="rounded-xl border border-primary/20 bg-primary/10 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wider text-primary">Total mensuel</div>
+                  <div className="mt-1 text-sm text-muted-foreground">
+                    Plan {selectedPlan.name} · {maxPlayers} joueurs maximum
+                  </div>
+                </div>
+                <div className="font-display text-3xl font-bold text-primary">
+                  ${(playerPrice.totalCents / 100).toFixed(2)}
+                  <span className="text-sm font-sans text-muted-foreground">/mo</span>
+                </div>
+              </div>
+              <div className="mt-3 text-sm text-muted-foreground">
+                Inclus : {playerPrice.includedPlayers} joueurs · Supplément joueurs : $
+                {(playerPrice.extraCents / 100).toFixed(2)}/mo
               </div>
             </div>
           )}
@@ -460,4 +563,44 @@ function Deploy() {
       </div>
     </div>
   );
+}
+
+function getMaxPlayersLimit(ramMb: number) {
+  if (ramMb >= 16384) return 100;
+  if (ramMb >= 8192) return 60;
+  if (ramMb >= 4096) return 30;
+  return 10;
+}
+
+function getRecommendedPlayers(ramMb: number) {
+  if (ramMb >= 16384) return 80;
+  if (ramMb >= 8192) return 40;
+  if (ramMb >= 4096) return 20;
+  return 10;
+}
+
+function getPlayerPricing(name: string, ramMb: number, baseCents: number, maxPlayers: number) {
+  const lower = name.toLowerCase();
+  const includedPlayers = lower.includes("netherite")
+    ? 80
+    : lower.includes("diamond")
+      ? 40
+      : lower.includes("iron")
+        ? 20
+        : getRecommendedPlayers(ramMb);
+  const stepCents = lower.includes("netherite")
+    ? 500
+    : lower.includes("diamond")
+      ? 200
+      : lower.includes("iron")
+        ? 100
+        : 0;
+  const extraPlayers = Math.max(0, maxPlayers - includedPlayers);
+  const extraCents = extraPlayers > 0 ? stepCents : 0;
+  return {
+    includedPlayers,
+    extraPlayers,
+    extraCents,
+    totalCents: baseCents + extraCents,
+  };
 }

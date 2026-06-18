@@ -47,6 +47,7 @@ type ProvisionServerOrderInput = {
   serverName: string;
   variantIndex?: number;
   environment?: Record<string, string>;
+  maxPlayers?: number | null;
   fallbackEmail?: string | null;
 };
 
@@ -96,6 +97,24 @@ function normalizeEnvironment(input: Record<string, unknown>) {
     }
   }
   return env;
+}
+
+function normalizeMaxPlayers(value: unknown, fallback = 10) {
+  const parsed =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(200, Math.max(1, Math.round(parsed)));
+}
+
+function findMaxPlayersVariable(allowedVariables: Set<string>) {
+  const candidates = [
+    "MAX_PLAYERS",
+    "MINECRAFT_MAX_PLAYERS",
+    "SERVER_MAX_PLAYERS",
+    "PLAYERS",
+    "MAXPLAYERS",
+  ];
+  return candidates.find((candidate) => allowedVariables.has(candidate)) ?? null;
 }
 
 function filterEnvironmentForEgg(
@@ -160,6 +179,19 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
     metadata.selected_modpack_version && typeof metadata.selected_modpack_version === "object"
       ? (metadata.selected_modpack_version as Record<string, unknown>)
       : null;
+  const maxPlayers = normalizeMaxPlayers(
+    metadata.max_players ??
+      (metadata.minecraft_settings &&
+      typeof metadata.minecraft_settings === "object" &&
+      "max_players" in metadata.minecraft_settings
+        ? (metadata.minecraft_settings as Record<string, unknown>).max_players
+        : undefined),
+    10,
+  );
+  const playerPricing =
+    metadata.player_pricing && typeof metadata.player_pricing === "object"
+      ? (metadata.player_pricing as Record<string, unknown>)
+      : null;
 
   return {
     variantIndex,
@@ -170,6 +202,8 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
     templateSource,
     selectedModpack,
     selectedModpackVersion,
+    maxPlayers,
+    playerPricing,
   };
 }
 
@@ -402,7 +436,20 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
       allowedVariables,
       `server ${input.serverName}`,
     );
-    const env = normalizeEnvironment({ ...eggDefaults, ...planEnv, ...userEnv });
+    const maxPlayersVariable = findMaxPlayersVariable(allowedVariables);
+    const env = normalizeEnvironment({
+      ...eggDefaults,
+      ...planEnv,
+      ...userEnv,
+      ...(maxPlayersVariable && input.maxPlayers
+        ? { [maxPlayersVariable]: String(normalizeMaxPlayers(input.maxPlayers)) }
+        : {}),
+    });
+    if (input.maxPlayers && !maxPlayersVariable) {
+      console.warn(
+        `[Provisioning] max_players=${input.maxPlayers} stored but not applied: template has no supported max players variable.`,
+      );
+    }
 
     const payload = {
       name: input.serverName,
@@ -507,6 +554,11 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
       pterodactylServerIdentifier: created.attributes.identifier,
       error: installError,
       reused: false,
+      minecraftSettings: {
+        maxPlayers: input.maxPlayers ? normalizeMaxPlayers(input.maxPlayers) : null,
+        maxPlayersApplied: Boolean(maxPlayersVariable && input.maxPlayers),
+        maxPlayersVariable,
+      },
     };
   } catch (error) {
     const message = cleanProvisioningError(error);
@@ -621,6 +673,16 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
           ...(selection.selectedModpackVersion
             ? { selected_modpack_version: selection.selectedModpackVersion }
             : {}),
+          server_type: selection.templateLabel,
+          minecraft_version: selection.templateVersion ?? "managed",
+          max_players: selection.maxPlayers,
+          ...(selection.playerPricing ? { player_pricing: selection.playerPricing } : {}),
+          minecraft_settings: {
+            server_type: selection.templateLabel,
+            minecraft_version: selection.templateVersion ?? "managed",
+            max_players: selection.maxPlayers,
+            max_players_applied: false,
+          },
         },
       })
       .select("id")
@@ -677,6 +739,16 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
         ...(selection.selectedModpackVersion
           ? { selected_modpack_version: selection.selectedModpackVersion }
           : {}),
+        server_type: selection.templateLabel,
+        minecraft_version: selection.templateVersion ?? "managed",
+        max_players: selection.maxPlayers,
+        ...(selection.playerPricing ? { player_pricing: selection.playerPricing } : {}),
+        minecraft_settings: {
+          server_type: selection.templateLabel,
+          minecraft_version: selection.templateVersion ?? "managed",
+          max_players: selection.maxPlayers,
+          max_players_applied: false,
+        },
       },
     })
     .eq("id", serverOrderId);
@@ -688,7 +760,41 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     serverName,
     variantIndex: selection.variantIndex,
     environment: selection.environment,
+    maxPlayers: selection.maxPlayers,
   });
+
+  await db
+    .from("server_orders")
+    .update({
+      metadata: {
+        selected_template: {
+          index: selection.variantIndex,
+          label: selection.templateLabel,
+          version: selection.templateVersion,
+          source: selection.templateSource,
+        },
+        ...(selection.selectedModpack ? { selected_modpack: selection.selectedModpack } : {}),
+        ...(selection.selectedModpackVersion
+          ? { selected_modpack_version: selection.selectedModpackVersion }
+          : {}),
+        server_type: selection.templateLabel,
+        minecraft_version: selection.templateVersion ?? "managed",
+        max_players: selection.maxPlayers,
+        ...(selection.playerPricing ? { player_pricing: selection.playerPricing } : {}),
+        minecraft_settings: {
+          server_type: selection.templateLabel,
+          minecraft_version: selection.templateVersion ?? "managed",
+          max_players: selection.maxPlayers,
+          max_players_applied:
+            "minecraftSettings" in result
+              ? Boolean(result.minecraftSettings?.maxPlayersApplied)
+              : false,
+          max_players_variable:
+            "minecraftSettings" in result ? result.minecraftSettings?.maxPlayersVariable : null,
+        },
+      },
+    })
+    .eq("id", serverOrderId);
 
   if (selection.selectedModpack && result.ok) {
     try {

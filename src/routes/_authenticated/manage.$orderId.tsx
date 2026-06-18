@@ -62,6 +62,30 @@ const BLOCKED_EDITOR_EXTENSIONS = new Set([
   ".sqlite",
   ".db",
 ]);
+const MANAGED_FILE_MESSAGE =
+  "Ce fichier est géré par XNTServers. Modifie ces paramètres depuis l’onglet Minecraft.";
+const PROTECTED_FILE_BASENAMES = new Set([
+  "server.properties",
+  "config.yml",
+  "paper.yml",
+  "paper-global.yml",
+  "paper-world-defaults.yml",
+  "spigot.yml",
+  "bukkit.yml",
+  "commands.yml",
+  "permissions.yml",
+  "velocity.toml",
+  "waterfall.yml",
+  "fabric-server-launcher.properties",
+  "forge-server.toml",
+  "eula.txt",
+  "xnt-install-modpack",
+  ".env",
+  ".env.local",
+  ".env.production",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+]);
 
 const WS_ERROR_MESSAGE =
   "Console temps réel inaccessible. Le service serveur est temporairement indisponible.";
@@ -317,6 +341,7 @@ function ServerDetail() {
                 <TabsTrigger value="files">Files</TabsTrigger>
                 <TabsTrigger value="backups">Backups</TabsTrigger>
                 <TabsTrigger value="network">Network</TabsTrigger>
+                <TabsTrigger value="minecraft">Minecraft</TabsTrigger>
                 <TabsTrigger value="startup">Paramètres avancés</TabsTrigger>
                 <TabsTrigger value="settings">Settings</TabsTrigger>
                 <TabsTrigger value="info">SFTP &amp; Info</TabsTrigger>
@@ -339,6 +364,24 @@ function ServerDetail() {
                   orderId={orderId}
                   serverName={order.server_name}
                   identifier={order.pterodactyl_server_identifier ?? null}
+                />
+              </TabsContent>
+              <TabsContent value="minecraft" className="mt-4">
+                <MinecraftSettingsTab
+                  settings={
+                    (
+                      order as {
+                        minecraft_settings?: {
+                          server_type?: string | null;
+                          minecraft_version?: string | null;
+                          max_players?: number | null;
+                          max_players_applied?: boolean;
+                        } | null;
+                      }
+                    ).minecraft_settings ?? null
+                  }
+                  serverName={order.server_name}
+                  planName={order.plans?.name ?? null}
                 />
               </TabsContent>
               <TabsContent value="startup" className="mt-4">
@@ -1171,7 +1214,11 @@ function FilesTab({ orderId }: { orderId: string }) {
     return idx <= 0 ? "/" : trimmed.slice(0, idx);
   }, [dir]);
 
-  const openFile = async (file: { name: string; size: number }) => {
+  const openFile = async (file: { name: string; size: number; is_managed?: boolean }) => {
+    if (file.is_managed || hasProtectedFileName(file.name)) {
+      toast.warning(MANAGED_FILE_MESSAGE);
+      return;
+    }
     if (file.size > MAX_EDITABLE_FILE_SIZE_BYTES || hasBlockedEditorExtension(file.name)) {
       toast.warning("Ce fichier ne peut pas être ouvert dans l’éditeur.");
       return;
@@ -1287,34 +1334,52 @@ function FilesTab({ orderId }: { orderId: string }) {
         ) : (list.data?.files ?? []).length === 0 ? (
           <div className="p-6 text-sm text-muted-foreground">Empty directory.</div>
         ) : (
-          list.data!.files.map((f) => (
-            <div key={f.name} className="flex items-center gap-3 p-3 hover:bg-muted/30">
-              <button
-                type="button"
-                className="flex items-center gap-2 flex-1 text-left truncate"
-                onClick={() => (f.is_file ? openFile(f) : setDir(joinPath(dir, f.name)))}
-              >
-                {f.is_file ? (
-                  <FileIcon className="h-4 w-4 text-muted-foreground shrink-0" />
-                ) : (
-                  <Folder className="h-4 w-4 text-primary shrink-0" />
-                )}
-                <span className="font-mono text-sm truncate">{f.name}</span>
-              </button>
-              <span className="text-xs text-muted-foreground w-24 text-right">
-                {f.is_file ? formatSize(f.size) : "—"}
-              </span>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  if (confirm(`Delete ${f.name}?`)) del.mutate(f.name);
-                }}
-              >
-                <Trash2 className="h-4 w-4 text-destructive" />
-              </Button>
-            </div>
-          ))
+          list.data!.files.map((f) => {
+            const isManaged = Boolean(
+              (f as { is_managed?: boolean }).is_managed || hasProtectedFileName(f.name),
+            );
+            return (
+              <div key={f.name} className="flex items-center gap-3 p-3 hover:bg-muted/30">
+                <button
+                  type="button"
+                  className="flex items-center gap-2 flex-1 text-left truncate"
+                  onClick={() => (f.is_file ? openFile(f) : setDir(joinPath(dir, f.name)))}
+                >
+                  {f.is_file ? (
+                    <FileIcon className="h-4 w-4 text-muted-foreground shrink-0" />
+                  ) : (
+                    <Folder className="h-4 w-4 text-primary shrink-0" />
+                  )}
+                  <span className="font-mono text-sm truncate">{f.name}</span>
+                  {isManaged && (
+                    <Badge
+                      variant="outline"
+                      className="border-primary/30 bg-primary/10 text-primary"
+                    >
+                      Géré par XNT
+                    </Badge>
+                  )}
+                </button>
+                <span className="text-xs text-muted-foreground w-24 text-right">
+                  {f.is_file ? formatSize(f.size) : "—"}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={isManaged}
+                  onClick={() => {
+                    if (isManaged) {
+                      toast.warning(MANAGED_FILE_MESSAGE);
+                      return;
+                    }
+                    if (confirm(`Delete ${f.name}?`)) del.mutate(f.name);
+                  }}
+                >
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </Button>
+              </div>
+            );
+          })
         )}
       </div>
     </div>
@@ -1334,6 +1399,13 @@ function formatSize(b: number) {
 function hasBlockedEditorExtension(name: string) {
   const normalized = name.toLowerCase();
   return [...BLOCKED_EDITOR_EXTENSIONS].some((extension) => normalized.endsWith(extension));
+}
+function hasProtectedFileName(name: string) {
+  const normalized = name.toLowerCase();
+  return (
+    PROTECTED_FILE_BASENAMES.has(normalized) ||
+    /(secret|token|private[_-]?key|api[_-]?key|credentials?)/i.test(normalized)
+  );
 }
 
 /* ---------------- Backups ---------------- */
@@ -1828,6 +1900,70 @@ function buildConnectionCopyLines(connection: ConnectionInfo, xntServerId: strin
   if (connection.sftpUsername) lines.push(`Utilisateur SFTP : ${connection.sftpUsername}`);
   lines.push(`Identifiant serveur : ${xntServerId}`);
   return lines;
+}
+
+/* ---------------- Minecraft Settings ---------------- */
+
+function MinecraftSettingsTab({
+  settings,
+  serverName,
+  planName,
+}: {
+  settings: {
+    server_type?: string | null;
+    minecraft_version?: string | null;
+    max_players?: number | null;
+    max_players_applied?: boolean;
+  } | null;
+  serverName: string;
+  planName: string | null;
+}) {
+  const maxPlayers = settings?.max_players ?? null;
+  return (
+    <div className="xnt-card space-y-5 rounded-xl p-6">
+      <div>
+        <h3 className="font-display text-lg font-semibold">Paramètres Minecraft</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Les fichiers critiques sont gérés par XNTServers. Les réglages Minecraft modifiables
+          seront progressivement exposés ici.
+        </p>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        <InfoLine label="Nom serveur" value={serverName} />
+        <InfoLine label="Plan" value={planName ?? "Plan indisponible"} />
+        <InfoLine label="Type serveur" value={settings?.server_type ?? "Géré automatiquement"} />
+        <InfoLine
+          label="Version Minecraft"
+          value={settings?.minecraft_version ?? "Gérée automatiquement"}
+        />
+        <InfoLine
+          label="Joueurs maximum"
+          value={maxPlayers ? `${maxPlayers} joueur${maxPlayers > 1 ? "s" : ""}` : "Préparé"}
+        />
+        <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
+          <div className="text-xs uppercase tracking-wider text-muted-foreground">
+            Application serveur
+          </div>
+          <Badge
+            variant="outline"
+            className={
+              settings?.max_players_applied
+                ? "mt-2 border-success/40 bg-success/10 text-success"
+                : "mt-2 border-accent/40 bg-accent/10 text-accent"
+            }
+          >
+            {settings?.max_players_applied
+              ? "Appliqué par le template"
+              : "En attente template compatible"}
+          </Badge>
+        </div>
+      </div>
+      <div className="rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">
+        Pour modifier les fichiers comme server.properties, utilisez cette interface dès que le
+        réglage sera disponible. L’accès direct au fichier est volontairement verrouillé.
+      </div>
+    </div>
+  );
 }
 
 /* ---------------- Settings ---------------- */

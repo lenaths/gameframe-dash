@@ -7,6 +7,7 @@ const deployInput = z.object({
   serverName: z.string().min(2).max(40),
   variantIndex: z.number().int().min(0).default(0),
   environment: z.record(z.string(), z.string()).default({}),
+  maxPlayers: z.number().int().min(1).max(200).optional(),
 });
 
 const powerInput = z.object({
@@ -51,6 +52,7 @@ type ServerListRow = {
   error_message: string | null;
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
+  minecraft_settings?: MinecraftSettings | null;
   created_at: string;
   plans?: {
     name?: string | null;
@@ -59,6 +61,13 @@ type ServerListRow = {
     cpu_percent?: number | null;
     disk_mb?: number | null;
   } | null;
+};
+
+type MinecraftSettings = {
+  server_type: string | null;
+  minecraft_version: string | null;
+  max_players: number | null;
+  max_players_applied: boolean;
 };
 
 type ServerListItem = ServerListRow & {
@@ -80,6 +89,28 @@ type ModpackInstallJob = {
     display_name?: string | null;
     minecraft_versions?: string[] | null;
     loaders?: string[] | null;
+  } | null;
+};
+
+type ServerOrderInsertRow = {
+  id: string;
+};
+
+type ServerDetailOrderRow = {
+  id: string;
+  server_name: string;
+  status: string;
+  pterodactyl_server_identifier: string | null;
+  pterodactyl_server_id: number | null;
+  error_message: string | null;
+  metadata?: unknown;
+  created_at: string;
+  plans?: {
+    name?: string | null;
+    game?: string | null;
+    ram_mb?: number | null;
+    cpu_percent?: number | null;
+    disk_mb?: number | null;
   } | null;
 };
 
@@ -107,6 +138,32 @@ function selectedModpackLabel(metadata: unknown) {
     : null;
 }
 
+function selectedMinecraftSettings(metadata: unknown): MinecraftSettings | null {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const settings =
+    root.minecraft_settings && typeof root.minecraft_settings === "object"
+      ? (root.minecraft_settings as Record<string, unknown>)
+      : root;
+  const rawMax = settings.max_players ?? root.max_players;
+  const maxPlayers =
+    typeof rawMax === "number"
+      ? rawMax
+      : typeof rawMax === "string" && rawMax.trim()
+        ? Number(rawMax)
+        : null;
+  return {
+    server_type:
+      typeof settings.server_type === "string"
+        ? settings.server_type
+        : selectedTemplateLabel(metadata),
+    minecraft_version:
+      typeof settings.minecraft_version === "string" ? settings.minecraft_version : null,
+    max_players: Number.isFinite(maxPlayers) ? Math.round(Number(maxPlayers)) : null,
+    max_players_applied: settings.max_players_applied === true,
+  };
+}
+
 const MAX_FILE_CONTENT_BYTES = 1024 * 1024;
 const BLOCKED_FILE_EXTENSIONS = new Set([
   ".jar",
@@ -118,6 +175,39 @@ const BLOCKED_FILE_EXTENSIONS = new Set([
   ".sqlite",
   ".db",
 ]);
+const MANAGED_FILE_MESSAGE =
+  "Ce fichier est géré par XNTServers. Modifie ces paramètres depuis l’onglet Minecraft.";
+const PROTECTED_FILE_BASENAMES = new Set([
+  "server.properties",
+  "config.yml",
+  "paper.yml",
+  "paper-global.yml",
+  "paper-world-defaults.yml",
+  "spigot.yml",
+  "bukkit.yml",
+  "commands.yml",
+  "permissions.yml",
+  "velocity.toml",
+  "waterfall.yml",
+  "fabric-server-launcher.properties",
+  "forge-server.toml",
+  "eula.txt",
+  "xnt-install-modpack",
+  ".env",
+  ".env.local",
+  ".env.production",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+]);
+const PROTECTED_PATH_PREFIXES = [
+  "/bungeecord/config.yml",
+  "/.xnt",
+  "/.xnt-modpack-install",
+  "/.ptero",
+  "/.config/xnt",
+  "/scripts/xnt",
+  "/xnt",
+];
 
 type PteroAllocation = {
   attributes?: {
@@ -276,6 +366,22 @@ function basename(path: string) {
   return normalized.split("/").pop() ?? "";
 }
 
+function isProtectedServerPath(path: string) {
+  const normalized = normalizeServerPath(path).toLowerCase();
+  const name = normalized.split("/").pop() ?? "";
+  if (PROTECTED_FILE_BASENAMES.has(name)) return true;
+  if (/(secret|token|private[_-]?key|api[_-]?key|credentials?)/i.test(name)) return true;
+  return PROTECTED_PATH_PREFIXES.some(
+    (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
+  );
+}
+
+function assertNotProtectedServerPath(path: string) {
+  const normalized = normalizeServerPath(path);
+  if (isProtectedServerPath(normalized)) throw new Error(MANAGED_FILE_MESSAGE);
+  return normalized;
+}
+
 function dirname(path: string) {
   const normalized = normalizeServerPath(path);
   const index = normalized.lastIndexOf("/");
@@ -284,6 +390,7 @@ function dirname(path: string) {
 
 function assertEditableFilePath(path: string) {
   const normalized = normalizeServerPath(path);
+  assertNotProtectedServerPath(normalized);
   if (hasBlockedExtension(normalized)) {
     throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
   }
@@ -447,6 +554,7 @@ export const listMyServers = createServerFn({ method: "GET" })
         ...server,
         selected_template_label: selectedTemplateLabel(metadata),
         selected_modpack_label: selectedModpackLabel(metadata),
+        minecraft_settings: selectedMinecraftSettings(metadata),
       }),
     );
     const orderIds = servers
@@ -542,13 +650,37 @@ export const deployServer = createServerFn({ method: "POST" })
       .single();
     if (planErr || !plan) throw new Error("Plan not found.");
 
-    const { data: order, error: orderErr } = await supabase
+    const serverOrdersDb = supabase as unknown as {
+      from: (table: string) => {
+        insert: (values: Record<string, unknown>) => {
+          select: (columns: string) => {
+            single: () => Promise<SupabaseResult<ServerOrderInsertRow>>;
+          };
+        };
+        update: (values: Record<string, unknown>) => {
+          eq: (
+            column: string,
+            value: unknown,
+          ) => {
+            eq: (column: string, value: unknown) => Promise<SupabaseResult<ServerOrderInsertRow>>;
+          };
+        };
+      };
+    };
+    const { data: order, error: orderErr } = await serverOrdersDb
       .from("server_orders")
       .insert({
         user_id: userId,
         plan_id: plan.id,
         server_name: data.serverName,
         status: "provisioning",
+        metadata: {
+          max_players: data.maxPlayers ?? 10,
+          minecraft_settings: {
+            max_players: data.maxPlayers ?? 10,
+            max_players_applied: false,
+          },
+        },
       })
       .select("*")
       .single();
@@ -562,8 +694,27 @@ export const deployServer = createServerFn({ method: "POST" })
       serverName: data.serverName,
       variantIndex: data.variantIndex,
       environment: data.environment,
+      maxPlayers: data.maxPlayers ?? 10,
       fallbackEmail: (claims?.email as string | undefined) ?? null,
     });
+    await serverOrdersDb
+      .from("server_orders")
+      .update({
+        metadata: {
+          max_players: data.maxPlayers ?? 10,
+          minecraft_settings: {
+            max_players: data.maxPlayers ?? 10,
+            max_players_applied:
+              "minecraftSettings" in result
+                ? Boolean(result.minecraftSettings?.maxPlayersApplied)
+                : false,
+            max_players_variable:
+              "minecraftSettings" in result ? result.minecraftSettings?.maxPlayersVariable : null,
+          },
+        },
+      })
+      .eq("id", order.id)
+      .eq("user_id", userId);
 
     if (!result.ok) {
       return { ok: false as const, orderId: order.id, status: result.status, error: result.error };
@@ -589,10 +740,27 @@ export const getServerDetail = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d: unknown) => orderInput.parse(d))
   .handler(async ({ data, context }) => {
-    const { data: order, error } = await context.supabase
+    const serverOrdersDb = context.supabase as unknown as {
+      from: (table: string) => {
+        select: (columns: string) => {
+          eq: (
+            column: string,
+            value: unknown,
+          ) => {
+            eq: (
+              column: string,
+              value: unknown,
+            ) => {
+              single: () => Promise<SupabaseResult<ServerDetailOrderRow>>;
+            };
+          };
+        };
+      };
+    };
+    const { data: order, error } = await serverOrdersDb
       .from("server_orders")
       .select(
-        "id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
+        "id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, metadata, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
       )
       .eq("id", data.orderId)
       .eq("user_id", context.userId)
@@ -600,8 +768,13 @@ export const getServerDetail = createServerFn({ method: "POST" })
     if (error || !order) throw new Error("Server not found.");
     const { loadLatestModpackInstallJob } = await import("@/lib/modpack-install.functions");
     const modpackInstallJob = await loadLatestModpackInstallJob(order.id);
+    const { metadata, ...serializableOrder } = order;
+    const orderWithMinecraft = {
+      ...serializableOrder,
+      minecraft_settings: selectedMinecraftSettings(metadata),
+    };
     if (!order.pterodactyl_server_identifier) {
-      return { order, live: null, modpackInstallJob };
+      return { order: orderWithMinecraft, live: null, modpackInstallJob };
     }
 
     try {
@@ -666,7 +839,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
         nodePublicAddress,
       );
       return {
-        order,
+        order: orderWithMinecraft,
         modpackInstallJob,
         live: {
           state: res.attributes.current_state,
@@ -683,7 +856,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
       };
     } catch (err) {
       return {
-        order,
+        order: orderWithMinecraft,
         modpackInstallJob,
         live: null,
         warning: publicServerServiceError(err, "Données serveur en direct indisponibles."),
@@ -810,7 +983,10 @@ export const listServerFiles = createServerFn({ method: "POST" })
       };
       return {
         directory,
-        files: res.data.map((d) => d.attributes),
+        files: res.data.map((d) => ({
+          ...d.attributes,
+          is_managed: isProtectedServerPath(`${directory}/${d.attributes.name}`),
+        })),
         error: null as string | null,
       };
     } catch (err) {
@@ -887,6 +1063,7 @@ export const deleteServerFiles = createServerFn({ method: "POST" })
       if (file.includes("/") || file.includes("\\") || file === "." || file === "..") {
         throw new Error("Chemin de fichier non autorisé.");
       }
+      assertNotProtectedServerPath(`${root}/${file}`);
       if (hasBlockedExtension(file)) {
         throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
       }
@@ -916,6 +1093,7 @@ export const createServerFolder = createServerFn({ method: "POST" })
     const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
     assertPteroClientConfigured();
     const root = normalizeServerPath(data.root);
+    assertNotProtectedServerPath(root);
     if (
       data.name.includes("/") ||
       data.name.includes("\\") ||
@@ -927,6 +1105,7 @@ export const createServerFolder = createServerFn({ method: "POST" })
     if (hasBlockedExtension(data.name)) {
       throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
     }
+    assertNotProtectedServerPath(`${root}/${data.name}`);
     await ptero.client(`/servers/${identifier}/files/create-folder`, {
       method: "POST",
       body: JSON.stringify({ root, name: data.name }),

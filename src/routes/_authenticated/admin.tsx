@@ -287,6 +287,14 @@ function Admin() {
 
 type AdminProfileRef = { id: string; email: string | null };
 type AdminPlanRef = { name?: string; game?: string } | null;
+type AdminMinecraftSettings = {
+  server_type?: string | null;
+  minecraft_version?: string | null;
+  max_players?: number | null;
+  max_players_applied?: boolean;
+  extra_price_cents?: number | null;
+  total_price_cents?: number | null;
+} | null;
 
 type AdminOrder = {
   id: string;
@@ -297,6 +305,7 @@ type AdminOrder = {
   stripe_subscription_id: string | null;
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
+  minecraft_settings?: AdminMinecraftSettings;
   created_at: string;
   profile?: AdminProfileRef | null;
   plans?: AdminPlanRef;
@@ -308,6 +317,7 @@ type AdminOrder = {
     pterodactyl_server_identifier: string | null;
     selected_template_label?: string | null;
     selected_modpack_label?: string | null;
+    minecraft_settings?: AdminMinecraftSettings;
   } | null;
 };
 
@@ -321,6 +331,7 @@ type AdminServer = {
   pterodactyl_server_identifier: string | null;
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
+  minecraft_settings?: AdminMinecraftSettings;
   error_message: string | null;
   created_at: string;
   profile?: AdminProfileRef | null;
@@ -630,6 +641,7 @@ function AdminOrdersSection({ orders }: { orders: AdminOrder[] }) {
                         Modpack: {order.selected_modpack_label}
                       </div>
                     ) : null}
+                    <MinecraftMetaLine settings={order.minecraft_settings} />
                   </TableCell>
                   <TableCell>{formatMoney(order.total_cents, order.currency)}</TableCell>
                   <TableCell className="font-mono text-xs">
@@ -724,6 +736,7 @@ function AdminServersSection({ servers }: { servers: AdminServer[] }) {
                       Modpack: {server.selected_modpack_label}
                     </div>
                   ) : null}
+                  <MinecraftMetaLine settings={server.minecraft_settings} />
                 </TableCell>
                 <TableCell>
                   <StatusBadge status={server.status} />
@@ -2858,6 +2871,25 @@ function StatusBadge({ status }: { status: string }) {
     <Badge variant="outline" className={`capitalize xnt-status-${status}`}>
       {status.replaceAll("_", " ")}
     </Badge>
+  );
+}
+
+function MinecraftMetaLine({ settings }: { settings?: AdminMinecraftSettings }) {
+  if (!settings?.max_players && !settings?.minecraft_version && !settings?.server_type) {
+    return null;
+  }
+  return (
+    <div className="mt-1 text-xs text-muted-foreground">
+      {settings.server_type ?? "Type auto"} · {settings.minecraft_version ?? "Version auto"} ·{" "}
+      {settings.max_players ? `${settings.max_players} joueurs` : "Joueurs auto"} ·{" "}
+      {settings.max_players_applied ? "appliqué" : "en attente"}
+      {typeof settings.extra_price_cents === "number"
+        ? ` · supplément ${(settings.extra_price_cents / 100).toFixed(2)}`
+        : ""}
+      {typeof settings.total_price_cents === "number"
+        ? ` · total ${(settings.total_price_cents / 100).toFixed(2)}`
+        : ""}
+    </div>
   );
 }
 
