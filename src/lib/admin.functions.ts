@@ -61,6 +61,7 @@ type ServerDetailRow = ServerLinkRow & {
 type MinecraftSettings = {
   server_type: string | null;
   minecraft_version: string | null;
+  version_apply_status: string | null;
   max_players: number | null;
   max_players_applied: boolean;
   extra_price_cents: number | null;
@@ -112,6 +113,8 @@ function selectedMinecraftSettings(metadata: unknown): MinecraftSettings | null 
         : selectedTemplateLabel(metadata),
     minecraft_version:
       typeof settings.minecraft_version === "string" ? settings.minecraft_version : null,
+    version_apply_status:
+      typeof settings.version_apply_status === "string" ? settings.version_apply_status : null,
     max_players: Number.isFinite(maxPlayers) ? Math.round(Number(maxPlayers)) : null,
     max_players_applied: settings.max_players_applied === true,
     extra_price_cents:

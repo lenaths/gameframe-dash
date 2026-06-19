@@ -290,6 +290,7 @@ type AdminPlanRef = { name?: string; game?: string } | null;
 type AdminMinecraftSettings = {
   server_type?: string | null;
   minecraft_version?: string | null;
+  version_apply_status?: string | null;
   max_players?: number | null;
   max_players_applied?: boolean;
   extra_price_cents?: number | null;
@@ -2881,6 +2882,7 @@ function MinecraftMetaLine({ settings }: { settings?: AdminMinecraftSettings }) 
   return (
     <div className="mt-1 text-xs text-muted-foreground">
       {settings.server_type ?? "Type auto"} · {settings.minecraft_version ?? "Version auto"} ·{" "}
+      version {settings.version_apply_status ?? "auto"} ·{" "}
       {settings.max_players ? `${settings.max_players} joueurs` : "Joueurs auto"} ·{" "}
       {settings.max_players_applied ? "appliqué" : "en attente"}
       {typeof settings.extra_price_cents === "number"

@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
 
 const deployInput = z.object({
   planId: z.string().uuid(),
@@ -25,6 +26,71 @@ const renameServerInput = z.object({
   orderId: z.string().uuid(),
   name: z.string().min(2).max(40),
 });
+const applyServerSettingsInput = z.object({
+  orderId: z.string().uuid(),
+  settings: z.record(z.string(), z.unknown()),
+});
+
+type ServerSettingValue = string | number | boolean | null;
+
+const FORBIDDEN_SETTING_KEYS = new Set([
+  "max_players",
+  "slot_count",
+  "slots",
+  "memory",
+  "ram",
+  "cpu",
+  "disk",
+  "port",
+  "ports",
+  "allocation",
+  "allocations",
+  "startup",
+  "egg",
+  "egg_id",
+  "nest",
+  "nest_id",
+  "docker",
+  "docker_image",
+  "node",
+  "node_id",
+]);
+
+const SERVER_SETTING_DEFINITIONS = {
+  minecraft: {
+    serverName: { type: "string", max: 40 },
+    motd: { type: "string", max: 120 },
+    difficulty: { type: "enum", values: ["peaceful", "easy", "normal", "hard"] },
+    gamemode: { type: "enum", values: ["survival", "creative", "adventure", "spectator"] },
+    hardcore: { type: "boolean" },
+    pvp: { type: "boolean" },
+    whitelist: { type: "boolean" },
+    onlineMode: { type: "boolean" },
+    allowFlight: { type: "boolean" },
+    spawnProtection: { type: "integer", min: 0, max: 64 },
+    viewDistance: { type: "integer", min: 2, max: 32 },
+    simulationDistance: { type: "integer", min: 2, max: 32 },
+    seed: { type: "string", max: 64 },
+  },
+  conan: {
+    serverName: { type: "string", max: 40 },
+    motd: { type: "string", max: 120 },
+    password: { type: "string", max: 80 },
+  },
+  ark: {
+    serverName: { type: "string", max: 40 },
+    motd: { type: "string", max: 120 },
+    password: { type: "string", max: 80 },
+    xpRate: { type: "number", min: 0.1, max: 10 },
+    harvestRate: { type: "number", min: 0.1, max: 10 },
+    tamingRate: { type: "number", min: 0.1, max: 10 },
+  },
+  gmod: {
+    hostname: { type: "string", max: 40 },
+    gamemode: { type: "string", max: 40 },
+    collectionId: { type: "string", max: 32 },
+  },
+} as const;
 
 type SupabaseAny = {
   from: (table: string) => SupabaseQuery;
@@ -40,6 +106,19 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   eq: (column: string, value: unknown) => SupabaseQuery<T>;
   in: (column: string, values: unknown[]) => SupabaseQuery<T>;
   order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
+};
+
+type AdminTableQuery = {
+  select: (columns: string) => AdminTableQuery;
+  eq: (column: string, value: unknown) => AdminTableQuery;
+  maybeSingle: () => Promise<SupabaseResult<unknown>>;
+  update: (values: Record<string, unknown>) => {
+    eq: (column: string, value: unknown) => Promise<SupabaseResult>;
+  };
+};
+
+type AdminDb = {
+  from: (table: string) => AdminTableQuery;
 };
 
 type ServerListRow = {
@@ -66,8 +145,18 @@ type ServerListRow = {
 type MinecraftSettings = {
   server_type: string | null;
   minecraft_version: string | null;
+  version_apply_status: string | null;
+  version_variable?: string | null;
   max_players: number | null;
   max_players_applied: boolean;
+};
+
+type ServerSettingsChangeLogEntry = {
+  at: string;
+  user_id: string;
+  key: string;
+  old_value: ServerSettingValue;
+  new_value: ServerSettingValue;
 };
 
 type ServerListItem = ServerListRow & {
@@ -98,6 +187,8 @@ type ServerOrderInsertRow = {
 
 type ServerDetailOrderRow = {
   id: string;
+  user_id?: string;
+  order_id?: string | null;
   server_name: string;
   status: string;
   pterodactyl_server_identifier: string | null;
@@ -112,6 +203,17 @@ type ServerDetailOrderRow = {
     cpu_percent?: number | null;
     disk_mb?: number | null;
   } | null;
+};
+
+type AccessibleServerOrder = ServerDetailOrderRow & {
+  user_id: string;
+  order_id: string | null;
+};
+
+type ServerOwnerProfile = {
+  id: string;
+  email?: string | null;
+  display_name?: string | null;
 };
 
 function selectedTemplateLabel(metadata: unknown) {
@@ -159,9 +261,85 @@ function selectedMinecraftSettings(metadata: unknown): MinecraftSettings | null 
         : selectedTemplateLabel(metadata),
     minecraft_version:
       typeof settings.minecraft_version === "string" ? settings.minecraft_version : null,
+    version_apply_status:
+      typeof settings.version_apply_status === "string" ? settings.version_apply_status : null,
+    version_variable:
+      typeof settings.version_variable === "string" ? settings.version_variable : null,
     max_players: Number.isFinite(maxPlayers) ? Math.round(Number(maxPlayers)) : null,
     max_players_applied: settings.max_players_applied === true,
   };
+}
+
+function selectedServerSettings(metadata: unknown): Record<string, ServerSettingValue> {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  if (!root.server_settings || typeof root.server_settings !== "object") return {};
+  const settings: Record<string, ServerSettingValue> = {};
+  for (const [key, value] of Object.entries(root.server_settings as Record<string, unknown>)) {
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      settings[key] = value;
+    } else if (value == null) {
+      settings[key] = null;
+    }
+  }
+  return settings;
+}
+
+function selectedSettingsChangeLog(metadata: unknown): ServerSettingsChangeLogEntry[] {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  return Array.isArray(root.settings_change_log)
+    ? (root.settings_change_log as ServerSettingsChangeLogEntry[]).slice(-20)
+    : [];
+}
+
+function sanitizeServerSettings(
+  game: string | null | undefined,
+  input: Record<string, unknown>,
+): Record<string, ServerSettingValue> {
+  const gameKey = normalizeGameKey(game);
+  const definitions =
+    SERVER_SETTING_DEFINITIONS[gameKey as keyof typeof SERVER_SETTING_DEFINITIONS] ?? null;
+  if (!definitions) return {};
+
+  const sanitized: Record<string, ServerSettingValue> = {};
+  for (const [rawKey, rawValue] of Object.entries(input)) {
+    const key = rawKey.trim();
+    if (!key || FORBIDDEN_SETTING_KEYS.has(key.toLowerCase())) continue;
+    const definition = definitions[key as keyof typeof definitions] as
+      | { type: "string"; max: number }
+      | { type: "enum"; values: readonly string[] }
+      | { type: "boolean" }
+      | { type: "integer"; min: number; max: number }
+      | { type: "number"; min: number; max: number }
+      | undefined;
+    if (!definition) continue;
+
+    if (definition.type === "string") {
+      const value = String(rawValue ?? "")
+        .trim()
+        .slice(0, definition.max);
+      sanitized[key] = value;
+    } else if (definition.type === "enum") {
+      const value = String(rawValue ?? "")
+        .trim()
+        .toLowerCase();
+      if (definition.values.includes(value)) sanitized[key] = value;
+    } else if (definition.type === "boolean") {
+      sanitized[key] = rawValue === true || rawValue === "true" || rawValue === "on";
+    } else if (definition.type === "integer") {
+      const value = Math.round(Number(rawValue));
+      if (Number.isFinite(value)) {
+        sanitized[key] = Math.min(definition.max, Math.max(definition.min, value));
+      }
+    } else if (definition.type === "number") {
+      const value = Number(rawValue);
+      if (Number.isFinite(value)) {
+        sanitized[key] = Math.min(definition.max, Math.max(definition.min, value));
+      }
+    }
+  }
+  return sanitized;
 }
 
 const MAX_FILE_CONTENT_BYTES = 1024 * 1024;
@@ -176,7 +354,7 @@ const BLOCKED_FILE_EXTENSIONS = new Set([
   ".db",
 ]);
 const MANAGED_FILE_MESSAGE =
-  "Ce fichier est géré par XNTServers. Modifie ces paramètres depuis l’onglet Minecraft.";
+  "Ce fichier est géré par XNTServers. Modifie ces paramètres depuis l’onglet Paramètres serveur.";
 const PROTECTED_FILE_BASENAMES = new Set([
   "server.properties",
   "config.yml",
@@ -504,6 +682,106 @@ async function assertFileSizeAllowed(identifier: string, file: string) {
   }
 }
 
+async function isAdminUser(userId: string): Promise<boolean> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data, error } = await supabaseAdmin
+    .from("user_roles")
+    .select("user_id")
+    .eq("user_id", userId)
+    .eq("role", "admin")
+    .maybeSingle();
+  if (error) {
+    console.warn("[ManageAccess] admin role lookup failed", {
+      userId,
+      error: error.message,
+    });
+  }
+  return Boolean(data);
+}
+
+async function loadAccessibleServerOrder(
+  orderId: string,
+  userId: string,
+  reason = "manage",
+): Promise<{
+  order: AccessibleServerOrder;
+  ownerProfile: ServerOwnerProfile | null;
+  isAdmin: boolean;
+  isAdminAccess: boolean;
+}> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const adminDb = supabaseAdmin as unknown as AdminDb;
+  const isAdmin = await isAdminUser(userId);
+  const { data: order, error } = await adminDb
+    .from("server_orders")
+    .select(
+      "id, user_id, order_id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, metadata, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
+    )
+    .eq("id", orderId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("[ManageAccess] server order lookup failed", {
+      userId,
+      isAdmin,
+      orderId,
+      ownerId: null,
+      granted: false,
+      reason,
+      error: error.message,
+    });
+    throw new Error("Impossible de charger ce serveur.");
+  }
+
+  if (!order) {
+    console.info("[ManageAccess] server order not found", {
+      userId,
+      isAdmin,
+      orderId,
+      ownerId: null,
+      granted: false,
+      reason,
+    });
+    throw new Error("Serveur introuvable.");
+  }
+
+  const typedOrder = order as unknown as AccessibleServerOrder;
+  const isOwner = typedOrder.user_id === userId;
+  if (!isOwner && !isAdmin) {
+    console.info("[ManageAccess] access denied", {
+      userId,
+      isAdmin,
+      orderId,
+      ownerId: typedOrder.user_id,
+      granted: false,
+      reason,
+    });
+    throw new Error("Accès refusé à ce serveur.");
+  }
+
+  const { data: ownerProfile } = await adminDb
+    .from("profiles")
+    .select("id, email, display_name")
+    .eq("id", typedOrder.user_id)
+    .maybeSingle();
+
+  console.info("[ManageAccess] access granted", {
+    userId,
+    isAdmin,
+    orderId,
+    ownerId: typedOrder.user_id,
+    granted: true,
+    reason,
+  });
+
+  return {
+    order: typedOrder,
+    ownerProfile: (ownerProfile as ServerOwnerProfile | null) ?? null,
+    isAdmin,
+    isAdminAccess: isAdmin && !isOwner,
+  };
+}
+
 async function loadOwnedOrder(
   supabase: import("@supabase/supabase-js").SupabaseClient,
   orderId: string,
@@ -512,16 +790,8 @@ async function loadOwnedOrder(
   pterodactyl_server_identifier: string | null;
   pterodactyl_server_id: number | null;
 }> {
-  const { data, error } = await supabase
-    .from("server_orders")
-    .select("pterodactyl_server_identifier, pterodactyl_server_id")
-    .eq("id", orderId)
-    .eq("user_id", userId)
-    .single();
-  if (error || !data) {
-    throw new Error("Server not found or access denied.");
-  }
-  return data;
+  void supabase;
+  return (await loadAccessibleServerOrder(orderId, userId, "manage action")).order;
 }
 
 /** Resolve a server identifier owned by the current authenticated user. */
@@ -554,7 +824,9 @@ export const listMyServers = createServerFn({ method: "GET" })
         ...server,
         selected_template_label: selectedTemplateLabel(metadata),
         selected_modpack_label: selectedModpackLabel(metadata),
-        minecraft_settings: selectedMinecraftSettings(metadata),
+        minecraft_settings: isMinecraftGame(server.plans?.game)
+          ? selectedMinecraftSettings(metadata)
+          : null,
       }),
     );
     const orderIds = servers
@@ -740,41 +1012,29 @@ export const getServerDetail = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d: unknown) => orderInput.parse(d))
   .handler(async ({ data, context }) => {
-    const serverOrdersDb = context.supabase as unknown as {
-      from: (table: string) => {
-        select: (columns: string) => {
-          eq: (
-            column: string,
-            value: unknown,
-          ) => {
-            eq: (
-              column: string,
-              value: unknown,
-            ) => {
-              single: () => Promise<SupabaseResult<ServerDetailOrderRow>>;
-            };
-          };
-        };
-      };
-    };
-    const { data: order, error } = await serverOrdersDb
-      .from("server_orders")
-      .select(
-        "id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, metadata, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
-      )
-      .eq("id", data.orderId)
-      .eq("user_id", context.userId)
-      .single();
-    if (error || !order) throw new Error("Server not found.");
+    const access = await loadAccessibleServerOrder(data.orderId, context.userId, "getServerDetail");
+    const order = access.order;
     const { loadLatestModpackInstallJob } = await import("@/lib/modpack-install.functions");
     const modpackInstallJob = await loadLatestModpackInstallJob(order.id);
     const { metadata, ...serializableOrder } = order;
+    const accessInfo = {
+      isAdminAccess: access.isAdminAccess,
+      ownerUserId: order.user_id,
+      ownerEmail: access.ownerProfile?.email ?? null,
+      ownerName: access.ownerProfile?.display_name ?? null,
+      orderId: order.order_id,
+      serverOrderId: order.id,
+    };
     const orderWithMinecraft = {
       ...serializableOrder,
-      minecraft_settings: selectedMinecraftSettings(metadata),
+      minecraft_settings: isMinecraftGame(order.plans?.game)
+        ? selectedMinecraftSettings(metadata)
+        : null,
+      server_settings: selectedServerSettings(metadata),
+      settings_change_log: selectedSettingsChangeLog(metadata),
     };
     if (!order.pterodactyl_server_identifier) {
-      return { order: orderWithMinecraft, live: null, modpackInstallJob };
+      return { order: orderWithMinecraft, live: null, modpackInstallJob, access: accessInfo };
     }
 
     try {
@@ -841,6 +1101,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
       return {
         order: orderWithMinecraft,
         modpackInstallJob,
+        access: accessInfo,
         live: {
           state: res.attributes.current_state,
           memoryMb: Math.round(res.attributes.resources.memory_bytes / 1024 / 1024),
@@ -858,6 +1119,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
       return {
         order: orderWithMinecraft,
         modpackInstallJob,
+        access: accessInfo,
         live: null,
         warning: publicServerServiceError(err, "Données serveur en direct indisponibles."),
       };
@@ -1279,24 +1541,110 @@ export const renameServer = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d: unknown) => renameServerInput.parse(d))
   .handler(async ({ data, context }) => {
-    const identifier = await loadOwnedIdentifier(context.supabase, data.orderId, context.userId);
-    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
-    assertPteroClientConfigured();
+    const { order } = await loadAccessibleServerOrder(data.orderId, context.userId, "renameServer");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const adminDb = supabaseAdmin as unknown as AdminDb;
+    const { error } = await adminDb
+      .from("server_orders")
+      .update({ server_name: data.name })
+      .eq("id", order.id);
+    if (error) throw new Error(error.message);
+
+    if (!order.pterodactyl_server_identifier) {
+      return { ok: true, infrastructureRenamed: false };
+    }
+
     try {
-      await ptero.client(`/servers/${identifier}/settings/rename`, {
+      const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+      assertPteroClientConfigured();
+      await ptero.client(`/servers/${order.pterodactyl_server_identifier}/settings/rename`, {
         method: "POST",
         body: JSON.stringify({ name: data.name }),
       });
+      return { ok: true, infrastructureRenamed: true };
     } catch (error) {
-      throw new Error(publicServerServiceError(error, "Renommage indisponible pour ce serveur."));
+      console.warn(
+        `[Servers] XNT display name updated but infrastructure rename failed for ${data.orderId}: ${publicServerServiceError(error, "rename failed")}`,
+      );
+      return { ok: true, infrastructureRenamed: false };
     }
-    const { error } = await context.supabase
+  });
+
+export const applyServerSettings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => applyServerSettingsInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { order } = await loadAccessibleServerOrder(
+      data.orderId,
+      context.userId,
+      "applyServerSettings",
+    );
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const adminDb = supabaseAdmin as unknown as AdminDb;
+
+    const sanitized = sanitizeServerSettings(order.plans?.game, data.settings);
+    const existingMetadata =
+      order.metadata && typeof order.metadata === "object"
+        ? (order.metadata as Record<string, unknown>)
+        : {};
+    const previousSettings = selectedServerSettings(existingMetadata);
+    const nextSettings = { ...previousSettings, ...sanitized };
+    const changes: ServerSettingsChangeLogEntry[] = [];
+    for (const [key, newValue] of Object.entries(sanitized)) {
+      const oldValue = previousSettings[key];
+      if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+        changes.push({
+          at: new Date().toISOString(),
+          user_id: context.userId,
+          key,
+          old_value: oldValue ?? null,
+          new_value: newValue,
+        });
+      }
+    }
+
+    const newDisplayName =
+      typeof sanitized.serverName === "string" && sanitized.serverName.trim()
+        ? sanitized.serverName.trim()
+        : typeof sanitized.hostname === "string" && sanitized.hostname.trim()
+          ? sanitized.hostname.trim()
+          : null;
+    const nextMetadata = {
+      ...existingMetadata,
+      server_settings: nextSettings,
+      settings_change_log: [...selectedSettingsChangeLog(existingMetadata), ...changes].slice(-50),
+    };
+    const updatePayload: Record<string, unknown> = { metadata: nextMetadata };
+    if (newDisplayName) updatePayload.server_name = newDisplayName;
+
+    const updateResult = await adminDb
       .from("server_orders")
-      .update({ server_name: data.name })
-      .eq("id", data.orderId)
-      .eq("user_id", context.userId);
-    if (error) throw new Error(error.message);
-    return { ok: true };
+      .update(updatePayload)
+      .eq("id", order.id);
+    if (updateResult.error) throw new Error(updateResult.error.message);
+
+    let infrastructureRenamed = false;
+    if (newDisplayName && order.pterodactyl_server_identifier) {
+      try {
+        const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+        assertPteroClientConfigured();
+        await ptero.client(`/servers/${order.pterodactyl_server_identifier}/settings/rename`, {
+          method: "POST",
+          body: JSON.stringify({ name: newDisplayName }),
+        });
+        infrastructureRenamed = true;
+      } catch (renameError) {
+        console.warn(
+          `[Servers] Settings saved but infrastructure rename failed for ${data.orderId}: ${publicServerServiceError(renameError, "rename failed")}`,
+        );
+      }
+    }
+
+    return {
+      ok: true,
+      changed: changes.map((change) => change.key),
+      infrastructureRenamed,
+    };
   });
 
 /** Reinstall a server through the Pterodactyl Client API. */
@@ -1352,13 +1700,12 @@ export const getServerStartup = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d: unknown) => orderInput.parse(d))
   .handler(async ({ data, context }) => {
-    const { data: order, error } = await context.supabase
-      .from("server_orders")
-      .select("id, pterodactyl_server_id, plan_id")
-      .eq("id", data.orderId)
-      .eq("user_id", context.userId)
-      .single();
-    if (error || !order?.pterodactyl_server_id) throw new Error("Server not found.");
+    const { order } = await loadAccessibleServerOrder(
+      data.orderId,
+      context.userId,
+      "getServerStartup",
+    );
+    if (!order.pterodactyl_server_id) throw new Error("Serveur introuvable.");
 
     const { getServerStartupApp, assertPteroAppConfigured } =
       await import("@/lib/pterodactyl.server");
@@ -1387,13 +1734,12 @@ export const updateServerStartup = createServerFn({ method: "POST" })
       .parse(d),
   )
   .handler(async ({ data, context }) => {
-    const { data: order, error } = await context.supabase
-      .from("server_orders")
-      .select("id, pterodactyl_server_id")
-      .eq("id", data.orderId)
-      .eq("user_id", context.userId)
-      .single();
-    if (error || !order?.pterodactyl_server_id) throw new Error("Server not found.");
+    const { order } = await loadAccessibleServerOrder(
+      data.orderId,
+      context.userId,
+      "updateServerStartup",
+    );
+    if (!order.pterodactyl_server_id) throw new Error("Serveur introuvable.");
 
     const {
       getServerStartupApp,

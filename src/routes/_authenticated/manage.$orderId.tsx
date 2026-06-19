@@ -45,11 +45,13 @@ import {
   setPrimaryServerAllocation,
   deleteServerAllocation,
   renameServer,
+  applyServerSettings,
   reinstallServerClient,
   getServerStartup,
   updateServerStartup,
 } from "@/lib/servers.functions";
 import { EggVariablesForm } from "@/components/egg-variables-form";
+import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
 
 const MAX_EDITABLE_FILE_SIZE_BYTES = 1024 * 1024;
 const BLOCKED_EDITOR_EXTENSIONS = new Set([
@@ -63,7 +65,7 @@ const BLOCKED_EDITOR_EXTENSIONS = new Set([
   ".db",
 ]);
 const MANAGED_FILE_MESSAGE =
-  "Ce fichier est géré par XNTServers. Modifie ces paramètres depuis l’onglet Minecraft.";
+  "Ce fichier est géré par XNTServers. Modifie ces paramètres depuis l’onglet Paramètres serveur.";
 const PROTECTED_FILE_BASENAMES = new Set([
   "server.properties",
   "config.yml",
@@ -86,6 +88,14 @@ const PROTECTED_FILE_BASENAMES = new Set([
   "docker-compose.yml",
   "docker-compose.yaml",
 ]);
+
+type SettingsChangeLogEntry = {
+  at: string;
+  user_id: string;
+  key: string;
+  old_value: unknown;
+  new_value: unknown;
+};
 
 const WS_ERROR_MESSAGE =
   "Console temps réel inaccessible. Le service serveur est temporairement indisponible.";
@@ -152,10 +162,17 @@ function ServerDetail() {
   const sendPower = useServerFn(powerServer);
   const qc = useQueryClient();
 
-  const { data, isLoading } = useQuery({
+  const {
+    data,
+    isLoading,
+    isFetching,
+    error: serverDetailError,
+    refetch: refetchServerDetail,
+  } = useQuery({
     queryKey: ["server-detail", orderId],
     queryFn: () => fetchDetail({ data: { orderId } }),
     refetchInterval: 5000,
+    retry: 1,
   });
 
   const waitForStateChange = async (previousState: string | null) => {
@@ -188,8 +205,42 @@ function ServerDetail() {
   });
 
   const order = data?.order;
+  const access = data?.access;
   const live = data?.live;
   const connection = live?.connection;
+  const gameKey = normalizeGameKey(order?.plans?.game);
+  const minecraftSettings =
+    (
+      order as
+        | {
+            minecraft_settings?: {
+              server_type?: string | null;
+              minecraft_version?: string | null;
+              version_apply_status?: string | null;
+              version_variable?: string | null;
+              max_players?: number | null;
+              max_players_applied?: boolean;
+            } | null;
+          }
+        | undefined
+    )?.minecraft_settings ?? null;
+  const serverSettings =
+    (
+      order as
+        | {
+            server_settings?: Record<string, unknown> | null;
+          }
+        | undefined
+    )?.server_settings ?? {};
+  const settingsChangeLog =
+    (
+      order as
+        | {
+            settings_change_log?: SettingsChangeLogEntry[] | null;
+          }
+        | undefined
+    )?.settings_change_log ?? [];
+  const serverSettingsLabel = getServerSettingsLabel(gameKey);
 
   return (
     <div className="xnt-page min-h-screen">
@@ -201,8 +252,43 @@ function ServerDetail() {
           </Link>
         </Button>
 
-        {isLoading || !order ? (
-          <div className="xnt-card rounded-xl p-8 text-muted-foreground">Loading server data…</div>
+        {isLoading ? (
+          <div className="xnt-card rounded-xl p-8 text-muted-foreground">
+            Chargement des données serveur…
+          </div>
+        ) : serverDetailError ? (
+          <div className="xnt-card rounded-xl border border-destructive/30 p-8">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <div className="mb-2 inline-flex rounded-full border border-destructive/30 bg-destructive/10 px-3 py-1 text-xs text-destructive">
+                  Accès serveur indisponible
+                </div>
+                <h1 className="font-display text-2xl font-semibold">
+                  Impossible d’ouvrir ce serveur
+                </h1>
+                <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+                  {serverDetailError instanceof Error
+                    ? serverDetailError.message
+                    : "Une erreur est survenue pendant le chargement du serveur."}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                disabled={isFetching}
+                onClick={() => void refetchServerDetail()}
+              >
+                <RefreshCw className="mr-1.5 h-4 w-4" />
+                Réessayer
+              </Button>
+            </div>
+          </div>
+        ) : !order ? (
+          <div className="xnt-card rounded-xl border border-accent/30 p-8">
+            <h1 className="font-display text-2xl font-semibold">Serveur introuvable</h1>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Ce serveur n’existe pas ou vous n’avez pas les droits nécessaires pour l’ouvrir.
+            </p>
+          </div>
         ) : (
           <>
             <div className="xnt-card mb-6 rounded-2xl p-6">
@@ -211,6 +297,14 @@ function ServerDetail() {
                   <div className="mb-3 inline-flex rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs text-primary">
                     Server control room
                   </div>
+                  {access?.isAdminAccess && (
+                    <div className="mb-3 inline-flex flex-wrap gap-2 rounded-lg border border-accent/35 bg-accent/10 px-3 py-2 text-xs text-accent">
+                      <span className="font-semibold">Vue admin — serveur client</span>
+                      <span>Client: {access.ownerEmail ?? access.ownerUserId}</span>
+                      <span>Order: {access.orderId ?? "—"}</span>
+                      <span>Server order: {access.serverOrderId}</span>
+                    </div>
+                  )}
                   <h1 className="font-display text-3xl font-bold">{order.server_name}</h1>
                   <div className="text-sm text-muted-foreground mt-1">
                     {order.plans?.game} · {order.plans?.name}
@@ -341,9 +435,9 @@ function ServerDetail() {
                 <TabsTrigger value="files">Files</TabsTrigger>
                 <TabsTrigger value="backups">Backups</TabsTrigger>
                 <TabsTrigger value="network">Network</TabsTrigger>
-                <TabsTrigger value="minecraft">Minecraft</TabsTrigger>
+                <TabsTrigger value="server-settings">{serverSettingsLabel}</TabsTrigger>
                 <TabsTrigger value="startup">Paramètres avancés</TabsTrigger>
-                <TabsTrigger value="settings">Settings</TabsTrigger>
+                <TabsTrigger value="settings">Paramètres</TabsTrigger>
                 <TabsTrigger value="info">SFTP &amp; Info</TabsTrigger>
               </TabsList>
 
@@ -366,22 +460,17 @@ function ServerDetail() {
                   identifier={order.pterodactyl_server_identifier ?? null}
                 />
               </TabsContent>
-              <TabsContent value="minecraft" className="mt-4">
-                <MinecraftSettingsTab
-                  settings={
-                    (
-                      order as {
-                        minecraft_settings?: {
-                          server_type?: string | null;
-                          minecraft_version?: string | null;
-                          max_players?: number | null;
-                          max_players_applied?: boolean;
-                        } | null;
-                      }
-                    ).minecraft_settings ?? null
-                  }
+              <TabsContent value="server-settings" className="mt-4">
+                <ServerSettingsTab
+                  orderId={orderId}
+                  settings={minecraftSettings}
+                  serverSettings={serverSettings}
+                  changeLog={settingsChangeLog}
                   serverName={order.server_name}
                   planName={order.plans?.name ?? null}
+                  game={order.plans?.game ?? null}
+                  gameKey={gameKey}
+                  title={serverSettingsLabel}
                 />
               </TabsContent>
               <TabsContent value="startup" className="mt-4">
@@ -1902,68 +1991,565 @@ function buildConnectionCopyLines(connection: ConnectionInfo, xntServerId: strin
   return lines;
 }
 
-/* ---------------- Minecraft Settings ---------------- */
+/* ---------------- Server Settings ---------------- */
 
-function MinecraftSettingsTab({
+function ServerSettingsTab({
+  orderId,
   settings,
+  serverSettings,
+  changeLog,
   serverName,
   planName,
+  game,
+  gameKey,
+  title,
 }: {
+  orderId: string;
   settings: {
     server_type?: string | null;
     minecraft_version?: string | null;
+    version_apply_status?: string | null;
+    version_variable?: string | null;
     max_players?: number | null;
     max_players_applied?: boolean;
   } | null;
+  serverSettings: Record<string, unknown>;
+  changeLog: SettingsChangeLogEntry[];
   serverName: string;
   planName: string | null;
+  game: string | null;
+  gameKey: ReturnType<typeof normalizeGameKey>;
+  title: string;
 }) {
+  const applySettingsFn = useServerFn(applyServerSettings);
+  const qc = useQueryClient();
   const maxPlayers = settings?.max_players ?? null;
+  const isMinecraft = isMinecraftGame(game);
+  const [form, setForm] = useState<Record<string, unknown>>(() =>
+    buildServerSettingsForm(gameKey, serverSettings, serverName),
+  );
+
+  useEffect(() => {
+    setForm(buildServerSettingsForm(gameKey, serverSettings, serverName));
+  }, [gameKey, serverName, serverSettings]);
+
+  const applySettingsMutation = useMutation({
+    mutationFn: () => applySettingsFn({ data: { orderId, settings: form } }),
+    onSuccess: (result) => {
+      toast.success(
+        result.infrastructureRenamed
+          ? "Paramètres sauvegardés et nom synchronisé."
+          : "Paramètres sauvegardés dans XNT.",
+      );
+      qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
+      qc.invalidateQueries({ queryKey: ["my-servers"] });
+      qc.invalidateQueries({ queryKey: ["my-billing"] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const setValue = (key: string, value: unknown) =>
+    setForm((current) => ({ ...current, [key]: value }));
+
   return (
     <div className="xnt-card space-y-5 rounded-xl p-6">
       <div>
-        <h3 className="font-display text-lg font-semibold">Paramètres Minecraft</h3>
+        <h3 className="font-display text-lg font-semibold">{title}</h3>
         <p className="mt-1 text-sm text-muted-foreground">
-          Les fichiers critiques sont gérés par XNTServers. Les réglages Minecraft modifiables
-          seront progressivement exposés ici.
+          Les fichiers critiques sont gérés par XNTServers. Les réglages modifiables seront
+          progressivement exposés ici selon le jeu.
         </p>
       </div>
       <div className="grid gap-3 md:grid-cols-2">
-        <InfoLine label="Nom serveur" value={serverName} />
+        <InfoLine label="Jeu" value={game ?? "Jeu indisponible"} />
         <InfoLine label="Plan" value={planName ?? "Plan indisponible"} />
-        <InfoLine label="Type serveur" value={settings?.server_type ?? "Géré automatiquement"} />
-        <InfoLine
-          label="Version Minecraft"
-          value={settings?.minecraft_version ?? "Gérée automatiquement"}
-        />
-        <InfoLine
-          label="Joueurs maximum"
-          value={maxPlayers ? `${maxPlayers} joueur${maxPlayers > 1 ? "s" : ""}` : "Préparé"}
-        />
-        <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
-          <div className="text-xs uppercase tracking-wider text-muted-foreground">
-            Application serveur
-          </div>
-          <Badge
-            variant="outline"
-            className={
-              settings?.max_players_applied
-                ? "mt-2 border-success/40 bg-success/10 text-success"
-                : "mt-2 border-accent/40 bg-accent/10 text-accent"
-            }
-          >
-            {settings?.max_players_applied
-              ? "Appliqué par le template"
-              : "En attente template compatible"}
-          </Badge>
-        </div>
+        {isMinecraft ? (
+          <>
+            <div className="md:col-span-2">
+              <div className="mb-2 text-xs uppercase tracking-wider text-primary">Général</div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <SettingTextField
+                  label="Nom du serveur"
+                  value={stringValue(form.serverName)}
+                  onChange={(value) => setValue("serverName", value)}
+                  maxLength={40}
+                />
+                <SettingTextField
+                  label="MOTD"
+                  value={stringValue(form.motd)}
+                  onChange={(value) => setValue("motd", value)}
+                  maxLength={120}
+                />
+                <InfoLine label="Type" value={settings?.server_type ?? "Géré automatiquement"} />
+                <InfoLine
+                  label="Version"
+                  value={
+                    settings?.minecraft_version && settings.minecraft_version !== "auto"
+                      ? settings.minecraft_version
+                      : "Gérée automatiquement par le template"
+                  }
+                />
+                <InfoLine
+                  label="Application version"
+                  value={formatVersionApplyStatus(settings?.version_apply_status)}
+                />
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <div className="mb-2 text-xs uppercase tracking-wider text-primary">Joueurs</div>
+              <InfoLine
+                label="Slots achetés"
+                value={
+                  maxPlayers
+                    ? `${maxPlayers} joueur${maxPlayers > 1 ? "s" : ""}`
+                    : "Géré automatiquement"
+                }
+              />
+              <p className="mt-2 text-sm text-muted-foreground">
+                Pour augmenter le nombre de joueurs, veuillez effectuer un upgrade de votre offre.
+              </p>
+            </div>
+            <div className="md:col-span-2">
+              <div className="mb-2 text-xs uppercase tracking-wider text-primary">Gameplay</div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <SettingSelectField
+                  label="Difficulty"
+                  value={stringValue(form.difficulty) || "normal"}
+                  options={["peaceful", "easy", "normal", "hard"]}
+                  onChange={(value) => setValue("difficulty", value)}
+                />
+                <SettingSelectField
+                  label="Gamemode"
+                  value={stringValue(form.gamemode) || "survival"}
+                  options={["survival", "creative", "adventure", "spectator"]}
+                  onChange={(value) => setValue("gamemode", value)}
+                />
+                <SettingBooleanField
+                  label="Hardcore"
+                  checked={Boolean(form.hardcore)}
+                  onChange={(value) => setValue("hardcore", value)}
+                />
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <div className="mb-2 text-xs uppercase tracking-wider text-primary">Réseau</div>
+              <div className="grid gap-3 md:grid-cols-4">
+                <SettingBooleanField
+                  label="PVP"
+                  checked={Boolean(form.pvp)}
+                  onChange={(value) => setValue("pvp", value)}
+                />
+                <SettingBooleanField
+                  label="Whitelist"
+                  checked={Boolean(form.whitelist)}
+                  onChange={(value) => setValue("whitelist", value)}
+                />
+                <SettingBooleanField
+                  label="Online Mode"
+                  checked={Boolean(form.onlineMode)}
+                  onChange={(value) => setValue("onlineMode", value)}
+                />
+                <SettingBooleanField
+                  label="Allow Flight"
+                  checked={Boolean(form.allowFlight)}
+                  onChange={(value) => setValue("allowFlight", value)}
+                />
+              </div>
+            </div>
+            <div className="md:col-span-2">
+              <div className="mb-2 text-xs uppercase tracking-wider text-primary">Monde</div>
+              <div className="grid gap-3 md:grid-cols-4">
+                <SettingNumberField
+                  label="Spawn Protection"
+                  value={numberValue(form.spawnProtection, 16)}
+                  min={0}
+                  max={64}
+                  onChange={(value) => setValue("spawnProtection", value)}
+                />
+                <SettingNumberField
+                  label="View Distance"
+                  value={numberValue(form.viewDistance, 10)}
+                  min={2}
+                  max={32}
+                  onChange={(value) => setValue("viewDistance", value)}
+                />
+                <SettingNumberField
+                  label="Simulation Distance"
+                  value={numberValue(form.simulationDistance, 10)}
+                  min={2}
+                  max={32}
+                  onChange={(value) => setValue("simulationDistance", value)}
+                />
+                <SettingTextField
+                  label="Seed"
+                  value={stringValue(form.seed)}
+                  onChange={(value) => setValue("seed", value)}
+                  maxLength={64}
+                />
+              </div>
+            </div>
+            <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
+              <div className="text-xs uppercase tracking-wider text-muted-foreground">
+                Application serveur
+              </div>
+              <Badge
+                variant="outline"
+                className={
+                  settings?.max_players_applied
+                    ? "mt-2 border-success/40 bg-success/10 text-success"
+                    : "mt-2 border-accent/40 bg-accent/10 text-accent"
+                }
+              >
+                {settings?.max_players_applied
+                  ? "Appliqué par le template"
+                  : "En attente template compatible"}
+              </Badge>
+            </div>
+          </>
+        ) : (
+          <GenericGameSettings
+            gameKey={gameKey}
+            form={form}
+            setValue={setValue}
+            serverName={serverName}
+          />
+        )}
       </div>
+      <div className="flex justify-end">
+        <Button
+          onClick={() => applySettingsMutation.mutate()}
+          disabled={applySettingsMutation.isPending}
+          className="bg-primary text-primary-foreground hover:bg-primary/90"
+        >
+          {applySettingsMutation.isPending ? "Sauvegarde…" : "Sauvegarder les paramètres"}
+        </Button>
+      </div>
+      <SettingsChangeLog entries={changeLog} />
       <div className="rounded-lg border border-accent/30 bg-accent/10 p-4 text-sm text-accent">
-        Pour modifier les fichiers comme server.properties, utilisez cette interface dès que le
-        réglage sera disponible. L’accès direct au fichier est volontairement verrouillé.
+        {isMinecraft
+          ? "Les fichiers comme server.properties restent verrouillés. Les changements sont validés par XNT et préparés pour synchronisation contrôlée."
+          : "Les paramètres avancés de ce jeu seront ajoutés progressivement. Les fichiers critiques restent verrouillés côté serveur."}
       </div>
     </div>
   );
+}
+
+function GenericGameSettings({
+  gameKey,
+  form,
+  setValue,
+  serverName,
+}: {
+  gameKey: ReturnType<typeof normalizeGameKey>;
+  form: Record<string, unknown>;
+  setValue: (key: string, value: unknown) => void;
+  serverName: string;
+}) {
+  if (gameKey === "conan") {
+    return (
+      <>
+        <SettingTextField
+          label="Nom serveur"
+          value={stringValue(form.serverName) || serverName}
+          onChange={(value) => setValue("serverName", value)}
+          maxLength={40}
+        />
+        <SettingTextField
+          label="Motd"
+          value={stringValue(form.motd)}
+          onChange={(value) => setValue("motd", value)}
+          maxLength={120}
+        />
+        <SettingTextField
+          label="Password"
+          value={stringValue(form.password)}
+          onChange={(value) => setValue("password", value)}
+          maxLength={80}
+          type="password"
+        />
+        <InfoLine label="Slots achetés" value="Géré par votre offre" />
+      </>
+    );
+  }
+  if (gameKey === "ark") {
+    return (
+      <>
+        <SettingTextField
+          label="Nom serveur"
+          value={stringValue(form.serverName) || serverName}
+          onChange={(value) => setValue("serverName", value)}
+          maxLength={40}
+        />
+        <SettingTextField
+          label="Motd"
+          value={stringValue(form.motd)}
+          onChange={(value) => setValue("motd", value)}
+          maxLength={120}
+        />
+        <SettingTextField
+          label="Password"
+          value={stringValue(form.password)}
+          onChange={(value) => setValue("password", value)}
+          maxLength={80}
+          type="password"
+        />
+        <SettingNumberField
+          label="XP Rate"
+          value={numberValue(form.xpRate, 1)}
+          min={0.1}
+          max={10}
+          step={0.1}
+          onChange={(value) => setValue("xpRate", value)}
+        />
+        <SettingNumberField
+          label="Harvest Rate"
+          value={numberValue(form.harvestRate, 1)}
+          min={0.1}
+          max={10}
+          step={0.1}
+          onChange={(value) => setValue("harvestRate", value)}
+        />
+        <SettingNumberField
+          label="Taming Rate"
+          value={numberValue(form.tamingRate, 1)}
+          min={0.1}
+          max={10}
+          step={0.1}
+          onChange={(value) => setValue("tamingRate", value)}
+        />
+        <InfoLine label="Slots achetés" value="Géré par votre offre" />
+      </>
+    );
+  }
+  if (gameKey === "gmod") {
+    return (
+      <>
+        <SettingTextField
+          label="Hostname"
+          value={stringValue(form.hostname) || serverName}
+          onChange={(value) => setValue("hostname", value)}
+          maxLength={40}
+        />
+        <SettingTextField
+          label="Gamemode"
+          value={stringValue(form.gamemode)}
+          onChange={(value) => setValue("gamemode", value)}
+          maxLength={40}
+        />
+        <SettingTextField
+          label="Collection ID"
+          value={stringValue(form.collectionId)}
+          onChange={(value) => setValue("collectionId", value)}
+          maxLength={32}
+        />
+        <InfoLine label="Slots achetés" value="Géré par votre offre" />
+      </>
+    );
+  }
+  return (
+    <div className="rounded-lg border border-primary/15 bg-background/35 p-3 md:col-span-2">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">
+        Paramètres avancés
+      </div>
+      <div className="mt-1 text-sm text-primary">
+        Les paramètres avancés pour ce jeu seront bientôt disponibles.
+      </div>
+    </div>
+  );
+}
+
+function SettingTextField({
+  label,
+  value,
+  onChange,
+  maxLength,
+  type = "text",
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  maxLength: number;
+  type?: string;
+}) {
+  return (
+    <label className="space-y-1">
+      <span className="text-xs uppercase tracking-wider text-muted-foreground">{label}</span>
+      <Input
+        type={type}
+        value={value}
+        maxLength={maxLength}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
+function SettingNumberField({
+  label,
+  value,
+  min,
+  max,
+  step = 1,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="space-y-1">
+      <span className="text-xs uppercase tracking-wider text-muted-foreground">{label}</span>
+      <Input
+        type="number"
+        value={value}
+        min={min}
+        max={max}
+        step={step}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+    </label>
+  );
+}
+
+function SettingSelectField({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="space-y-1">
+      <span className="text-xs uppercase tracking-wider text-muted-foreground">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+      >
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+function SettingBooleanField({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-3 rounded-lg border border-primary/15 bg-background/35 p-3">
+      <span className="text-sm">{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-5 w-5 accent-[color:var(--primary)]"
+      />
+    </label>
+  );
+}
+
+function SettingsChangeLog({ entries }: { entries: SettingsChangeLogEntry[] }) {
+  if (entries.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-primary/15 bg-background/30 p-4">
+      <div className="mb-3 text-xs uppercase tracking-wider text-primary">Historique</div>
+      <div className="space-y-2">
+        {entries
+          .slice()
+          .reverse()
+          .map((entry, index) => (
+            <div
+              key={`${entry.at}-${entry.key}-${index}`}
+              className="text-xs text-muted-foreground"
+            >
+              {new Date(entry.at).toLocaleString()} · {entry.key} : {String(entry.old_value ?? "—")}{" "}
+              → {String(entry.new_value ?? "—")}
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function buildServerSettingsForm(
+  gameKey: ReturnType<typeof normalizeGameKey>,
+  settings: Record<string, unknown>,
+  serverName: string,
+) {
+  const base = { ...settings };
+  if (gameKey === "minecraft") {
+    return {
+      serverName,
+      motd: "",
+      difficulty: "normal",
+      gamemode: "survival",
+      hardcore: false,
+      pvp: true,
+      whitelist: false,
+      onlineMode: true,
+      allowFlight: false,
+      spawnProtection: 16,
+      viewDistance: 10,
+      simulationDistance: 10,
+      seed: "",
+      ...base,
+    };
+  }
+  if (gameKey === "conan") return { serverName, motd: "", password: "", ...base };
+  if (gameKey === "ark") {
+    return {
+      serverName,
+      motd: "",
+      password: "",
+      xpRate: 1,
+      harvestRate: 1,
+      tamingRate: 1,
+      ...base,
+    };
+  }
+  if (gameKey === "gmod") return { hostname: serverName, gamemode: "", collectionId: "", ...base };
+  return base;
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function numberValue(value: unknown, fallback: number) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function getServerSettingsLabel(gameKey: ReturnType<typeof normalizeGameKey>) {
+  if (gameKey === "minecraft") return "Paramètres Minecraft";
+  if (gameKey === "conan") return "Paramètres Conan Exiles";
+  if (gameKey === "ark") return "Paramètres ARK";
+  if (gameKey === "gmod") return "Paramètres Garry's Mod";
+  return "Paramètres serveur";
+}
+
+function formatVersionApplyStatus(status?: string | null) {
+  if (status === "applied") return "Appliquée";
+  if (status === "pending_template_support") return "En attente template compatible";
+  if (status === "managed") return "Gérée automatiquement";
+  return "Gérée automatiquement";
 }
 
 /* ---------------- Settings ---------------- */
@@ -1987,8 +2573,12 @@ function SettingsTab({
 
   const rename = useMutation({
     mutationFn: () => renameFn({ data: { orderId, name: name.trim() } }),
-    onSuccess: () => {
-      toast.success("Serveur renommé.");
+    onSuccess: (result) => {
+      toast.success(
+        result.infrastructureRenamed
+          ? "Serveur renommé."
+          : "Nom XNT mis à jour. Le service serveur garde peut-être son nom interne.",
+      );
       qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
       qc.invalidateQueries({ queryKey: ["my-servers"] });
       qc.invalidateQueries({ queryKey: ["my-billing"] });

@@ -200,6 +200,18 @@ export type EggDetails = {
   variables: EggVariable[];
 };
 
+export async function listNestEggs(nestId: number): Promise<Array<{ id: number; name: string }>> {
+  const res = (await ptero.app(`/nests/${nestId}/eggs`)) as {
+    data?: Array<{ attributes?: { id?: number | null; name?: string | null } }>;
+  };
+  return (res.data ?? [])
+    .map((egg) => ({
+      id: Number(egg.attributes?.id),
+      name: egg.attributes?.name ?? "",
+    }))
+    .filter((egg) => Number.isFinite(egg.id) && egg.name.trim());
+}
+
 export async function getEggDetails(nestId: number, eggId: number): Promise<EggDetails> {
   const res = (await ptero.app(`/nests/${nestId}/eggs/${eggId}?include=variables`)) as {
     attributes: {

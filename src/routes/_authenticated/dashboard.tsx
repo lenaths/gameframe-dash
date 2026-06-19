@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { SiteHeader } from "@/components/site-header";
 import { getServerDetail, listMyServers, powerServer } from "@/lib/servers.functions";
 import { checkIsAdmin } from "@/lib/admin.functions";
+import { isMinecraftGame } from "@/lib/game-config";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -180,6 +181,7 @@ type DashboardServer = {
   minecraft_settings?: {
     server_type?: string | null;
     minecraft_version?: string | null;
+    version_apply_status?: string | null;
     max_players?: number | null;
     max_players_applied?: boolean;
   } | null;
@@ -353,22 +355,35 @@ function ServerCard({
         <ResourcePill label="RAM" value={`${((s.plans?.ram_mb ?? 0) / 1024).toFixed(0)} GB`} />
         <ResourcePill label="CPU" value={`${s.plans?.cpu_percent ?? 0}%`} />
         <ResourcePill label="Disque" value={`${((s.plans?.disk_mb ?? 0) / 1024).toFixed(0)} GB`} />
-        <ResourcePill
-          label="Joueurs"
-          value={
-            s.minecraft_settings?.max_players
-              ? `${s.minecraft_settings.max_players} max`
-              : "Géré auto"
-          }
-        />
-        <ResourcePill
-          label="Version"
-          value={s.minecraft_settings?.minecraft_version ?? "Gérée auto"}
-        />
-        <ResourcePill
-          label="Type"
-          value={s.minecraft_settings?.server_type ?? template ?? "Serveur Minecraft"}
-        />
+        {isMinecraftGame(s.plans?.game) && (
+          <>
+            <ResourcePill
+              label="Joueurs"
+              value={
+                s.minecraft_settings?.max_players
+                  ? `${s.minecraft_settings.max_players} max`
+                  : "Géré auto"
+              }
+            />
+            <ResourcePill
+              label="Version"
+              value={
+                s.minecraft_settings?.minecraft_version &&
+                s.minecraft_settings.minecraft_version !== "auto"
+                  ? s.minecraft_settings.minecraft_version
+                  : "Gérée automatiquement"
+              }
+            />
+            <ResourcePill
+              label="Version config"
+              value={formatVersionApplyStatus(s.minecraft_settings?.version_apply_status)}
+            />
+            <ResourcePill
+              label="Type"
+              value={s.minecraft_settings?.server_type ?? template ?? "Serveur Minecraft"}
+            />
+          </>
+        )}
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
         <Button asChild size="sm" variant="outline">
@@ -410,6 +425,12 @@ function ServerCard({
       </div>
     </div>
   );
+}
+
+function formatVersionApplyStatus(status?: string | null) {
+  if (status === "applied") return "Appliquée";
+  if (status === "pending_template_support") return "En attente";
+  return "Automatique";
 }
 
 function modpackInstallLabel(status: string) {

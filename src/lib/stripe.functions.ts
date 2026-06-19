@@ -1,6 +1,13 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import {
+  calculateMinecraftPlayerPricing,
+  getMinecraftVersionVariable,
+  isMinecraftGame,
+  normalizeMinecraftServerType,
+  normalizeGameKey,
+} from "@/lib/game-config";
 
 type SupabaseAny = {
   from: (table: string) => SupabaseQuery;
@@ -47,57 +54,30 @@ type ProfileForCheckout = {
   stripe_customer_id?: string | null;
 };
 
-function recommendedMaxPlayers(
-  plan: Pick<PlanForCheckout, "ram_mb" | "cpu_percent"> & Partial<Record<string, unknown>>,
-) {
-  const ramMb = typeof plan.ram_mb === "number" ? plan.ram_mb : 0;
-  const cpu = typeof plan.cpu_percent === "number" ? plan.cpu_percent : 0;
-  if (ramMb >= 32768 || cpu >= 400) return 200;
-  if (ramMb >= 16384 || cpu >= 250) return 100;
-  if (ramMb >= 8192 || cpu >= 150) return 60;
-  if (ramMb >= 4096 || cpu >= 100) return 30;
-  return 10;
-}
-
 function playerPricingForPlan(plan: PlanForCheckout, requestedMaxPlayers?: number) {
-  const planName = plan.name.toLowerCase();
-  const ramMb = plan.ram_mb;
-  const fallbackMax = ramMb >= 16384 ? 100 : ramMb >= 8192 ? 60 : ramMb >= 4096 ? 30 : 10;
-  const included = planName.includes("netherite")
-    ? 80
-    : planName.includes("diamond")
-      ? 40
-      : planName.includes("iron")
-        ? 20
-        : Math.min(recommendedMaxPlayers(plan), fallbackMax);
-  const maxAllowed = planName.includes("netherite")
-    ? 100
-    : planName.includes("diamond")
-      ? 60
-      : planName.includes("iron")
-        ? 30
-        : fallbackMax;
-  const stepPrice = planName.includes("netherite")
-    ? 500
-    : planName.includes("diamond")
-      ? 200
-      : planName.includes("iron")
-        ? 100
-        : 0;
-  const maxPlayers = Math.min(
-    maxAllowed,
-    Math.max(1, requestedMaxPlayers ?? Math.min(included, maxAllowed)),
-  );
-  const extraPlayers = Math.max(0, maxPlayers - included);
-  const extraPriceCents = extraPlayers > 0 ? stepPrice : 0;
-  const totalPriceCents = plan.price_monthly_cents + extraPriceCents;
+  if (!isMinecraftGame(plan.game)) {
+    return {
+      pricing_mode: "base",
+      base_price_cents: plan.price_monthly_cents,
+      price_per_player_cents: 0,
+      players: null,
+      players_price_cents: 0,
+      min_players: null,
+      max_players_allowed: null,
+      max_players: null,
+      extra_players: 0,
+      extra_price_cents: 0,
+      total_price_cents: plan.price_monthly_cents,
+    };
+  }
+  const pricing = calculateMinecraftPlayerPricing(plan, requestedMaxPlayers);
   return {
-    included_players: included,
-    max_players_allowed: maxAllowed,
-    max_players: maxPlayers,
-    extra_players: extraPlayers,
-    extra_price_cents: extraPriceCents,
-    total_price_cents: totalPriceCents,
+    ...pricing,
+    players: pricing.selected_players,
+    players_price_cents: pricing.players_adjustment_cents,
+    max_players: pricing.selected_players,
+    extra_players: pricing.players_delta,
+    extra_price_cents: pricing.players_adjustment_cents,
   };
 }
 
@@ -107,6 +87,8 @@ const checkoutInput = z.object({
   variantIndex: z.number().int().min(0).optional(),
   environment: z.record(z.string(), z.string()).optional(),
   maxPlayers: z.number().int().min(1).max(200).optional(),
+  serverType: z.string().trim().max(40).optional(),
+  minecraftVersion: z.string().trim().max(40).optional(),
   selectedModpack: z
     .object({
       modpackId: z.string().uuid(),
@@ -138,6 +120,8 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
     const planError = planResult.error;
     if (planError || !plan) throw new Error("Plan introuvable ou inactif.");
     if (plan.price_monthly_cents <= 0) throw new Error("Ce plan n'a pas de prix valide.");
+    const gameKey = normalizeGameKey(plan.game);
+    const minecraft = gameKey === "minecraft";
 
     const profileResult = await db
       .from("profiles")
@@ -184,12 +168,54 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
       (typeof data.variantIndex === "number" && data.variantIndex >= 0 ? data.variantIndex : 0);
     const selectedVariantIndex = variants[requestedVariantIndex] ? requestedVariantIndex : 0;
     const selectedVariant = variants[selectedVariantIndex] ?? variants[0] ?? null;
-    const selectedTemplateLabel = selectedVariant?.label ?? plan.name;
-    const selectedVersionLabel = selectedVariant?.versionLabel ?? null;
+    const selectedServerType =
+      normalizeMinecraftServerType(data.serverType) ??
+      normalizeMinecraftServerType(selectedVariant?.label) ??
+      plan.name.toLowerCase();
+    const selectedTemplateLabel = selectedVariant?.label || data.serverType?.trim() || plan.name;
+    const selectedVersionLabel =
+      data.minecraftVersion?.trim() && data.minecraftVersion.trim() !== "auto"
+        ? data.minecraftVersion.trim()
+        : (selectedVariant?.minecraftVersion ?? selectedVariant?.versionLabel ?? null);
     const serverName = data.serverName?.trim();
     if (!serverName) throw new Error("Nom du serveur obligatoire avant paiement.");
-    const playerPricing = playerPricingForPlan(plan, data.maxPlayers);
+    const playerPricing = playerPricingForPlan(plan, minecraft ? data.maxPlayers : undefined);
     const maxPlayers = playerPricing.max_players;
+    const versionVariable = minecraft ? getMinecraftVersionVariable(selectedServerType) : null;
+    const versionApplyStatus = !minecraft
+      ? null
+      : selectedVersionLabel && versionVariable
+        ? "applied"
+        : selectedVersionLabel
+          ? "pending_template_support"
+          : "managed";
+    const checkoutEnvironment = {
+      ...(data.environment ?? {}),
+      ...(minecraft && selectedVersionLabel && versionVariable
+        ? { [versionVariable]: selectedVersionLabel }
+        : {}),
+    };
+    const minecraftMetadata = minecraft
+      ? {
+          server_type: selectedServerType,
+          egg_id: selectedVariant?.egg_id ?? plan.pterodactyl_egg_id,
+          nest_id: selectedVariant?.nest_id ?? plan.pterodactyl_nest_id,
+          minecraft_version: selectedVersionLabel ?? "auto",
+          version_source: selectedVersionLabel ? "xnt_catalog" : "template",
+          version_apply_status: versionApplyStatus,
+          ...(versionVariable ? { version_variable: versionVariable } : {}),
+          ...(maxPlayers ? { max_players: maxPlayers } : {}),
+          player_pricing: playerPricing,
+          minecraft_settings: {
+            server_type: selectedTemplateLabel,
+            minecraft_version: selectedVersionLabel ?? "auto",
+            version_apply_status: versionApplyStatus,
+            ...(versionVariable ? { version_variable: versionVariable } : {}),
+            max_players: maxPlayers,
+            max_players_applied: false,
+          },
+        }
+      : {};
     const orderResult = await db
       .from("orders")
       .insert({
@@ -207,23 +233,19 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
         metadata: {
           source: "stripe_checkout",
           provisioning_deferred: true,
+          selected_game: gameKey,
           server_name: serverName,
-          server_type: selectedTemplateLabel,
-          minecraft_version: selectedVersionLabel ?? "managed",
-          max_players: maxPlayers,
-          player_pricing: playerPricing,
+          ...minecraftMetadata,
           selected_template: {
             index: selectedVariantIndex,
+            ...(selectedVariant?.templateId ? { template_id: selectedVariant.templateId } : {}),
             label: selectedTemplateLabel,
+            server_type: selectedServerType,
+            egg_id: selectedVariant?.egg_id ?? plan.pterodactyl_egg_id,
+            nest_id: selectedVariant?.nest_id ?? plan.pterodactyl_nest_id,
             version: selectedVersionLabel,
             source: selectedVariant?.source ?? "allowed_eggs",
             ...(modpackSelection ? { selection_source: "curseforge_modpack" } : {}),
-          },
-          minecraft_settings: {
-            server_type: selectedTemplateLabel,
-            minecraft_version: selectedVersionLabel ?? "managed",
-            max_players: maxPlayers,
-            max_players_applied: false,
           },
           ...(modpackSelection
             ? {
@@ -231,7 +253,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
                 selected_modpack_version: modpackSelection.version,
               }
             : {}),
-          environment: data.environment ?? {},
+          environment: checkoutEnvironment,
         },
       })
       .select("id")
@@ -260,7 +282,10 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
                       recurring: { interval: "month" as const },
                       product_data: {
                         name: `${plan.game} - ${plan.name}`,
-                        description: `${plan.description ?? "Serveur XNT"} · ${maxPlayers} joueurs max`,
+                        description:
+                          minecraft && maxPlayers
+                            ? `${plan.description ?? "Serveur XNT"} · ${maxPlayers} joueurs max`
+                            : (plan.description ?? undefined),
                       },
                     },
                   }
@@ -285,10 +310,11 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
         user_id: context.userId,
         plan_id: plan.id,
         template: selectedTemplateLabel,
-        max_players: String(maxPlayers),
+        game: gameKey,
+        ...(minecraft && maxPlayers ? { max_players: String(maxPlayers) } : {}),
         total_price_cents: String(playerPricing.total_price_cents),
         extra_price_cents: String(playerPricing.extra_price_cents),
-        ...(selectedVersionLabel ? { version: selectedVersionLabel } : {}),
+        ...(minecraft && selectedVersionLabel ? { version: selectedVersionLabel } : {}),
         ...(modpackSelection ? { modpack: modpackSelection.modpack.name } : {}),
         provisioning_deferred: "true",
       },
@@ -298,10 +324,11 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
           user_id: context.userId,
           plan_id: plan.id,
           template: selectedTemplateLabel,
-          max_players: String(maxPlayers),
+          game: gameKey,
+          ...(minecraft && maxPlayers ? { max_players: String(maxPlayers) } : {}),
           total_price_cents: String(playerPricing.total_price_cents),
           extra_price_cents: String(playerPricing.extra_price_cents),
-          ...(selectedVersionLabel ? { version: selectedVersionLabel } : {}),
+          ...(minecraft && selectedVersionLabel ? { version: selectedVersionLabel } : {}),
           ...(modpackSelection ? { modpack: modpackSelection.modpack.name } : {}),
           provisioning_deferred: "true",
         },

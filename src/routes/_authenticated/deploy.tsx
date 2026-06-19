@@ -9,13 +9,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SiteHeader } from "@/components/site-header";
 import { EggVariablesForm } from "@/components/egg-variables-form";
-import { findVersionVariable, getDeployOptions, listPlans } from "@/lib/plans.functions";
+import { getDeployOptions, listPlans } from "@/lib/plans.functions";
 import {
   listAvailableModpacks,
   listAvailableModpackVersions,
   listCompatiblePlansForModpack,
 } from "@/lib/modpacks.functions";
 import { createCheckoutSession } from "@/lib/stripe.functions";
+import {
+  calculateMinecraftPlayerPricing,
+  getMinecraftPlayerPricingRules,
+  isMinecraftGame,
+  isProxyTemplateKey,
+  MINECRAFT_SERVER_TYPES,
+} from "@/lib/game-config";
 import { toast } from "sonner";
 
 const searchSchema = z.object({
@@ -64,6 +71,7 @@ function Deploy() {
   const [selectedModpackId, setSelectedModpackId] = useState(preselectedModpack ?? "");
   const [selectedVersionId, setSelectedVersionId] = useState(preselectedVersion ?? "");
   const [maxPlayers, setMaxPlayers] = useState(10);
+  const [minecraftVersionOverride, setMinecraftVersionOverride] = useState<string | null>(null);
 
   const opts = useQuery({
     queryKey: ["deploy-options", planId],
@@ -106,6 +114,7 @@ function Deploy() {
     const seed: Record<string, string> = {};
     for (const v of currentVariant.variables) seed[v.env_variable] = v.default_value ?? "";
     setEnv(seed);
+    setMinecraftVersionOverride(null);
   }, [currentVariant]);
 
   const checkout = useMutation({
@@ -116,7 +125,9 @@ function Deploy() {
           serverName: name.trim(),
           variantIndex,
           environment: env,
-          maxPlayers,
+          maxPlayers: isMinecraft ? maxPlayers : undefined,
+          serverType: isMinecraft ? currentVariant?.templateKey : undefined,
+          minecraftVersion: isMinecraft ? selectedMinecraftVersion : undefined,
           selectedModpack:
             deployType === "modpack" && selectedModpackId && selectedVersionId
               ? { modpackId: selectedModpackId, versionId: selectedVersionId }
@@ -132,15 +143,7 @@ function Deploy() {
   const variants = useMemo(() => opts.data?.variants ?? [], [opts.data?.variants]);
   const serverTypeOptions = useMemo(
     () =>
-      [
-        { key: "vanilla", label: "Vanilla", description: "Expérience officielle Minecraft." },
-        { key: "paper", label: "Paper", description: "Performance optimisée pour plugins." },
-        { key: "purpur", label: "Purpur", description: "Réglages et performances avancés." },
-        { key: "fabric", label: "Fabric", description: "Mods Fabric légers et modernes." },
-        { key: "forge", label: "Forge", description: "Mods Forge classiques." },
-        { key: "neoforge", label: "NeoForge", description: "Mods NeoForge récents." },
-        { key: "quilt", label: "Quilt", description: "Mods Quilt." },
-      ].map((option) => ({
+      MINECRAFT_SERVER_TYPES.map((option) => ({
         ...option,
         variant: variants.find((variant) => variant.templateKey === option.key),
       })),
@@ -162,18 +165,54 @@ function Deploy() {
     [compatiblePlansQ.data?.plans],
   );
   const selectedPlan = (
-    deployType === "modpack" ? compatiblePlans.map((item) => item.plan) : (plansData?.plans ?? [])
+    deployType === "modpack" && selectedModpackId
+      ? compatiblePlans.map((item) => item.plan)
+      : (plansData?.plans ?? [])
   ).find((plan) => plan.id === planId);
-  const maxPlayersLimit = selectedPlan ? getMaxPlayersLimit(selectedPlan.ram_mb) : 10;
-  const recommendedPlayers = selectedPlan ? getRecommendedPlayers(selectedPlan.ram_mb) : 10;
-  const playerPrice = selectedPlan
-    ? getPlayerPricing(
-        selectedPlan.name,
-        selectedPlan.ram_mb,
-        selectedPlan.price_monthly_cents,
-        maxPlayers,
-      )
-    : null;
+  const isMinecraft = selectedPlan ? isMinecraftGame(selectedPlan.game) : false;
+  const maxPlayersLimit = selectedPlan
+    ? getMaxPlayersLimit(selectedPlan.name, selectedPlan.ram_mb)
+    : 10;
+  const recommendedPlayers = selectedPlan
+    ? getRecommendedPlayers(selectedPlan.name, selectedPlan.ram_mb)
+    : 10;
+  const playerPrice =
+    selectedPlan && isMinecraft
+      ? calculateMinecraftPlayerPricing(
+          {
+            name: selectedPlan.name,
+            ram_mb: selectedPlan.ram_mb,
+            price_monthly_cents: selectedPlan.price_monthly_cents,
+          },
+          maxPlayers,
+        )
+      : null;
+  const availableServerTypeOptions = serverTypeOptions.filter(
+    (option) => option.variant && !option.variant.error,
+  );
+  const currentTemplateKey = currentVariant?.templateKey ?? null;
+  const minecraftVersionOptions = currentTemplateKey
+    ? variants
+        .filter(
+          (variant) =>
+            variant.templateKey === currentTemplateKey &&
+            !variant.error &&
+            !isProxyTemplateKey(variant.templateKey),
+        )
+        .sort((a, b) => compareMinecraftVersions(b.minecraftVersion, a.minecraftVersion))
+    : [];
+  const detectedMinecraftVersions =
+    currentVariant?.minecraftVersions && currentVariant.minecraftVersions.length > 0
+      ? currentVariant.minecraftVersions
+      : minecraftVersionOptions
+          .map((variant) => variant.minecraftVersion ?? reliableVersionLabel(variant.versionLabel))
+          .filter((version): version is string => Boolean(version));
+  const selectedMinecraftVersion =
+    minecraftVersionOverride ??
+    detectedMinecraftVersions[0] ??
+    currentVariant?.minecraftVersion ??
+    reliableVersionLabel(currentVariant?.versionLabel) ??
+    "auto";
   useEffect(() => {
     if (deployType !== "modpack" || planId || compatiblePlans.length === 0) return;
     const firstPlan = compatiblePlans[0];
@@ -182,21 +221,25 @@ function Deploy() {
   }, [compatiblePlans, deployType, planId]);
   useEffect(() => {
     if (!selectedPlan) return;
+    if (!isMinecraft) return;
     setMaxPlayers((current) => {
       if (current < 1 || current > maxPlayersLimit) return recommendedPlayers;
       return current;
     });
-  }, [maxPlayersLimit, recommendedPlayers, selectedPlan]);
+  }, [isMinecraft, maxPlayersLimit, recommendedPlayers, selectedPlan]);
+  useEffect(() => {
+    if (!selectedPlan || isMinecraft || deployType === "classic") return;
+    setDeployType("classic");
+  }, [deployType, isMinecraft, selectedPlan]);
   const canSubmit =
     Boolean(planId) &&
     name.trim().length >= 2 &&
     !checkout.isPending &&
     !opts.isLoading &&
     (deployType === "classic" || Boolean(selectedModpackId && selectedVersionId));
-  const versionVariable = currentVariant ? findVersionVariable(currentVariant.variables) : null;
   const advancedVariables =
     currentVariant?.variables.filter(
-      (variable) => variable.env_variable !== versionVariable?.env_variable,
+      (variable) => !isHiddenMinecraftVariable(variable.env_variable, variable.default_value),
     ) ?? [];
 
   return (
@@ -232,39 +275,41 @@ function Deploy() {
             </p>
           </div>
 
-          <div className="space-y-2">
-            <Label>Type de déploiement</Label>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {[
-                {
-                  id: "classic" as const,
-                  title: "Serveur classique",
-                  description: "Choisis directement un template serveur XNT.",
-                },
-                {
-                  id: "modpack" as const,
-                  title: "Modpack CurseForge",
-                  description: "Sélectionne un modpack validé par l’équipe XNT.",
-                },
-              ].map((option) => (
-                <button
-                  key={option.id}
-                  type="button"
-                  onClick={() => setDeployType(option.id)}
-                  className={`rounded-lg border p-4 text-left transition-colors ${
-                    deployType === option.id
-                      ? "border-primary bg-primary/10 shadow-[0_0_24px_rgba(0,191,255,0.12)]"
-                      : "border-border/70 bg-background/20 hover:border-primary/40"
-                  }`}
-                >
-                  <div className="font-medium">{option.title}</div>
-                  <div className="mt-1 text-xs text-muted-foreground">{option.description}</div>
-                </button>
-              ))}
+          {isMinecraft && (
+            <div className="space-y-2">
+              <Label>Type de déploiement</Label>
+              <div className="grid gap-2 sm:grid-cols-2">
+                {[
+                  {
+                    id: "classic" as const,
+                    title: "Serveur classique",
+                    description: "Choisis directement un template serveur XNT.",
+                  },
+                  {
+                    id: "modpack" as const,
+                    title: "Modpack XNT",
+                    description: "Sélectionne un modpack validé par l’équipe XNT.",
+                  },
+                ].map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => setDeployType(option.id)}
+                    className={`rounded-lg border p-4 text-left transition-colors ${
+                      deployType === option.id
+                        ? "border-primary bg-primary/10 shadow-[0_0_24px_rgba(0,191,255,0.12)]"
+                        : "border-border/70 bg-background/20 hover:border-primary/40"
+                    }`}
+                  >
+                    <div className="font-medium">{option.title}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">{option.description}</div>
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
-          {deployType === "modpack" && (
+          {isMinecraft && deployType === "modpack" && (
             <div className="space-y-5 rounded-xl border border-primary/15 bg-background/30 p-4">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
                 <div>
@@ -380,7 +425,7 @@ function Deploy() {
               </div>
             )}
             <div className="grid gap-2">
-              {(deployType === "modpack"
+              {(deployType === "modpack" && selectedModpackId
                 ? compatiblePlans.map((item) => item.plan)
                 : (plansData?.plans ?? [])
               ).map((p) => (
@@ -417,7 +462,7 @@ function Deploy() {
                     </div>
                   </div>
                   <div className="font-display text-lg">
-                    ${(p.price_monthly_cents / 100).toFixed(2)}
+                    {formatEuro(p.price_monthly_cents)}
                     <span className="text-xs text-muted-foreground font-sans">/mo</span>
                   </div>
                 </label>
@@ -425,7 +470,7 @@ function Deploy() {
             </div>
           </div>
 
-          {planId && deployType === "classic" && (
+          {isMinecraft && planId && deployType === "classic" && (
             <div className="space-y-3">
               <Label>Type serveur Minecraft</Label>
               {opts.isLoading && (
@@ -434,18 +479,18 @@ function Deploy() {
               {opts.error && (
                 <div className="text-sm text-destructive">{(opts.error as Error).message}</div>
               )}
-              {serverTypeOptions.length > 0 && (
+              {availableServerTypeOptions.length > 0 ? (
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {serverTypeOptions.map((option) => {
-                    const v = option.variant;
+                  {availableServerTypeOptions.map((option) => {
+                    const v = option.variant!;
                     return (
                       <button
                         type="button"
                         key={option.key}
                         onClick={() => v && setVariantIndex(v.index)}
-                        disabled={!v || !!v.error}
+                        disabled={!!v.error}
                         className={`text-left rounded-lg border p-3 transition-colors ${
-                          !v || v.error
+                          v.error
                             ? "border-destructive/40 bg-destructive/10 cursor-not-allowed"
                             : variantIndex === v.index
                               ? "border-primary bg-primary/10"
@@ -454,7 +499,7 @@ function Deploy() {
                       >
                         <div className="font-medium">{option.label}</div>
                         <div
-                          className={`text-xs line-clamp-2 mt-0.5 ${!v || v.error ? "text-destructive" : "text-muted-foreground"}`}
+                          className={`text-xs line-clamp-2 mt-0.5 ${v.error ? "text-destructive" : "text-muted-foreground"}`}
                         >
                           {v?.error || v?.templateDescription || option.description}
                         </div>
@@ -462,26 +507,72 @@ function Deploy() {
                     );
                   })}
                 </div>
+              ) : variants.length > 0 ? (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {variants
+                    .filter((variant) => !variant.error)
+                    .map((variant) => (
+                      <button
+                        type="button"
+                        key={variant.index}
+                        onClick={() => setVariantIndex(variant.index)}
+                        className={`rounded-lg border p-3 text-left transition-colors ${
+                          variantIndex === variant.index
+                            ? "border-primary bg-primary/10"
+                            : "border-border/70 bg-background/20 hover:border-primary/40"
+                        }`}
+                      >
+                        <div className="font-medium">{variant.label}</div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">
+                          {variant.templateDescription}
+                        </div>
+                      </button>
+                    ))}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-border/70 bg-background/30 p-4 text-sm text-muted-foreground">
+                  Aucun type serveur disponible pour ce plan.
+                </div>
               )}
             </div>
           )}
 
-          {currentVariant && deployType === "classic" && (
+          {isMinecraft && currentVariant && deployType === "classic" && (
             <div className="space-y-3">
               <Label>Version Minecraft</Label>
               <div className="rounded-lg border border-primary/15 bg-background/40 p-4">
-                {versionVariable ? (
-                  <EggVariablesForm variables={[versionVariable]} values={env} onChange={setEnv} />
+                {detectedMinecraftVersions.length > 0 ? (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {detectedMinecraftVersions.map((version) => (
+                      <button
+                        key={version}
+                        type="button"
+                        onClick={() => setMinecraftVersionOverride(version)}
+                        className={`rounded-lg border p-3 text-left transition-colors ${
+                          selectedMinecraftVersion === version
+                            ? "border-primary bg-primary/10"
+                            : "border-border/70 bg-background/20 hover:border-primary/40"
+                        }`}
+                      >
+                        <div className="font-medium">{version}</div>
+                        {currentVariant.loader && (
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {currentVariant.loader}
+                          </div>
+                        )}
+                      </button>
+                    ))}
+                  </div>
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    Sélection de version bientôt disponible pour ce template.
+                    Version gérée automatiquement par le template.
                   </p>
                 )}
               </div>
             </div>
           )}
 
-          {selectedPlan && (
+          {isMinecraft && selectedPlan && (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <Label htmlFor="maxPlayers">Nombre de joueurs maximum</Label>
@@ -512,16 +603,16 @@ function Deploy() {
                     className="w-28"
                   />
                   <p className="text-sm text-muted-foreground">
-                    Inclus : {playerPrice?.includedPlayers ?? recommendedPlayers}. Limite :{" "}
-                    {maxPlayersLimit}. Cette valeur sera appliquée par les templates XNT
-                    compatibles.
+                    Joueurs inclus : {playerPrice?.included_players ?? 10}. Défaut recommandé :{" "}
+                    {recommendedPlayers}. Limite : {maxPlayersLimit}. Cette valeur sera appliquée
+                    par les templates XNT compatibles.
                   </p>
                 </div>
               </div>
             </div>
           )}
 
-          {selectedPlan && playerPrice && (
+          {isMinecraft && selectedPlan && playerPrice && (
             <div className="rounded-xl border border-primary/20 bg-primary/10 p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -531,13 +622,16 @@ function Deploy() {
                   </div>
                 </div>
                 <div className="font-display text-3xl font-bold text-primary">
-                  ${(playerPrice.totalCents / 100).toFixed(2)}
+                  {formatEuro(playerPrice.total_price_cents)}
                   <span className="text-sm font-sans text-muted-foreground">/mo</span>
                 </div>
               </div>
               <div className="mt-3 text-sm text-muted-foreground">
-                Inclus : {playerPrice.includedPlayers} joueurs · Supplément joueurs : $
-                {(playerPrice.extraCents / 100).toFixed(2)}/mo
+                Prix plan : {formatEuro(selectedPlan.price_monthly_cents)}/mo avec{" "}
+                {playerPrice.included_players} joueurs inclus · Prix par joueur :{" "}
+                {formatEuro(playerPrice.price_per_player_cents)}/mo · Ajustement joueurs :{" "}
+                {playerPrice.players_adjustment_cents < 0 ? "-" : "+"}
+                {formatEuro(Math.abs(playerPrice.players_adjustment_cents))}/mo
               </div>
             </div>
           )}
@@ -565,42 +659,55 @@ function Deploy() {
   );
 }
 
-function getMaxPlayersLimit(ramMb: number) {
-  if (ramMb >= 16384) return 100;
-  if (ramMb >= 8192) return 60;
-  if (ramMb >= 4096) return 30;
-  return 10;
+function getMaxPlayersLimit(name: string, ramMb: number) {
+  return getMinecraftPlayerPricingRules(name, ramMb).maxPlayersAllowed;
 }
 
-function getRecommendedPlayers(ramMb: number) {
-  if (ramMb >= 16384) return 80;
-  if (ramMb >= 8192) return 40;
-  if (ramMb >= 4096) return 20;
-  return 10;
+function formatEuro(cents: number) {
+  return `${(cents / 100).toFixed(2).replace(".", ",")} €`;
 }
 
-function getPlayerPricing(name: string, ramMb: number, baseCents: number, maxPlayers: number) {
-  const lower = name.toLowerCase();
-  const includedPlayers = lower.includes("netherite")
-    ? 80
-    : lower.includes("diamond")
-      ? 40
-      : lower.includes("iron")
-        ? 20
-        : getRecommendedPlayers(ramMb);
-  const stepCents = lower.includes("netherite")
-    ? 500
-    : lower.includes("diamond")
-      ? 200
-      : lower.includes("iron")
-        ? 100
-        : 0;
-  const extraPlayers = Math.max(0, maxPlayers - includedPlayers);
-  const extraCents = extraPlayers > 0 ? stepCents : 0;
-  return {
-    includedPlayers,
-    extraPlayers,
-    extraCents,
-    totalCents: baseCents + extraCents,
-  };
+function getRecommendedPlayers(name: string, ramMb: number) {
+  return getMinecraftPlayerPricingRules(name, ramMb).defaultPlayers;
+}
+
+function reliableVersionLabel(value: string | null | undefined) {
+  if (!value) return null;
+  if (
+    /^(BUNGEE_VERSION|VELOCITY_VERSION|WATERFALL_VERSION|JAVA_VERSION|BUILD_NUMBER)$/i.test(value)
+  ) {
+    return null;
+  }
+  const match = value.match(/\b\d+\.\d+(?:\.\d+)?\b/);
+  return match?.[0] ?? null;
+}
+
+function isHiddenMinecraftVariable(envVariable: string, defaultValue?: string | null) {
+  if (/^SERVER_JARFILE$/i.test(envVariable) && /bungee|bungeecord/i.test(defaultValue ?? "")) {
+    return true;
+  }
+  if (
+    /^(BUNGEE_VERSION|VELOCITY_VERSION|WATERFALL_VERSION|JAVA_VERSION|BUILD_NUMBER)$/i.test(
+      envVariable,
+    )
+  ) {
+    return true;
+  }
+  return /^(MINECRAFT_VERSION|MC_VERSION|VERSION|PAPER_VERSION|PURPUR_VERSION|FORGE_VERSION|FABRIC_VERSION|NEOFORGE_VERSION|QUILT_VERSION)$/i.test(
+    envVariable,
+  );
+}
+
+function compareMinecraftVersions(a?: string | null, b?: string | null) {
+  const parse = (value?: string | null) =>
+    reliableVersionLabel(value)
+      ?.split(".")
+      .map((part) => Number(part)) ?? [0];
+  const aa = parse(a);
+  const bb = parse(b);
+  for (let i = 0; i < Math.max(aa.length, bb.length); i += 1) {
+    const diff = (aa[i] ?? 0) - (bb[i] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }

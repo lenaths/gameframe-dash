@@ -1,6 +1,7 @@
 import "@tanstack/react-start/server-only";
 
 import { z } from "zod";
+import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
 
 type ServerOrderStatus =
   | "pending"
@@ -106,6 +107,17 @@ function normalizeMaxPlayers(value: unknown, fallback = 10) {
   return Math.min(200, Math.max(1, Math.round(parsed)));
 }
 
+function defaultMaxPlayersForPlan(plan: { name?: string | null; ram_mb?: number | null }) {
+  const name = (plan.name ?? "").toLowerCase();
+  if (name.includes("netherite")) return 40;
+  if (name.includes("diamond")) return 20;
+  if (name.includes("iron")) return 10;
+  const ramMb = plan.ram_mb ?? 0;
+  if (ramMb >= 16384) return 40;
+  if (ramMb >= 8192) return 20;
+  return 10;
+}
+
 function findMaxPlayersVariable(allowedVariables: Set<string>) {
   const candidates = [
     "MAX_PLAYERS",
@@ -163,10 +175,50 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
     typeof selectedTemplate.label === "string" && selectedTemplate.label.trim()
       ? selectedTemplate.label.trim()
       : null;
+  const selectedGame =
+    typeof metadata.selected_game === "string" && metadata.selected_game.trim()
+      ? normalizeGameKey(metadata.selected_game)
+      : "unknown";
+  const serverType =
+    typeof metadata.server_type === "string" && metadata.server_type.trim()
+      ? metadata.server_type.trim().toLowerCase()
+      : typeof selectedTemplate.server_type === "string" && selectedTemplate.server_type.trim()
+        ? selectedTemplate.server_type.trim().toLowerCase()
+        : (templateLabel?.toLowerCase() ?? null);
+  const eggId =
+    typeof metadata.egg_id === "number"
+      ? metadata.egg_id
+      : typeof selectedTemplate.egg_id === "number"
+        ? selectedTemplate.egg_id
+        : null;
+  const nestId =
+    typeof metadata.nest_id === "number"
+      ? metadata.nest_id
+      : typeof selectedTemplate.nest_id === "number"
+        ? selectedTemplate.nest_id
+        : null;
   const templateVersion =
     typeof selectedTemplate.version === "string" && selectedTemplate.version.trim()
       ? selectedTemplate.version.trim()
       : null;
+  const versionApplyStatus =
+    typeof metadata.version_apply_status === "string" && metadata.version_apply_status.trim()
+      ? metadata.version_apply_status.trim()
+      : metadata.minecraft_settings &&
+          typeof metadata.minecraft_settings === "object" &&
+          typeof (metadata.minecraft_settings as Record<string, unknown>).version_apply_status ===
+            "string"
+        ? String((metadata.minecraft_settings as Record<string, unknown>).version_apply_status)
+        : null;
+  const versionVariable =
+    typeof metadata.version_variable === "string" && metadata.version_variable.trim()
+      ? metadata.version_variable.trim()
+      : metadata.minecraft_settings &&
+          typeof metadata.minecraft_settings === "object" &&
+          typeof (metadata.minecraft_settings as Record<string, unknown>).version_variable ===
+            "string"
+        ? String((metadata.minecraft_settings as Record<string, unknown>).version_variable)
+        : null;
   const templateSource =
     selectedTemplate.source === "catalog" || selectedTemplate.source === "allowed_eggs"
       ? selectedTemplate.source
@@ -188,6 +240,14 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
         : undefined),
     10,
   );
+  const hasMaxPlayersMetadata = Boolean(
+    metadata.max_players ??
+    (metadata.minecraft_settings &&
+    typeof metadata.minecraft_settings === "object" &&
+    "max_players" in metadata.minecraft_settings
+      ? (metadata.minecraft_settings as Record<string, unknown>).max_players
+      : undefined),
+  );
   const playerPricing =
     metadata.player_pricing && typeof metadata.player_pricing === "object"
       ? (metadata.player_pricing as Record<string, unknown>)
@@ -198,11 +258,18 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
     serverName,
     environment,
     templateLabel,
+    selectedGame,
+    serverType,
+    eggId,
+    nestId,
     templateVersion,
+    versionApplyStatus,
+    versionVariable,
     templateSource,
     selectedModpack,
     selectedModpackVersion,
     maxPlayers,
+    hasMaxPlayersMetadata,
     playerPricing,
   };
 }
@@ -623,12 +690,66 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
 
   const planResult = await db
     .from("plans")
-    .select("id, game, name")
+    .select("id, game, name, ram_mb")
     .eq("id", order.plan_id)
     .single();
-  const plan = planResult.data as { game?: string; name?: string } | null;
+  const plan = planResult.data as { game?: string; name?: string; ram_mb?: number | null } | null;
   if (planResult.error || !plan) throw new Error("Plan not found.");
   const selection = getPaidOrderProvisioningSelection(order);
+  if (!selection.hasMaxPlayersMetadata) {
+    selection.maxPlayers = defaultMaxPlayersForPlan(plan);
+  }
+  const selectedGame =
+    selection.selectedGame !== "unknown" ? selection.selectedGame : normalizeGameKey(plan.game);
+  const minecraft = isMinecraftGame(selectedGame);
+  const provisioningMetadataBase = {
+    selected_game: selectedGame,
+    selected_template: {
+      index: selection.variantIndex,
+      label: selection.templateLabel,
+      version: selection.templateVersion,
+      source: selection.templateSource,
+      server_type: selection.serverType,
+      egg_id: selection.eggId,
+      nest_id: selection.nestId,
+    },
+    ...(selection.selectedModpack ? { selected_modpack: selection.selectedModpack } : {}),
+    ...(selection.selectedModpackVersion
+      ? { selected_modpack_version: selection.selectedModpackVersion }
+      : {}),
+    ...(minecraft
+      ? {
+          server_type: selection.serverType ?? selection.templateLabel,
+          egg_id: selection.eggId,
+          nest_id: selection.nestId,
+          minecraft_version: selection.templateVersion ?? "auto",
+          version_source: selection.templateVersion ? "xnt_catalog" : "template",
+          version_apply_status: selection.versionApplyStatus ?? "managed",
+          ...(selection.versionVariable ? { version_variable: selection.versionVariable } : {}),
+          max_players: selection.maxPlayers,
+          ...(selection.playerPricing ? { player_pricing: selection.playerPricing } : {}),
+        }
+      : {}),
+  };
+  const buildProvisioningMetadata = (
+    maxPlayersApplied = false,
+    maxPlayersVariable?: string | null,
+  ) => ({
+    ...provisioningMetadataBase,
+    ...(minecraft
+      ? {
+          minecraft_settings: {
+            server_type: selection.templateLabel,
+            minecraft_version: selection.templateVersion ?? "auto",
+            version_apply_status: selection.versionApplyStatus ?? "managed",
+            ...(selection.versionVariable ? { version_variable: selection.versionVariable } : {}),
+            max_players: selection.maxPlayers,
+            max_players_applied: maxPlayersApplied,
+            ...(maxPlayersVariable ? { max_players_variable: maxPlayersVariable } : {}),
+          },
+        }
+      : {}),
+  });
   const serverName =
     selection.serverName ?? `${plan.game ?? "Game"} ${plan.name ?? "Server"}`.slice(0, 40);
 
@@ -662,28 +783,7 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
         order_id: order.id,
         server_name: serverName,
         status: "pending",
-        metadata: {
-          selected_template: {
-            index: selection.variantIndex,
-            label: selection.templateLabel,
-            version: selection.templateVersion,
-            source: selection.templateSource,
-          },
-          ...(selection.selectedModpack ? { selected_modpack: selection.selectedModpack } : {}),
-          ...(selection.selectedModpackVersion
-            ? { selected_modpack_version: selection.selectedModpackVersion }
-            : {}),
-          server_type: selection.templateLabel,
-          minecraft_version: selection.templateVersion ?? "managed",
-          max_players: selection.maxPlayers,
-          ...(selection.playerPricing ? { player_pricing: selection.playerPricing } : {}),
-          minecraft_settings: {
-            server_type: selection.templateLabel,
-            minecraft_version: selection.templateVersion ?? "managed",
-            max_players: selection.maxPlayers,
-            max_players_applied: false,
-          },
-        },
+        metadata: buildProvisioningMetadata(false),
       })
       .select("id")
       .single();
@@ -728,28 +828,7 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
   await db
     .from("server_orders")
     .update({
-      metadata: {
-        selected_template: {
-          index: selection.variantIndex,
-          label: selection.templateLabel,
-          version: selection.templateVersion,
-          source: selection.templateSource,
-        },
-        ...(selection.selectedModpack ? { selected_modpack: selection.selectedModpack } : {}),
-        ...(selection.selectedModpackVersion
-          ? { selected_modpack_version: selection.selectedModpackVersion }
-          : {}),
-        server_type: selection.templateLabel,
-        minecraft_version: selection.templateVersion ?? "managed",
-        max_players: selection.maxPlayers,
-        ...(selection.playerPricing ? { player_pricing: selection.playerPricing } : {}),
-        minecraft_settings: {
-          server_type: selection.templateLabel,
-          minecraft_version: selection.templateVersion ?? "managed",
-          max_players: selection.maxPlayers,
-          max_players_applied: false,
-        },
-      },
+      metadata: buildProvisioningMetadata(false),
     })
     .eq("id", serverOrderId);
 
@@ -760,39 +839,18 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     serverName,
     variantIndex: selection.variantIndex,
     environment: selection.environment,
-    maxPlayers: selection.maxPlayers,
+    maxPlayers: minecraft ? selection.maxPlayers : undefined,
   });
 
   await db
     .from("server_orders")
     .update({
-      metadata: {
-        selected_template: {
-          index: selection.variantIndex,
-          label: selection.templateLabel,
-          version: selection.templateVersion,
-          source: selection.templateSource,
-        },
-        ...(selection.selectedModpack ? { selected_modpack: selection.selectedModpack } : {}),
-        ...(selection.selectedModpackVersion
-          ? { selected_modpack_version: selection.selectedModpackVersion }
-          : {}),
-        server_type: selection.templateLabel,
-        minecraft_version: selection.templateVersion ?? "managed",
-        max_players: selection.maxPlayers,
-        ...(selection.playerPricing ? { player_pricing: selection.playerPricing } : {}),
-        minecraft_settings: {
-          server_type: selection.templateLabel,
-          minecraft_version: selection.templateVersion ?? "managed",
-          max_players: selection.maxPlayers,
-          max_players_applied:
-            "minecraftSettings" in result
-              ? Boolean(result.minecraftSettings?.maxPlayersApplied)
-              : false,
-          max_players_variable:
-            "minecraftSettings" in result ? result.minecraftSettings?.maxPlayersVariable : null,
-        },
-      },
+      metadata: buildProvisioningMetadata(
+        "minecraftSettings" in result
+          ? Boolean(result.minecraftSettings?.maxPlayersApplied)
+          : false,
+        "minecraftSettings" in result ? result.minecraftSettings?.maxPlayersVariable : null,
+      ),
     })
     .eq("id", serverOrderId);
 
