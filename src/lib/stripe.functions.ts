@@ -1,13 +1,13 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
 import {
-  calculateMinecraftPlayerPricing,
-  getMinecraftVersionVariable,
-  isMinecraftGame,
-  normalizeMinecraftServerType,
-  normalizeGameKey,
-} from "@/lib/game-config";
+  buildCheckoutPricing,
+  buildOrderMetadata,
+  buildStripeCheckoutLineItem,
+  resolveCheckoutTemplate,
+} from "@/lib/checkout-pricing";
 
 type SupabaseAny = {
   from: (table: string) => SupabaseQuery;
@@ -53,33 +53,6 @@ type ProfileForCheckout = {
   display_name: string | null;
   stripe_customer_id?: string | null;
 };
-
-function playerPricingForPlan(plan: PlanForCheckout, requestedMaxPlayers?: number) {
-  if (!isMinecraftGame(plan.game)) {
-    return {
-      pricing_mode: "base",
-      base_price_cents: plan.price_monthly_cents,
-      price_per_player_cents: 0,
-      players: null,
-      players_price_cents: 0,
-      min_players: null,
-      max_players_allowed: null,
-      max_players: null,
-      extra_players: 0,
-      extra_price_cents: 0,
-      total_price_cents: plan.price_monthly_cents,
-    };
-  }
-  const pricing = calculateMinecraftPlayerPricing(plan, requestedMaxPlayers);
-  return {
-    ...pricing,
-    players: pricing.selected_players,
-    players_price_cents: pricing.players_adjustment_cents,
-    max_players: pricing.selected_players,
-    extra_players: pricing.players_delta,
-    extra_price_cents: pricing.players_adjustment_cents,
-  };
-}
 
 const checkoutInput = z.object({
   planId: z.string().uuid(),
@@ -163,59 +136,26 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
         })
       : null;
     const variants = await loadPlanTemplateVariants(plan);
-    const requestedVariantIndex =
-      modpackSelection?.variantIndex ??
-      (typeof data.variantIndex === "number" && data.variantIndex >= 0 ? data.variantIndex : 0);
-    const selectedVariantIndex = variants[requestedVariantIndex] ? requestedVariantIndex : 0;
-    const selectedVariant = variants[selectedVariantIndex] ?? variants[0] ?? null;
-    const selectedServerType =
-      normalizeMinecraftServerType(data.serverType) ??
-      normalizeMinecraftServerType(selectedVariant?.label) ??
-      plan.name.toLowerCase();
-    const selectedTemplateLabel = selectedVariant?.label || data.serverType?.trim() || plan.name;
-    const selectedVersionLabel =
-      data.minecraftVersion?.trim() && data.minecraftVersion.trim() !== "auto"
-        ? data.minecraftVersion.trim()
-        : (selectedVariant?.minecraftVersion ?? selectedVariant?.versionLabel ?? null);
+    const template = resolveCheckoutTemplate({
+      plan,
+      variants,
+      requestedVariantIndex: data.variantIndex,
+      requestedServerType: data.serverType,
+      requestedMinecraftVersion: data.minecraftVersion,
+      modpackSelection,
+    });
     const serverName = data.serverName?.trim();
     if (!serverName) throw new Error("Nom du serveur obligatoire avant paiement.");
-    const playerPricing = playerPricingForPlan(plan, minecraft ? data.maxPlayers : undefined);
+    const playerPricing = buildCheckoutPricing(plan, minecraft ? data.maxPlayers : undefined);
     const maxPlayers = playerPricing.max_players;
-    const versionVariable = minecraft ? getMinecraftVersionVariable(selectedServerType) : null;
-    const versionApplyStatus = !minecraft
-      ? null
-      : selectedVersionLabel && versionVariable
-        ? "applied"
-        : selectedVersionLabel
-          ? "pending_template_support"
-          : "managed";
-    const checkoutEnvironment = {
-      ...(data.environment ?? {}),
-      ...(minecraft && selectedVersionLabel && versionVariable
-        ? { [versionVariable]: selectedVersionLabel }
-        : {}),
-    };
-    const minecraftMetadata = minecraft
-      ? {
-          server_type: selectedServerType,
-          egg_id: selectedVariant?.egg_id ?? plan.pterodactyl_egg_id,
-          nest_id: selectedVariant?.nest_id ?? plan.pterodactyl_nest_id,
-          minecraft_version: selectedVersionLabel ?? "auto",
-          version_source: selectedVersionLabel ? "xnt_catalog" : "template",
-          version_apply_status: versionApplyStatus,
-          ...(versionVariable ? { version_variable: versionVariable } : {}),
-          ...(maxPlayers ? { max_players: maxPlayers } : {}),
-          player_pricing: playerPricing,
-          minecraft_settings: {
-            server_type: selectedTemplateLabel,
-            minecraft_version: selectedVersionLabel ?? "auto",
-            version_apply_status: versionApplyStatus,
-            ...(versionVariable ? { version_variable: versionVariable } : {}),
-            max_players: maxPlayers,
-            max_players_applied: false,
-          },
-        }
-      : {};
+    const orderMetadata = buildOrderMetadata({
+      plan,
+      serverName,
+      pricing: playerPricing,
+      template,
+      environment: data.environment,
+      modpackSelection,
+    });
     const orderResult = await db
       .from("orders")
       .insert({
@@ -230,31 +170,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
         billing_interval: plan.billing_interval ?? "monthly",
         stripe_customer_id: stripeCustomerId,
         stripe_price_id: plan.stripe_price_id ?? null,
-        metadata: {
-          source: "stripe_checkout",
-          provisioning_deferred: true,
-          selected_game: gameKey,
-          server_name: serverName,
-          ...minecraftMetadata,
-          selected_template: {
-            index: selectedVariantIndex,
-            ...(selectedVariant?.templateId ? { template_id: selectedVariant.templateId } : {}),
-            label: selectedTemplateLabel,
-            server_type: selectedServerType,
-            egg_id: selectedVariant?.egg_id ?? plan.pterodactyl_egg_id,
-            nest_id: selectedVariant?.nest_id ?? plan.pterodactyl_nest_id,
-            version: selectedVersionLabel,
-            source: selectedVariant?.source ?? "allowed_eggs",
-            ...(modpackSelection ? { selection_source: "curseforge_modpack" } : {}),
-          },
-          ...(modpackSelection
-            ? {
-                selected_modpack: modpackSelection.modpack,
-                selected_modpack_version: modpackSelection.version,
-              }
-            : {}),
-          environment: checkoutEnvironment,
-        },
+        metadata: orderMetadata.metadata,
       })
       .select("id")
       .single();
@@ -264,7 +180,6 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
     if (orderError || !order)
       throw new Error(orderError?.message ?? "Impossible de créer la commande.");
 
-    const useDynamicPrice = playerPricing.total_price_cents !== plan.price_monthly_cents;
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: stripeCustomerId,
@@ -272,49 +187,24 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
       cancel_url: cancelUrl,
       client_reference_id: order.id,
       line_items: [
-        plan.stripe_price_id
-          ? {
-              ...(useDynamicPrice
-                ? {
-                    price_data: {
-                      currency,
-                      unit_amount: playerPricing.total_price_cents,
-                      recurring: { interval: "month" as const },
-                      product_data: {
-                        name: `${plan.game} - ${plan.name}`,
-                        description:
-                          minecraft && maxPlayers
-                            ? `${plan.description ?? "Serveur XNT"} · ${maxPlayers} joueurs max`
-                            : (plan.description ?? undefined),
-                      },
-                    },
-                  }
-                : { price: plan.stripe_price_id }),
-              quantity: 1,
-            }
-          : {
-              quantity: 1,
-              price_data: {
-                currency,
-                unit_amount: playerPricing.total_price_cents,
-                recurring: { interval: "month" },
-                product_data: {
-                  name: `${plan.game} - ${plan.name}`,
-                  description: plan.description ?? undefined,
-                },
-              },
-            },
+        buildStripeCheckoutLineItem({
+          plan,
+          currency,
+          pricing: playerPricing,
+        }),
       ],
       metadata: {
         order_id: order.id,
         user_id: context.userId,
         plan_id: plan.id,
-        template: selectedTemplateLabel,
+        template: template.selectedTemplateLabel,
         game: gameKey,
         ...(minecraft && maxPlayers ? { max_players: String(maxPlayers) } : {}),
         total_price_cents: String(playerPricing.total_price_cents),
         extra_price_cents: String(playerPricing.extra_price_cents),
-        ...(minecraft && selectedVersionLabel ? { version: selectedVersionLabel } : {}),
+        ...(minecraft && template.selectedVersionLabel
+          ? { version: template.selectedVersionLabel }
+          : {}),
         ...(modpackSelection ? { modpack: modpackSelection.modpack.name } : {}),
         provisioning_deferred: "true",
       },
@@ -323,12 +213,14 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
           order_id: order.id,
           user_id: context.userId,
           plan_id: plan.id,
-          template: selectedTemplateLabel,
+          template: template.selectedTemplateLabel,
           game: gameKey,
           ...(minecraft && maxPlayers ? { max_players: String(maxPlayers) } : {}),
           total_price_cents: String(playerPricing.total_price_cents),
           extra_price_cents: String(playerPricing.extra_price_cents),
-          ...(minecraft && selectedVersionLabel ? { version: selectedVersionLabel } : {}),
+          ...(minecraft && template.selectedVersionLabel
+            ? { version: template.selectedVersionLabel }
+            : {}),
           ...(modpackSelection ? { modpack: modpackSelection.modpack.name } : {}),
           provisioning_deferred: "true",
         },

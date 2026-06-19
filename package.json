@@ -13,7 +13,7 @@
     "preview:prod": "vite preview --host 0.0.0.0",
     "stripe:sync-plans": "tsx scripts/sync-stripe-plans.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/security-pricing.test.ts",
+    "test": "tsx tests/run.ts",
     "lint": "eslint .",
     "format": "prettier --write ."
   },
