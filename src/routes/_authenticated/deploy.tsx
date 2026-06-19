@@ -24,10 +24,21 @@ import {
   MINECRAFT_SERVER_TYPES,
 } from "@/lib/game-config";
 import { toast } from "sonner";
+import {
+  isPlanLockedSearchValue,
+  resolveDeployPlan,
+  resolveDeployPlanState,
+} from "@/lib/deploy-flow";
 
 const searchSchema = z.object({
   plan: z.string().optional(),
   variant: z.coerce.number().int().min(0).optional(),
+  template: z.string().optional(),
+  server_type: z.string().optional(),
+  minecraft_version: z.string().optional(),
+  players: z.coerce.number().int().min(1).max(200).optional(),
+  max_players: z.coerce.number().int().min(1).max(200).optional(),
+  plan_locked: z.union([z.string(), z.number(), z.boolean()]).optional(),
   type: z.enum(["classic", "modpack"]).optional(),
   modpack: z.string().optional(),
   version: z.string().optional(),
@@ -43,6 +54,12 @@ function Deploy() {
   const {
     plan: preselected,
     variant: preselectedVariant,
+    template: preselectedTemplate,
+    server_type: preselectedServerType,
+    minecraft_version: preselectedMinecraftVersion,
+    players: preselectedPlayers,
+    max_players: preselectedMaxPlayers,
+    plan_locked: preselectedPlanLocked,
     type: preselectedType,
     modpack: preselectedModpack,
     version: preselectedVersion,
@@ -55,11 +72,6 @@ function Deploy() {
   const fetchCompatiblePlans = useServerFn(listCompatiblePlansForModpack);
   const startCheckout = useServerFn(createCheckoutSession);
 
-  const { data: plansData } = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
-  const modpacksQ = useQuery({
-    queryKey: ["available-modpacks"],
-    queryFn: () => fetchModpacks(),
-  });
   const [planId, setPlanId] = useState<string>(preselected ?? "");
   const [name, setName] = useState("");
   const [variantIndex, setVariantIndex] = useState(preselectedVariant ?? 0);
@@ -70,13 +82,32 @@ function Deploy() {
   const [modpackSearch, setModpackSearch] = useState("");
   const [selectedModpackId, setSelectedModpackId] = useState(preselectedModpack ?? "");
   const [selectedVersionId, setSelectedVersionId] = useState(preselectedVersion ?? "");
-  const [maxPlayers, setMaxPlayers] = useState(10);
-  const [minecraftVersionOverride, setMinecraftVersionOverride] = useState<string | null>(null);
+  const [maxPlayers, setMaxPlayers] = useState(preselectedPlayers ?? preselectedMaxPlayers ?? 10);
+  const [minecraftVersionOverride, setMinecraftVersionOverride] = useState<string | null>(
+    preselectedMinecraftVersion && preselectedMinecraftVersion !== "auto"
+      ? preselectedMinecraftVersion
+      : null,
+  );
+  const planLocked = isPlanLockedSearchValue(preselectedPlanLocked);
+
+  const { data: plansData } = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
+  const allPlans = useMemo(() => plansData?.plans ?? [], [plansData?.plans]);
+  const routePlanState = resolveDeployPlanState({
+    plans: allPlans,
+    planId,
+    planLockedValue: preselectedPlanLocked,
+  });
+  const canonicalRoutePlanId = routePlanState.selectedPlan?.id ?? planId;
+  const deployOptionsPlanId = isUuid(canonicalRoutePlanId) ? canonicalRoutePlanId : "";
+  const modpacksQ = useQuery({
+    queryKey: ["available-modpacks"],
+    queryFn: () => fetchModpacks(),
+  });
 
   const opts = useQuery({
-    queryKey: ["deploy-options", planId],
-    queryFn: () => fetchOptions({ data: { planId } }),
-    enabled: !!planId,
+    queryKey: ["deploy-options", deployOptionsPlanId],
+    queryFn: () => fetchOptions({ data: { planId: deployOptionsPlanId } }),
+    enabled: !!deployOptionsPlanId,
   });
   const versionsQ = useQuery({
     queryKey: ["available-modpack-versions", selectedModpackId],
@@ -89,10 +120,44 @@ function Deploy() {
     enabled: deployType === "modpack" && !!selectedModpackId,
   });
 
+  useEffect(() => {
+    if (!preselected) return;
+    setPlanId((current) => (current === preselected ? current : preselected));
+  }, [preselected]);
+
+  useEffect(() => {
+    if (typeof preselectedVariant !== "number") return;
+    setVariantIndex((current) => (current === preselectedVariant ? current : preselectedVariant));
+  }, [preselectedVariant, preselected]);
+
+  useEffect(() => {
+    const requestedPlayers = preselectedPlayers ?? preselectedMaxPlayers;
+    if (!requestedPlayers) return;
+    setMaxPlayers((current) => (current === requestedPlayers ? current : requestedPlayers));
+  }, [preselectedMaxPlayers, preselectedPlayers]);
+
+  useEffect(() => {
+    const canonicalId = routePlanState.selectedPlan?.id;
+    if (!canonicalId || planId === canonicalId) return;
+    setPlanId(canonicalId);
+  }, [planId, routePlanState.selectedPlan?.id]);
+
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    console.info("[DEPLOY FLOW] Query params", {
+      plan: preselected ?? null,
+      variant: preselectedVariant ?? null,
+      template: preselectedTemplate ?? null,
+      plan_locked: preselectedPlanLocked ?? null,
+    });
+  }, [preselected, preselectedPlanLocked, preselectedTemplate, preselectedVariant]);
+
   // Reset variant + env when plan changes; seed env defaults when variant changes.
   useEffect(() => {
-    if (deployType === "classic") setVariantIndex(0);
-  }, [deployType, planId]);
+    if (deployType !== "classic") return;
+    if (preselected) return;
+    setVariantIndex(0);
+  }, [deployType, planId, preselected]);
   useEffect(() => {
     if (deployType === "modpack" && preselectedModpack) return;
     setSelectedModpackId("");
@@ -121,7 +186,7 @@ function Deploy() {
     mutationFn: () =>
       startCheckout({
         data: {
-          planId,
+          planId: selectedPlan?.id ?? planId,
           serverName: name.trim(),
           variantIndex,
           environment: env,
@@ -141,6 +206,12 @@ function Deploy() {
   });
 
   const variants = useMemo(() => opts.data?.variants ?? [], [opts.data?.variants]);
+  useEffect(() => {
+    if (!preselectedServerType || variants.length === 0) return;
+    const normalized = normalizeDeployServerType(preselectedServerType);
+    const match = variants.find((variant) => variant.templateKey === normalized);
+    if (match) setVariantIndex(match.index);
+  }, [preselectedServerType, variants]);
   const serverTypeOptions = useMemo(
     () =>
       MINECRAFT_SERVER_TYPES.map((option) => ({
@@ -164,11 +235,42 @@ function Deploy() {
     () => compatiblePlansQ.data?.plans ?? [],
     [compatiblePlansQ.data?.plans],
   );
-  const selectedPlan = (
+  const unlockedPlanOptions =
     deployType === "modpack" && selectedModpackId
       ? compatiblePlans.map((item) => item.plan)
-      : (plansData?.plans ?? [])
-  ).find((plan) => plan.id === planId);
+      : allPlans;
+  const unlockedResolvedPlan = resolveDeployPlan(unlockedPlanOptions, planId);
+  const visiblePlanOptions = planLocked ? routePlanState.visiblePlans : unlockedPlanOptions;
+  const selectedPlan = planLocked ? routePlanState.selectedPlan : unlockedResolvedPlan;
+  const lockedPlanError = planLocked && plansData ? routePlanState.error : null;
+  const lockedPlanFailureReason = planLocked && plansData ? routePlanState.failureReason : null;
+
+  useEffect(() => {
+    if (!import.meta.env.DEV || !plansData) return;
+    const availablePlans = allPlans.map((plan) => ({
+      id: plan.id,
+      slug: plan.slug ?? null,
+      code: plan.code ?? null,
+      game: plan.game,
+      name: plan.name,
+    }));
+    console.info("[DEPLOY FLOW] Available plans", availablePlans);
+    console.info("[DEPLOY FLOW] Resolved plan", {
+      requestedPlan: planId || preselected || null,
+      resolvedPlan: selectedPlan
+        ? {
+            id: selectedPlan.id,
+            slug: selectedPlan.slug ?? null,
+            code: selectedPlan.code ?? null,
+            game: selectedPlan.game,
+            name: selectedPlan.name,
+          }
+        : null,
+      planLocked,
+      failureReason: lockedPlanFailureReason,
+    });
+  }, [allPlans, lockedPlanFailureReason, planId, planLocked, plansData, preselected, selectedPlan]);
+
   const isMinecraft = selectedPlan ? isMinecraftGame(selectedPlan.game) : false;
   const maxPlayersLimit = selectedPlan
     ? getMaxPlayersLimit(selectedPlan.name, selectedPlan.ram_mb)
@@ -233,6 +335,7 @@ function Deploy() {
   }, [deployType, isMinecraft, selectedPlan]);
   const canSubmit =
     Boolean(planId) &&
+    Boolean(selectedPlan) &&
     name.trim().length >= 2 &&
     !checkout.isPending &&
     !opts.isLoading &&
@@ -257,7 +360,7 @@ function Deploy() {
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            if (planId) checkout.mutate();
+            if (selectedPlan) checkout.mutate();
           }}
           className="xnt-card mt-8 space-y-6 rounded-2xl p-6"
         >
@@ -424,50 +527,95 @@ function Deploy() {
                 Aucun plan compatible. Installation modpack bientôt disponible.
               </div>
             )}
-            <div className="grid gap-2">
-              {(deployType === "modpack" && selectedModpackId
-                ? compatiblePlans.map((item) => item.plan)
-                : (plansData?.plans ?? [])
-              ).map((p) => (
-                <label
-                  key={p.id}
-                  className={`cursor-pointer rounded-lg border p-4 flex items-center justify-between transition-colors ${
-                    planId === p.id
-                      ? "border-primary bg-primary/10 shadow-[0_0_24px_rgba(0,191,255,0.12)]"
-                      : "border-border/70 bg-background/20 hover:border-primary/40"
-                  }`}
+            {planLocked && !plansData ? (
+              <div className="rounded-xl border border-primary/20 bg-background/35 p-4 text-sm text-muted-foreground">
+                Chargement du plan sélectionné…
+              </div>
+            ) : planLocked && lockedPlanError ? (
+              <div className="rounded-xl border border-destructive/35 bg-destructive/10 p-4">
+                <div className="font-medium text-destructive">{lockedPlanError}</div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  La sélection reçue depuis Pricing ne correspond à aucun plan actif.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-3"
+                  onClick={() => navigate({ to: "/pricing" })}
                 >
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="radio"
-                      name="plan"
-                      checked={planId === p.id}
-                      onChange={() => {
-                        setPlanId(p.id);
-                        if (deployType === "modpack") {
-                          const compatible = compatiblePlans.find((item) => item.plan.id === p.id);
-                          setVariantIndex(compatible?.variantIndex ?? 0);
-                        }
-                      }}
-                      className="accent-[color:var(--primary)]"
-                    />
-                    <div>
-                      <div className="font-medium">
-                        {p.game} — {p.name}
-                      </div>
-                      <div className="text-xs text-muted-foreground">
-                        {(p.ram_mb / 1024).toFixed(0)} GB RAM · {p.cpu_percent}% CPU ·{" "}
-                        {(p.disk_mb / 1024).toFixed(0)} GB SSD
-                      </div>
+                  Retour Pricing
+                </Button>
+              </div>
+            ) : planLocked && selectedPlan ? (
+              <div className="rounded-xl border border-primary/25 bg-primary/10 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs uppercase tracking-wider text-primary">
+                      Plan sélectionné
+                    </div>
+                    <div className="mt-1 font-display text-xl font-semibold">
+                      {selectedPlan.game} — {selectedPlan.name}
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {(selectedPlan.ram_mb / 1024).toFixed(0)} GB RAM · {selectedPlan.cpu_percent}%
+                      CPU · {(selectedPlan.disk_mb / 1024).toFixed(0)} GB SSD · prix de base{" "}
+                      {formatEuro(selectedPlan.price_monthly_cents)}/mo
                     </div>
                   </div>
-                  <div className="font-display text-lg">
-                    {formatEuro(p.price_monthly_cents)}
-                    <span className="text-xs text-muted-foreground font-sans">/mo</span>
-                  </div>
-                </label>
-              ))}
-            </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => navigate({ to: "/pricing" })}
+                  >
+                    Modifier le plan
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid gap-2">
+                {visiblePlanOptions.map((p) => (
+                  <label
+                    key={p.id}
+                    className={`cursor-pointer rounded-lg border p-4 flex items-center justify-between transition-colors ${
+                      planId === p.id
+                        ? "border-primary bg-primary/10 shadow-[0_0_24px_rgba(0,191,255,0.12)]"
+                        : "border-border/70 bg-background/20 hover:border-primary/40"
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="radio"
+                        name="plan"
+                        checked={planId === p.id}
+                        onChange={() => {
+                          setPlanId(p.id);
+                          if (deployType === "modpack") {
+                            const compatible = compatiblePlans.find(
+                              (item) => item.plan.id === p.id,
+                            );
+                            setVariantIndex(compatible?.variantIndex ?? 0);
+                          }
+                        }}
+                        className="accent-[color:var(--primary)]"
+                      />
+                      <div>
+                        <div className="font-medium">
+                          {p.game} — {p.name}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {(p.ram_mb / 1024).toFixed(0)} GB RAM · {p.cpu_percent}% CPU ·{" "}
+                          {(p.disk_mb / 1024).toFixed(0)} GB SSD
+                        </div>
+                      </div>
+                    </div>
+                    <div className="font-display text-lg">
+                      {formatEuro(p.price_monthly_cents)}
+                      <span className="text-xs text-muted-foreground font-sans">/mo</span>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            )}
           </div>
 
           {isMinecraft && planId && deployType === "classic" && (
@@ -680,6 +828,18 @@ function reliableVersionLabel(value: string | null | undefined) {
   }
   const match = value.match(/\b\d+\.\d+(?:\.\d+)?\b/);
   return match?.[0] ?? null;
+}
+
+function normalizeDeployServerType(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function isUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function isHiddenMinecraftVariable(envVariable: string, defaultValue?: string | null) {

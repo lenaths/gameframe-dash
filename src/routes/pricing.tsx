@@ -8,6 +8,11 @@ import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
 import { getTemplateDescription, listPlans } from "@/lib/plans.functions";
 import { useAuth } from "@/hooks/use-auth";
+import {
+  buildPricingDeploySearch,
+  buildPricingDeployUrl,
+  defaultPlayersForPricingPlan,
+} from "@/lib/deploy-flow";
 
 export const Route = createFileRoute("/pricing")({
   head: () => ({
@@ -147,14 +152,41 @@ function Pricing() {
                   className="mt-6 bg-primary text-primary-foreground shadow-[0_0_28px_rgba(0,191,255,0.22)] hover:bg-primary/90"
                   onClick={() => {
                     if (!user) navigate({ to: "/auth", search: { redirect: "/pricing" } as never });
-                    else
+                    else {
+                      const selectedTemplateIndex = selectedTemplates[p.id] ?? 0;
+                      const selectedTemplate = (
+                        p.allowed_eggs as Array<{ label?: string; templateId?: string }> | undefined
+                      )?.[selectedTemplateIndex];
+                      const deployInput = {
+                        planId: p.id,
+                        variantIndex: selectedTemplateIndex,
+                        templateId: selectedTemplate?.templateId,
+                        templateLabel: selectedTemplate?.label,
+                        minecraftVersion: "auto",
+                        players: defaultPlayersForPricingPlan(p),
+                        lockPlan: true,
+                      };
+                      const deploySearch = buildPricingDeploySearch(deployInput);
+                      const deployUrl = buildPricingDeployUrl(deployInput);
+                      if (import.meta.env.DEV) {
+                        console.info("[DEPLOY FLOW] Selected plan", {
+                          plan: p,
+                          variant: selectedTemplateIndex,
+                          serverType: deploySearch.server_type ?? null,
+                        });
+                        console.info("[DEPLOY FLOW] Generated URL", deployUrl);
+                        console.info("[Pricing -> Deploy]", {
+                          planId: p.id,
+                          selectedTemplate: selectedTemplate?.label ?? null,
+                          serverType: deploySearch.server_type ?? null,
+                          search: deploySearch,
+                        });
+                      }
                       navigate({
                         to: "/deploy",
-                        search: {
-                          plan: p.id,
-                          variant: selectedTemplates[p.id] ?? 0,
-                        } as never,
+                        search: deploySearch as never,
                       });
+                    }
                   }}
                 >
                   Configurer mon serveur

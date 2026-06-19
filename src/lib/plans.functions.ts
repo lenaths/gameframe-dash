@@ -340,6 +340,7 @@ export const listPlans = createServerFn({ method: "GET" }).handler(async () => {
       return {
         id: plan.id,
         slug: plan.slug,
+        code: plan.slug,
         game: plan.game,
         name: plan.name,
         description: plan.description,
@@ -350,6 +351,7 @@ export const listPlans = createServerFn({ method: "GET" }).handler(async () => {
         sort_order: plan.sort_order,
         allowed_eggs: variants.map((variant) => ({
           label: variant.versionLabel ? `${variant.label} ${variant.versionLabel}` : variant.label,
+          templateId: variant.templateId ?? undefined,
         })),
       };
     }),

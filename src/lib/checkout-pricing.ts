@@ -2,6 +2,7 @@ import {
   calculateMinecraftPlayerPricing,
   getMinecraftVersionVariable,
   isMinecraftGame,
+  isProxyTemplateLabel,
   normalizeGameKey,
   normalizeMinecraftServerType,
 } from "@/lib/game-config";
@@ -64,15 +65,39 @@ export function resolveCheckoutTemplate(input: {
   requestedMinecraftVersion?: string | null;
   modpackSelection?: CheckoutModpackSelection | null;
 }) {
+  const minecraft = isMinecraftGame(input.plan.game);
+  if (!minecraft && input.requestedServerType?.trim()) {
+    throw new Error("Ce type de serveur n’est pas disponible pour ce plan.");
+  }
+
   const requestedVariantIndex =
     input.modpackSelection?.variantIndex ??
     (typeof input.requestedVariantIndex === "number" && input.requestedVariantIndex >= 0
       ? input.requestedVariantIndex
       : 0);
-  const selectedVariantIndex = input.variants[requestedVariantIndex] ? requestedVariantIndex : 0;
-  const selectedVariant = input.variants[selectedVariantIndex] ?? input.variants[0] ?? null;
+  const requestedServerType = normalizeMinecraftServerType(input.requestedServerType);
+  const variantFromType =
+    minecraft && requestedServerType
+      ? input.variants.find(
+          (variant) => normalizeMinecraftServerType(variant.label) === requestedServerType,
+        )
+      : null;
+  if (minecraft && requestedServerType && !variantFromType) {
+    throw new Error("Ce template serveur n’est pas compatible avec le plan choisi.");
+  }
+
+  const selectedVariant =
+    variantFromType ?? input.variants[requestedVariantIndex] ?? input.variants[0] ?? null;
+  const selectedVariantIndex = selectedVariant
+    ? input.variants.findIndex((variant) => variant === selectedVariant)
+    : 0;
+  if (minecraft && selectedVariant && isProxyTemplateLabel(selectedVariant.label)) {
+    throw new Error(
+      "Ce template serveur n’est pas disponible pour un serveur Minecraft classique.",
+    );
+  }
   const selectedServerType =
-    normalizeMinecraftServerType(input.requestedServerType) ??
+    requestedServerType ??
     normalizeMinecraftServerType(selectedVariant?.label) ??
     input.plan.name.toLowerCase();
   const selectedTemplateLabel =
