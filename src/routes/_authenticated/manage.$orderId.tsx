@@ -106,6 +106,13 @@ type SettingsSyncState = {
   changed_keys: string[];
 };
 
+type InitialMinecraftSyncState = {
+  status: string | null;
+  synced_at: string | null;
+  changed_keys: string[];
+  error: string | null;
+};
+
 const WS_ERROR_MESSAGE =
   "Console temps réel inaccessible. Le service serveur est temporairement indisponible.";
 const SHOW_CONSOLE_DEBUG = import.meta.env.DEV;
@@ -257,6 +264,14 @@ function ServerDetail() {
           }
         | undefined
     )?.settings_sync ?? null;
+  const initialMinecraftSync =
+    (
+      order as
+        | {
+            initial_minecraft_sync?: InitialMinecraftSyncState | null;
+          }
+        | undefined
+    )?.initial_minecraft_sync ?? null;
   const serverSettingsLabel = getServerSettingsLabel(gameKey);
 
   return (
@@ -484,6 +499,7 @@ function ServerDetail() {
                   serverSettings={serverSettings}
                   changeLog={settingsChangeLog}
                   syncState={settingsSync}
+                  initialSyncState={initialMinecraftSync}
                   serverName={order.server_name}
                   planName={order.plans?.name ?? null}
                   game={order.plans?.game ?? null}
@@ -2017,6 +2033,7 @@ function ServerSettingsTab({
   serverSettings,
   changeLog,
   syncState,
+  initialSyncState,
   serverName,
   planName,
   game,
@@ -2035,6 +2052,7 @@ function ServerSettingsTab({
   serverSettings: Record<string, unknown>;
   changeLog: SettingsChangeLogEntry[];
   syncState: SettingsSyncState | null;
+  initialSyncState: InitialMinecraftSyncState | null;
   serverName: string;
   planName: string | null;
   game: string | null;
@@ -2233,6 +2251,38 @@ function ServerSettingsTab({
                   maxLength={64}
                 />
               </div>
+            </div>
+            <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
+              <div className="text-xs uppercase tracking-wider text-muted-foreground">
+                Synchronisation initiale
+              </div>
+              <Badge
+                variant="outline"
+                className={
+                  initialSyncState?.status === "success"
+                    ? "mt-2 border-success/40 bg-success/10 text-success"
+                    : initialSyncState?.status === "failed"
+                      ? "mt-2 border-destructive/40 bg-destructive/10 text-destructive"
+                      : "mt-2 border-accent/40 bg-accent/10 text-accent"
+                }
+              >
+                {formatInitialSyncStatus(initialSyncState?.status)}
+              </Badge>
+              <div className="mt-2 text-xs text-muted-foreground">
+                Dernière tentative :{" "}
+                {initialSyncState?.synced_at
+                  ? new Date(initialSyncState.synced_at).toLocaleString()
+                  : "Jamais"}
+              </div>
+              {initialSyncState?.error && (
+                <div className="mt-2 text-xs text-destructive">{initialSyncState.error}</div>
+              )}
+              {initialSyncState?.status && initialSyncState.status !== "success" && (
+                <div className="mt-2 text-xs text-accent">
+                  Les paramètres initiaux seront réessayés automatiquement ou peuvent être
+                  resynchronisés depuis cette page.
+                </div>
+              )}
             </div>
             <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
               <div className="text-xs uppercase tracking-wider text-muted-foreground">
@@ -2636,6 +2686,14 @@ function formatVersionApplyStatus(status?: string | null) {
   if (status === "pending_template_support") return "En attente template compatible";
   if (status === "managed") return "Gérée automatiquement";
   return "Gérée automatiquement";
+}
+
+function formatInitialSyncStatus(status?: string | null) {
+  if (status === "success") return "Synchronisation initiale réussie";
+  if (status === "pending") return "En attente";
+  if (status === "pending_template_support") return "En attente template compatible";
+  if (status === "failed") return "Échec";
+  return "Non lancée";
 }
 
 /* ---------------- Settings ---------------- */

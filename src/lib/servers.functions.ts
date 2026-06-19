@@ -356,6 +356,29 @@ function selectedSettingsSync(metadata: unknown) {
   };
 }
 
+function selectedInitialMinecraftSync(metadata: unknown) {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const sync = root.initial_minecraft_sync;
+  if (!sync || typeof sync !== "object") {
+    return {
+      status: null as string | null,
+      synced_at: null as string | null,
+      changed_keys: [] as string[],
+      error: null as string | null,
+    };
+  }
+  const value = sync as Record<string, unknown>;
+  return {
+    status: typeof value.status === "string" ? value.status : null,
+    synced_at: typeof value.synced_at === "string" ? value.synced_at : null,
+    changed_keys: Array.isArray(value.changed_keys)
+      ? value.changed_keys.filter((key): key is string => typeof key === "string")
+      : [],
+    error: typeof value.error === "string" ? value.error : null,
+  };
+}
+
 function selectedSettingsSyncHistory(metadata: unknown) {
   const root =
     metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
@@ -965,13 +988,19 @@ function minecraftSettingToPropertyValue(key: string, value: ServerSettingValue)
   return value.trim();
 }
 
-function buildMinecraftPropertiesUpdates(settings: Record<string, ServerSettingValue>) {
+function buildMinecraftPropertiesUpdates(
+  settings: Record<string, ServerSettingValue>,
+  purchasedSlots?: number | null,
+) {
   const updates: Record<string, string> = {};
   for (const [settingKey, propertyKey] of Object.entries(MINECRAFT_SERVER_PROPERTIES_KEYS)) {
     if (!(settingKey in settings)) continue;
     const value = minecraftSettingToPropertyValue(settingKey, settings[settingKey]);
     if (value == null) continue;
     updates[propertyKey] = value;
+  }
+  if (purchasedSlots && purchasedSlots > 0) {
+    updates["max-players"] = String(purchasedSlots);
   }
   return updates;
 }
@@ -989,6 +1018,7 @@ async function updateServerOrderMetadata(
 async function syncMinecraftServerPropertiesInternal(
   order: AccessibleServerOrder,
   syncedBy: string,
+  options: { includePurchasedSlots?: boolean; initial?: boolean } = {},
 ): Promise<{
   ok: true;
   changedKeys: string[];
@@ -1009,13 +1039,25 @@ async function syncMinecraftServerPropertiesInternal(
       : {};
   const slots = getPurchasedPlayerSlots(metadata);
   const settings = selectedServerSettings(metadata);
-  const updates = buildMinecraftPropertiesUpdates(settings);
+  const initialMotd =
+    typeof settings.motd === "string" && settings.motd.trim()
+      ? settings.motd
+      : options.initial
+        ? "Serveur XNTServers"
+        : undefined;
+  const effectiveSettings =
+    initialMotd && !settings.motd ? { ...settings, motd: initialMotd } : settings;
+  const updates = buildMinecraftPropertiesUpdates(
+    effectiveSettings,
+    options.includePurchasedSlots ? slots : null,
+  );
   const changedSettingKeys = Object.keys(updates)
-    .map(
-      (propertyKey) =>
-        Object.entries(MINECRAFT_SERVER_PROPERTIES_KEYS).find(
-          ([, value]) => value === propertyKey,
-        )?.[0],
+    .map((propertyKey) =>
+      propertyKey === "max-players"
+        ? "max_players"
+        : Object.entries(MINECRAFT_SERVER_PROPERTIES_KEYS).find(
+            ([, value]) => value === propertyKey,
+          )?.[0],
     )
     .filter((key): key is string => Boolean(key));
   const restartRecommended = changedSettingKeys.some((key) =>
@@ -1057,6 +1099,16 @@ async function syncMinecraftServerPropertiesInternal(
       changed_keys: changedSettingKeys,
       purchased_slots: slots,
     },
+    ...(options.initial
+      ? {
+          initial_minecraft_sync: {
+            status: "success",
+            synced_at: syncedAt,
+            changed_keys: Object.keys(serialized.after),
+            error: null,
+          },
+        }
+      : {}),
     server_settings_sync_history: [
       ...selectedSettingsSyncHistory(metadata),
       {
@@ -1125,6 +1177,87 @@ async function syncMinecraftSettingsInternal(orderId: string, userId: string) {
       error: message,
     });
     throw new Error(message);
+  }
+}
+
+export async function applyInitialMinecraftSettings(
+  serverOrderId: string,
+  options: { force?: boolean; syncedBy?: string | null } = {},
+) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const adminDb = supabaseAdmin as unknown as AdminDb;
+  const result = await adminDb
+    .from("server_orders")
+    .select(
+      "id, user_id, order_id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, metadata, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
+    )
+    .eq("id", serverOrderId)
+    .maybeSingle();
+  if (result.error) throw new Error(result.error.message);
+  if (!result.data) throw new Error("Serveur introuvable.");
+
+  const order = result.data as unknown as AccessibleServerOrder;
+  const metadata =
+    order.metadata && typeof order.metadata === "object"
+      ? (order.metadata as Record<string, unknown>)
+      : {};
+  const initialSync =
+    metadata.initial_minecraft_sync && typeof metadata.initial_minecraft_sync === "object"
+      ? (metadata.initial_minecraft_sync as Record<string, unknown>)
+      : null;
+
+  if (!options.force && initialSync?.status === "success") {
+    return { ok: true as const, status: "success" as const, skipped: true };
+  }
+
+  if (!isMinecraftGame(order.plans?.game)) {
+    return { ok: true as const, status: "skipped" as const, skipped: true };
+  }
+
+  try {
+    const sync = await syncMinecraftServerPropertiesInternal(order, options.syncedBy ?? "system", {
+      includePurchasedSlots: true,
+      initial: true,
+    });
+    return {
+      ok: true as const,
+      status: "success" as const,
+      skipped: false,
+      changedKeys: sync.changedKeys,
+      restartRecommended: sync.restartRecommended,
+    };
+  } catch (error) {
+    const syncedAt = new Date().toISOString();
+    const message =
+      error instanceof Error ? error.message : "Synchronisation initiale Minecraft impossible.";
+    const status = /fichier|file|contents|not found|introuvable|install/i.test(message)
+      ? "pending"
+      : "failed";
+    await updateServerOrderMetadata(order.id, {
+      ...metadata,
+      initial_minecraft_sync: {
+        status,
+        synced_at: syncedAt,
+        changed_keys: [],
+        error: message,
+      },
+      server_settings_sync: {
+        ...selectedSettingsSync(metadata),
+        last_sync_at: syncedAt,
+        last_sync_status: status,
+        last_sync_error: message,
+        restart_recommended: false,
+        changed_keys: [],
+        purchased_slots: getPurchasedPlayerSlots(metadata),
+      },
+    });
+    console.warn("[MinecraftSettingsSync] initial sync deferred/failed", {
+      serverOrderId: order.id,
+      serverId: order.pterodactyl_server_id,
+      status,
+      error: message,
+    });
+    return { ok: false as const, status, skipped: false, error: message };
   }
 }
 
@@ -1354,6 +1487,9 @@ export const getServerDetail = createServerFn({ method: "POST" })
       server_settings: selectedServerSettings(metadata),
       settings_change_log: selectedSettingsChangeLog(metadata),
       settings_sync: selectedSettingsSync(metadata),
+      initial_minecraft_sync: isMinecraftGame(order.plans?.game)
+        ? selectedInitialMinecraftSync(metadata)
+        : null,
     };
     if (!order.pterodactyl_server_identifier) {
       return { order: orderWithMinecraft, live: null, modpackInstallJob, access: accessInfo };

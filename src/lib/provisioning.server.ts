@@ -854,6 +854,27 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     })
     .eq("id", serverOrderId);
 
+  if (minecraft && result.ok) {
+    try {
+      const { applyInitialMinecraftSettings } = await import("@/lib/servers.functions");
+      const syncResult = await applyInitialMinecraftSettings(serverOrderId, {
+        syncedBy: options.actorUserId ?? order.user_id,
+      });
+      console.info("[MinecraftSettingsSync] Initial sync after provisioning", {
+        orderId: order.id,
+        serverOrderId,
+        status: syncResult.status,
+        ok: syncResult.ok,
+      });
+    } catch (error) {
+      console.warn("[MinecraftSettingsSync] Initial sync hook failed", {
+        orderId: order.id,
+        serverOrderId,
+        error: cleanProvisioningError(error),
+      });
+    }
+  }
+
   if (selection.selectedModpack && result.ok) {
     try {
       const { enqueueModpackInstallJob } = await import("@/lib/modpack-install.functions");
