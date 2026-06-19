@@ -108,6 +108,8 @@ type SettingsSyncState = {
   last_sync_status: string | null;
   last_sync_error: string | null;
   restart_recommended: boolean;
+  mode?: string | null;
+  target_file?: string | null;
   purchased_slots?: number | null;
   changed_keys: string[];
 };
@@ -2320,6 +2322,10 @@ function ServerSettingsTab({
                   ? new Date(syncState.last_sync_at).toLocaleString()
                   : "Jamais"}
               </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Mode : {formatSettingsSyncMode(syncState?.mode)}
+                {syncState?.target_file ? ` · ${syncState.target_file}` : ""}
+              </div>
               {syncState?.restart_recommended && (
                 <div className="mt-2 text-xs text-accent">Redémarrage recommandé.</div>
               )}
@@ -2382,6 +2388,10 @@ function ServerSettingsTab({
                 {syncState?.last_sync_at
                   ? new Date(syncState.last_sync_at).toLocaleString()
                   : "Jamais"}
+              </div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Mode : {formatSettingsSyncMode(syncState?.mode)}
+                {syncState?.target_file ? ` · ${syncState.target_file}` : ""}
               </div>
               {syncState?.last_sync_error && (
                 <div className="mt-2 text-xs text-accent">{syncState.last_sync_error}</div>
@@ -2756,6 +2766,13 @@ function formatSettingsSyncStatus(status?: string | null) {
   if (status === "pending") return "En attente";
   if (status === "failed") return "Erreur de synchronisation";
   return "Pas encore synchronisé";
+}
+
+function formatSettingsSyncMode(mode?: string | null) {
+  if (mode === "file_patch") return "Synchronisation fichier";
+  if (mode === "command_template") return "Commande contrôlée";
+  if (mode === "metadata_only") return "Stockage XNT uniquement";
+  return "Stockage XNT uniquement";
 }
 
 /* ---------------- Settings ---------------- */

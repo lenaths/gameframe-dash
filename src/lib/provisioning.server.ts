@@ -175,6 +175,10 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
     typeof selectedTemplate.label === "string" && selectedTemplate.label.trim()
       ? selectedTemplate.label.trim()
       : null;
+  const templateId =
+    typeof selectedTemplate.template_id === "string" && selectedTemplate.template_id.trim()
+      ? selectedTemplate.template_id.trim()
+      : null;
   const selectedGame =
     typeof metadata.selected_game === "string" && metadata.selected_game.trim()
       ? normalizeGameKey(metadata.selected_game)
@@ -258,6 +262,7 @@ function getPaidOrderProvisioningSelection(order: PaidOrderRow) {
     serverName,
     environment,
     templateLabel,
+    templateId,
     selectedGame,
     serverType,
     eggId,
@@ -706,6 +711,7 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     selected_game: selectedGame,
     selected_template: {
       index: selection.variantIndex,
+      ...(selection.templateId ? { template_id: selection.templateId } : {}),
       label: selection.templateLabel,
       version: selection.templateVersion,
       source: selection.templateSource,

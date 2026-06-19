@@ -194,8 +194,26 @@ type AdminTemplateModpackInstallConfig = {
   supported_loaders?: string[];
   notes?: string;
 };
+type AdminTemplateSettingsSyncConfig = {
+  enabled?: boolean;
+  mode?: "metadata_only" | "file_patch" | "command_template";
+  target_file?: string | null;
+  restart_required?: boolean;
+  command_template?: string | null;
+  allowed_settings?: Record<
+    string,
+    {
+      type?: "string" | "number" | "boolean";
+      target_key?: string;
+      section?: string | null;
+      min?: number | null;
+      max?: number | null;
+    }
+  >;
+};
 type AdminTemplateMetadata = {
   modpack_install?: AdminTemplateModpackInstallConfig | null;
+  settings_sync?: AdminTemplateSettingsSyncConfig | null;
 };
 type AdminCatalogTemplate = {
   id: string;
@@ -654,6 +672,46 @@ const ALLOWED_MODPACK_INSTALL_PLACEHOLDERS = new Set([
   "server_pack_file_id",
 ]);
 
+const ALLOWED_SETTINGS_SYNC_PLACEHOLDERS = new Set([
+  "server_name",
+  "hostname",
+  "motd",
+  "password",
+  "xp_rate",
+  "harvest_rate",
+  "taming_rate",
+  "gamemode",
+  "collection_id",
+]);
+
+const FORBIDDEN_SETTINGS_SYNC_KEYS = new Set([
+  "slots",
+  "slot_count",
+  "max_players",
+  "max-players",
+  "memory",
+  "ram",
+  "cpu",
+  "disk",
+  "port",
+  "ports",
+  "allocation",
+  "allocations",
+  "token",
+  "api_key",
+  "apikey",
+  "secret",
+  "startup",
+  "egg",
+  "egg_id",
+  "nest",
+  "nest_id",
+  "docker",
+  "docker_image",
+  "node",
+  "node_id",
+]);
+
 const modpackInstallConfigInput = z.object({
   templateId: z.string().uuid(),
   config: z.object({
@@ -675,6 +733,62 @@ function assertAllowedInstallPlaceholders(command: string) {
   }
   if (unknown.size > 0) {
     throw new Error(`Placeholders inconnus: ${Array.from(unknown).join(", ")}`);
+  }
+}
+
+const settingsSyncConfigInput = z.object({
+  templateId: z.string().uuid(),
+  config: z.object({
+    enabled: z.boolean(),
+    mode: z.enum(["metadata_only", "file_patch", "command_template"]),
+    target_file: z.string().trim().max(300).optional().nullable(),
+    restart_required: z.boolean().optional().default(false),
+    command_template: z.string().trim().max(1000).optional().nullable(),
+    allowed_settings: z
+      .record(
+        z.string().trim().min(1).max(80),
+        z.object({
+          type: z.enum(["string", "number", "boolean"]).optional().default("string"),
+          target_key: z.string().trim().min(1).max(120),
+          section: z.string().trim().max(120).optional().nullable(),
+          min: z.number().optional().nullable(),
+          max: z.number().optional().nullable(),
+        }),
+      )
+      .default({}),
+  }),
+});
+
+function assertSafeTemplateTargetFile(path: string | null | undefined) {
+  const value = (path ?? "").trim().replace(/\\/g, "/");
+  if (!value) throw new Error("target_file est requis en mode file_patch.");
+  if (value.startsWith("/") || value.includes("../") || value === ".." || value.includes("\0")) {
+    throw new Error("target_file non autorisé.");
+  }
+  return value.replace(/^\.\/+/, "");
+}
+
+function assertSettingsSyncConfig(config: z.infer<typeof settingsSyncConfigInput>["config"]) {
+  if (config.mode === "file_patch") assertSafeTemplateTargetFile(config.target_file);
+  if (config.mode === "command_template") {
+    const command = config.command_template ?? "";
+    const matches = command.matchAll(/\{([^{}]+)\}/g);
+    const unknown = new Set<string>();
+    for (const match of matches) {
+      const name = (match[1] ?? "").trim();
+      if (!ALLOWED_SETTINGS_SYNC_PLACEHOLDERS.has(name)) unknown.add(name);
+    }
+    if (unknown.size > 0) {
+      throw new Error(`Placeholders inconnus: ${Array.from(unknown).join(", ")}`);
+    }
+  }
+  for (const [settingKey, mapping] of Object.entries(config.allowed_settings ?? {})) {
+    if (FORBIDDEN_SETTINGS_SYNC_KEYS.has(settingKey.toLowerCase())) {
+      throw new Error(`Paramètre interdit: ${settingKey}`);
+    }
+    if (FORBIDDEN_SETTINGS_SYNC_KEYS.has(mapping.target_key.toLowerCase())) {
+      throw new Error(`Clé cible interdite: ${mapping.target_key}`);
+    }
   }
 }
 
@@ -722,6 +836,53 @@ export const adminUpdateTemplateModpackInstall = createServerFn({ method: "POST"
       entityType: "server_template",
       entityId: data.templateId,
       after: { modpack_install: nextMetadata.modpack_install },
+    });
+    return { ok: true };
+  });
+
+export const adminUpdateTemplateSettingsSync = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => settingsSyncConfigInput.parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    assertSettingsSyncConfig(data.config);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { data: currentData, error: currentError } = await db
+      .from("server_templates")
+      .select("id, metadata")
+      .eq("id", data.templateId)
+      .maybeSingle();
+    if (currentError) throw new Error(currentError.message);
+    const current = currentData as { id: string; metadata?: AdminTemplateMetadata | null } | null;
+    if (!current) throw new Error("Template serveur introuvable.");
+    const currentMetadata =
+      current.metadata && typeof current.metadata === "object" ? current.metadata : {};
+    const nextMetadata = {
+      ...currentMetadata,
+      settings_sync: {
+        enabled: data.config.enabled,
+        mode: data.config.mode,
+        target_file:
+          data.config.mode === "file_patch"
+            ? assertSafeTemplateTargetFile(data.config.target_file)
+            : (data.config.target_file ?? null),
+        restart_required: data.config.restart_required,
+        command_template: data.config.command_template ?? null,
+        allowed_settings: data.config.allowed_settings,
+      },
+    };
+    const { error } = await db
+      .from("server_templates")
+      .update({ metadata: nextMetadata })
+      .eq("id", data.templateId);
+    if (error) throw new Error(error.message);
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.game_catalog.update_settings_sync",
+      entityType: "server_template",
+      entityId: data.templateId,
+      after: { settings_sync: nextMetadata.settings_sync },
     });
     return { ok: true };
   });

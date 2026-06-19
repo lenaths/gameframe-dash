@@ -100,6 +100,31 @@ const MINECRAFT_NEVER_SYNC_KEYS = new Set([
   "server-ip",
 ]);
 
+type TemplateSettingsSyncMode = "metadata_only" | "file_patch" | "command_template";
+
+type TemplateSettingsSyncMapping = {
+  type?: "string" | "number" | "boolean";
+  target_key?: string;
+  section?: string | null;
+  min?: number | null;
+  max?: number | null;
+};
+
+type TemplateSettingsSyncConfig = {
+  enabled?: boolean;
+  mode?: TemplateSettingsSyncMode;
+  target_file?: string | null;
+  restart_required?: boolean;
+  command_template?: string | null;
+  allowed_settings?: Record<string, TemplateSettingsSyncMapping>;
+};
+
+const TEMPLATE_SYNC_FORBIDDEN_KEYS = new Set([
+  ...FORBIDDEN_SETTING_KEYS,
+  "rcon.password",
+  "rcon_password",
+]);
+
 const SERVER_SETTING_DEFINITIONS = {
   minecraft: {
     serverName: { type: "string", max: 40 },
@@ -356,6 +381,8 @@ function selectedSettingsSync(metadata: unknown) {
     last_sync_status: typeof value.last_sync_status === "string" ? value.last_sync_status : null,
     last_sync_error: typeof value.last_sync_error === "string" ? value.last_sync_error : null,
     restart_recommended: value.restart_recommended === true,
+    mode: typeof value.mode === "string" ? value.mode : null,
+    target_file: typeof value.target_file === "string" ? value.target_file : null,
     purchased_slots:
       typeof value.purchased_slots === "number" && Number.isFinite(value.purchased_slots)
         ? Math.round(value.purchased_slots)
@@ -1020,6 +1047,146 @@ function buildMinecraftPropertiesUpdates(
   return updates;
 }
 
+function normalizeTemplateTargetFile(path: string | null | undefined) {
+  const raw = (path ?? "").trim().replace(/\\/g, "/");
+  if (!raw) throw new Error("Fichier cible requis pour la synchronisation fichier.");
+  if (raw.startsWith("/") || raw.includes("../") || raw === ".." || raw.includes("\0")) {
+    throw new Error("Chemin de synchronisation non autorisé.");
+  }
+  return raw.replace(/^\.\/+/, "");
+}
+
+function selectedTemplateId(metadata: unknown) {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const selected =
+    root.selected_template && typeof root.selected_template === "object"
+      ? (root.selected_template as Record<string, unknown>)
+      : {};
+  return typeof selected.template_id === "string" && selected.template_id.trim()
+    ? selected.template_id.trim()
+    : null;
+}
+
+function readTemplateSettingsSyncConfig(metadata: unknown): TemplateSettingsSyncConfig | null {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const config = root.settings_sync;
+  if (!config || typeof config !== "object") return null;
+  return config as TemplateSettingsSyncConfig;
+}
+
+async function loadTemplateSettingsSyncConfig(serverMetadata: unknown) {
+  const templateId = selectedTemplateId(serverMetadata);
+  if (!templateId) return null;
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const adminDb = supabaseAdmin as unknown as AdminDb;
+  const result = await adminDb
+    .from("server_templates")
+    .select("id, metadata")
+    .eq("id", templateId)
+    .maybeSingle();
+  if (result.error) throw new Error(result.error.message);
+  const row = result.data as { id: string; metadata?: unknown } | null;
+  return readTemplateSettingsSyncConfig(row?.metadata);
+}
+
+function formatTemplateSyncValue(value: ServerSettingValue, mapping: TemplateSettingsSyncMapping) {
+  if (value == null) return null;
+  if (mapping.type === "boolean") return value === true ? "true" : "false";
+  if (mapping.type === "number") {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return null;
+    const min = typeof mapping.min === "number" ? mapping.min : -Infinity;
+    const max = typeof mapping.max === "number" ? mapping.max : Infinity;
+    return String(Math.min(max, Math.max(min, parsed)));
+  }
+  return String(value).trim();
+}
+
+function buildTemplateFileUpdates(
+  settings: Record<string, ServerSettingValue>,
+  config: TemplateSettingsSyncConfig,
+) {
+  const updates: Array<{ key: string; section: string | null; value: string; source: string }> = [];
+  const allowed = config.allowed_settings ?? {};
+  for (const [settingKey, mapping] of Object.entries(allowed)) {
+    const normalizedKey = settingKey.trim();
+    if (TEMPLATE_SYNC_FORBIDDEN_KEYS.has(normalizedKey.toLowerCase())) continue;
+    if (!(normalizedKey in settings)) continue;
+    const targetKey = mapping.target_key?.trim();
+    if (!targetKey || TEMPLATE_SYNC_FORBIDDEN_KEYS.has(targetKey.toLowerCase())) continue;
+    const value = formatTemplateSyncValue(settings[normalizedKey], mapping);
+    if (value == null) continue;
+    updates.push({
+      key: targetKey,
+      section: mapping.section?.trim() || null,
+      value,
+      source: normalizedKey,
+    });
+  }
+  return updates;
+}
+
+function patchIni(
+  contents: string,
+  updates: Array<{ key: string; section: string | null; value: string }>,
+) {
+  const lines = contents.split(/\r?\n/);
+  const before: Record<string, string | null> = {};
+  const after: Record<string, string> = {};
+  let currentSection: string | null = null;
+  const pending = new Map(updates.map((item) => [`${item.section ?? ""}:${item.key}`, item]));
+  const output = lines.map((line) => {
+    const sectionMatch = line.trim().match(/^\[([^\]]+)\]$/);
+    if (sectionMatch) currentSection = sectionMatch[1] ?? null;
+    const index = line.indexOf("=");
+    if (index <= 0) return line;
+    const key = line.slice(0, index).trim();
+    const update = pending.get(`${currentSection ?? ""}:${key}`);
+    if (!update) return line;
+    before[`${currentSection ?? ""}.${key}`] = line.slice(index + 1);
+    after[`${currentSection ?? ""}.${key}`] = update.value;
+    pending.delete(`${currentSection ?? ""}:${key}`);
+    return `${key}=${update.value}`;
+  });
+
+  for (const update of pending.values()) {
+    if (update.section) output.push(`[${update.section}]`);
+    output.push(`${update.key}=${update.value}`);
+    before[`${update.section ?? ""}.${update.key}`] = null;
+    after[`${update.section ?? ""}.${update.key}`] = update.value;
+  }
+
+  return { contents: output.join("\n"), before, after };
+}
+
+function patchCfg(contents: string, updates: Array<{ key: string; value: string }>) {
+  const lines = contents.split(/\r?\n/);
+  const before: Record<string, string | null> = {};
+  const after: Record<string, string> = {};
+  const pending = new Map(updates.map((item) => [item.key, item]));
+  const output = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("//") || trimmed.startsWith("#")) return line;
+    const match = trimmed.match(/^([A-Za-z0-9_.-]+)\s+(.+)$/);
+    if (!match) return line;
+    const key = match[1] ?? "";
+    const update = pending.get(key);
+    if (!update) return line;
+    before[key] = match[2] ?? null;
+    after[key] = update.value;
+    pending.delete(key);
+    return `${key} "${update.value.replace(/"/g, '\\"')}"`;
+  });
+  for (const update of pending.values()) {
+    output.push(`${update.key} "${update.value.replace(/"/g, '\\"')}"`);
+    before[update.key] = null;
+    after[update.key] = update.value;
+  }
+  return { contents: output.join("\n"), before, after };
+}
+
 async function updateServerOrderMetadata(
   serverOrderId: string,
   metadata: Record<string, unknown>,
@@ -1255,6 +1422,132 @@ async function markGenericGameSettingsPending(
   };
 }
 
+async function applyFilePatchSettings(
+  order: AccessibleServerOrder,
+  config: TemplateSettingsSyncConfig,
+  syncedBy: string,
+  gameKey: ReturnType<typeof normalizeGameKey>,
+) {
+  if (!order.pterodactyl_server_identifier) {
+    throw new Error("Serveur indisponible pour la synchronisation.");
+  }
+  const metadata =
+    order.metadata && typeof order.metadata === "object"
+      ? (order.metadata as Record<string, unknown>)
+      : {};
+  const settings = selectedServerSettings(metadata);
+  const updates = buildTemplateFileUpdates(settings, config);
+  if (updates.length === 0) throw new Error("Aucun paramètre synchronisable pour ce template.");
+
+  const targetFile = normalizeTemplateTargetFile(config.target_file);
+  const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+  assertPteroClientConfigured();
+  const current = (await ptero.client(
+    `/servers/${order.pterodactyl_server_identifier}/files/contents?file=${encodeURIComponent(
+      `/${targetFile}`,
+    )}`,
+    { raw: true },
+  )) as string;
+  const patched = targetFile.toLowerCase().endsWith(".cfg")
+    ? patchCfg(current, updates)
+    : patchIni(current, updates);
+  await ptero.client(
+    `/servers/${order.pterodactyl_server_identifier}/files/write?file=${encodeURIComponent(
+      `/${targetFile}`,
+    )}`,
+    {
+      method: "POST",
+      body: patched.contents,
+      contentType: "text/plain",
+    },
+  );
+
+  const syncedAt = new Date().toISOString();
+  const changedKeys = updates.map((item) => item.source);
+  await updateServerOrderMetadata(order.id, {
+    ...metadata,
+    server_settings_sync: {
+      game: gameKey,
+      last_sync_at: syncedAt,
+      last_sync_status: "success",
+      last_sync_error: null,
+      restart_recommended: config.restart_required === true,
+      changed_keys: changedKeys,
+      purchased_slots: getPurchasedPlayerSlots(metadata),
+      mode: "file_patch",
+      target_file: targetFile,
+    },
+    server_settings_sync_history: [
+      ...selectedSettingsSyncHistory(metadata),
+      {
+        before: patched.before,
+        after: patched.after,
+        synced_by: syncedBy,
+        synced_at: syncedAt,
+        status: "success",
+        game: gameKey,
+        mode: "file_patch",
+        target_file: targetFile,
+      },
+    ].slice(-20),
+  });
+  console.info("[GameSettingsSync] file patch success", {
+    serverOrderId: order.id,
+    serverId: order.pterodactyl_server_id,
+    game: gameKey,
+    keysChanged: changedKeys,
+    targetFile,
+  });
+  return {
+    ok: true as const,
+    status: "success" as const,
+    changedKeys,
+    restartRecommended: config.restart_required === true,
+    message: null as string | null,
+  };
+}
+
+async function syncTemplateSettings(order: AccessibleServerOrder, syncedBy: string) {
+  const gameKey = normalizeGameKey(order.plans?.game);
+  const metadata =
+    order.metadata && typeof order.metadata === "object"
+      ? (order.metadata as Record<string, unknown>)
+      : {};
+  const config = await loadTemplateSettingsSyncConfig(metadata);
+  if (!config || config.enabled !== true || config.mode === "metadata_only") {
+    return markGenericGameSettingsPending(order, syncedBy, gameKey);
+  }
+  if (config.mode === "file_patch") {
+    return applyFilePatchSettings(order, config, syncedBy, gameKey);
+  }
+  if (config.mode === "command_template") {
+    const syncedAt = new Date().toISOString();
+    const message =
+      "Commande contrôlée configurée, exécution différée jusqu’à activation du runner XNT.";
+    await updateServerOrderMetadata(order.id, {
+      ...metadata,
+      server_settings_sync: {
+        game: gameKey,
+        last_sync_at: syncedAt,
+        last_sync_status: "pending_template_support",
+        last_sync_error: message,
+        restart_recommended: config.restart_required === true,
+        changed_keys: Object.keys(selectedServerSettings(metadata)),
+        purchased_slots: getPurchasedPlayerSlots(metadata),
+        mode: "command_template",
+      },
+    });
+    return {
+      ok: true as const,
+      status: "pending_template_support" as const,
+      changedKeys: Object.keys(selectedServerSettings(metadata)),
+      restartRecommended: config.restart_required === true,
+      message,
+    };
+  }
+  return markGenericGameSettingsPending(order, syncedBy, gameKey);
+}
+
 async function syncGameSettingsInternal(orderId: string, userId: string) {
   const { order } = await loadAccessibleServerOrder(orderId, userId, "syncGameSettings");
   const gameKey = normalizeGameKey(order.plans?.game);
@@ -1269,7 +1562,7 @@ async function syncGameSettingsInternal(orderId: string, userId: string) {
     };
   }
   if (gameKey === "ark" || gameKey === "conan" || gameKey === "gmod") {
-    return markGenericGameSettingsPending(order, userId, gameKey);
+    return syncTemplateSettings(order, userId);
   }
   throw new Error("La synchronisation de ce jeu n’est pas encore disponible.");
 }
@@ -1297,7 +1590,7 @@ export async function applyInitialGameSettings(
     });
   }
   if (gameKey === "ark" || gameKey === "conan" || gameKey === "gmod") {
-    return markGenericGameSettingsPending(order, options.syncedBy ?? "system", gameKey);
+    return syncTemplateSettings(order, options.syncedBy ?? "system");
   }
   return { ok: true as const, status: "skipped" as const, skipped: true };
 }

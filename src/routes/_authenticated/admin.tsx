@@ -66,6 +66,7 @@ import {
   adminToggleCurseForgeModpack,
   adminToggleCurseForgeModpackVersion,
   adminUpdateTemplateModpackInstall,
+  adminUpdateTemplateSettingsSync,
   adminUpdateCurseForgeTemplateMapping,
   adminUpdatePlanEggs,
 } from "@/lib/admin.functions";
@@ -1249,8 +1250,26 @@ type AdminTemplateModpackInstallConfig = {
   supported_loaders?: string[];
   notes?: string;
 };
+type AdminTemplateSettingsSyncConfig = {
+  enabled?: boolean;
+  mode?: "metadata_only" | "file_patch" | "command_template";
+  target_file?: string | null;
+  restart_required?: boolean;
+  command_template?: string | null;
+  allowed_settings?: Record<
+    string,
+    {
+      type?: "string" | "number" | "boolean";
+      target_key?: string;
+      section?: string | null;
+      min?: number | null;
+      max?: number | null;
+    }
+  >;
+};
 type AdminTemplateMetadata = {
   modpack_install?: AdminTemplateModpackInstallConfig | null;
+  settings_sync?: AdminTemplateSettingsSyncConfig | null;
 };
 type AdminCatalogTemplate = {
   id: string;
@@ -1451,6 +1470,368 @@ function ModpackInstallBadge({ template }: { template: AdminCatalogTemplate }) {
         <div className="text-xs text-muted-foreground">{config.supported_loaders.join(", ")}</div>
       ) : null}
     </div>
+  );
+}
+
+type SettingsSyncConfig = Required<
+  Pick<AdminTemplateSettingsSyncConfig, "enabled" | "mode" | "restart_required">
+> & {
+  target_file: string;
+  command_template: string;
+  allowed_settings: NonNullable<AdminTemplateSettingsSyncConfig["allowed_settings"]>;
+};
+
+const SETTINGS_SYNC_EXAMPLE = JSON.stringify(
+  {
+    serverName: { type: "string", target_key: "SessionName", section: "SessionSettings" },
+    motd: { type: "string", target_key: "Message", section: "MessageOfTheDay" },
+    xpRate: {
+      type: "number",
+      target_key: "XPMultiplier",
+      section: "ServerSettings",
+      min: 0.1,
+      max: 10,
+    },
+  },
+  null,
+  2,
+);
+
+const SETTINGS_SYNC_PRESETS: Record<
+  "minecraft" | "ark" | "conan" | "gmod",
+  {
+    label: string;
+    mode: SettingsSyncConfig["mode"];
+    target_file: string;
+    restart_required: boolean;
+    allowed_settings: SettingsSyncConfig["allowed_settings"];
+  }
+> = {
+  minecraft: {
+    label: "Minecraft",
+    mode: "file_patch",
+    target_file: "server.properties",
+    restart_required: true,
+    allowed_settings: {
+      motd: { type: "string", target_key: "motd" },
+      difficulty: { type: "string", target_key: "difficulty" },
+      gamemode: { type: "string", target_key: "gamemode" },
+      hardcore: { type: "boolean", target_key: "hardcore" },
+      pvp: { type: "boolean", target_key: "pvp" },
+      whitelist: { type: "boolean", target_key: "white-list" },
+      onlineMode: { type: "boolean", target_key: "online-mode" },
+      allowFlight: { type: "boolean", target_key: "allow-flight" },
+      spawnProtection: { type: "number", target_key: "spawn-protection", min: 0, max: 64 },
+      viewDistance: { type: "number", target_key: "view-distance", min: 2, max: 32 },
+      simulationDistance: { type: "number", target_key: "simulation-distance", min: 2, max: 32 },
+      seed: { type: "string", target_key: "level-seed" },
+    },
+  },
+  ark: {
+    label: "ARK",
+    mode: "file_patch",
+    target_file: "ShooterGame/Saved/Config/LinuxServer/GameUserSettings.ini",
+    restart_required: true,
+    allowed_settings: {
+      serverName: { type: "string", target_key: "SessionName", section: "SessionSettings" },
+      motd: { type: "string", target_key: "Message", section: "MessageOfTheDay" },
+      password: { type: "string", target_key: "ServerPassword", section: "ServerSettings" },
+      xpRate: {
+        type: "number",
+        target_key: "XPMultiplier",
+        section: "ServerSettings",
+        min: 0.1,
+        max: 10,
+      },
+      harvestRate: {
+        type: "number",
+        target_key: "HarvestAmountMultiplier",
+        section: "ServerSettings",
+        min: 0.1,
+        max: 10,
+      },
+      tamingRate: {
+        type: "number",
+        target_key: "TamingSpeedMultiplier",
+        section: "ServerSettings",
+        min: 0.1,
+        max: 10,
+      },
+    },
+  },
+  conan: {
+    label: "Conan",
+    mode: "file_patch",
+    target_file: "ConanSandbox/Saved/Config/LinuxServer/ServerSettings.ini",
+    restart_required: true,
+    allowed_settings: {
+      serverName: { type: "string", target_key: "ServerName", section: "ServerSettings" },
+      motd: { type: "string", target_key: "MessageOfTheDay", section: "ServerSettings" },
+      password: { type: "string", target_key: "ServerPassword", section: "ServerSettings" },
+    },
+  },
+  gmod: {
+    label: "Garry’s Mod",
+    mode: "file_patch",
+    target_file: "garrysmod/cfg/server.cfg",
+    restart_required: true,
+    allowed_settings: {
+      hostname: { type: "string", target_key: "hostname" },
+      gamemode: { type: "string", target_key: "sv_gamemode" },
+      collectionId: { type: "string", target_key: "host_workshop_collection" },
+    },
+  },
+};
+
+function readTemplateSettingsSync(template: AdminCatalogTemplate): SettingsSyncConfig {
+  const metadata =
+    template.metadata && typeof template.metadata === "object" ? template.metadata : {};
+  const raw =
+    metadata.settings_sync && typeof metadata.settings_sync === "object"
+      ? metadata.settings_sync
+      : {};
+  return {
+    enabled: raw.enabled === true,
+    mode: raw.mode === "file_patch" || raw.mode === "command_template" ? raw.mode : "metadata_only",
+    target_file: typeof raw.target_file === "string" ? raw.target_file : "",
+    restart_required: raw.restart_required === true,
+    command_template: typeof raw.command_template === "string" ? raw.command_template : "",
+    allowed_settings:
+      raw.allowed_settings && typeof raw.allowed_settings === "object" ? raw.allowed_settings : {},
+  };
+}
+
+function SettingsSyncBadge({ template }: { template: AdminCatalogTemplate }) {
+  const config = readTemplateSettingsSync(template);
+  return (
+    <div className="space-y-1">
+      <Badge variant={config.enabled ? "default" : "outline"}>
+        {config.enabled ? "Sync paramètres activée" : "Sync metadata only"}
+      </Badge>
+      <div className="text-xs text-muted-foreground">
+        {config.mode}
+        {config.target_file ? ` · ${config.target_file}` : ""}
+      </div>
+    </div>
+  );
+}
+
+function EditTemplateSettingsSyncDialog({ template }: { template: AdminCatalogTemplate }) {
+  const qc = useQueryClient();
+  const updateFn = useServerFn(adminUpdateTemplateSettingsSync);
+  const initial = readTemplateSettingsSync(template);
+  const [open, setOpen] = useState(false);
+  const [enabled, setEnabled] = useState(initial.enabled);
+  const [mode, setMode] = useState<SettingsSyncConfig["mode"]>(initial.mode);
+  const [targetFile, setTargetFile] = useState(initial.target_file);
+  const [restartRequired, setRestartRequired] = useState(initial.restart_required);
+  const [commandTemplate, setCommandTemplate] = useState(initial.command_template);
+  const [allowedSettingsJson, setAllowedSettingsJson] = useState(
+    JSON.stringify(initial.allowed_settings, null, 2),
+  );
+  const hasExistingConfig =
+    initial.enabled ||
+    initial.mode !== "metadata_only" ||
+    initial.target_file ||
+    Object.keys(initial.allowed_settings).length > 0;
+
+  const applyPreset = (presetKey: keyof typeof SETTINGS_SYNC_PRESETS) => {
+    const preset = SETTINGS_SYNC_PRESETS[presetKey];
+    if (
+      hasExistingConfig &&
+      !window.confirm(`Remplacer la configuration actuelle par le preset ${preset.label} ?`)
+    ) {
+      return;
+    }
+    setEnabled(true);
+    setMode(preset.mode);
+    setTargetFile(preset.target_file);
+    setRestartRequired(preset.restart_required);
+    setCommandTemplate("");
+    setAllowedSettingsJson(JSON.stringify(preset.allowed_settings, null, 2));
+    toast.success(`Preset ${preset.label} appliqué`);
+  };
+
+  const resetMetadataOnly = () => {
+    if (
+      hasExistingConfig &&
+      !window.confirm("Réinitialiser cette configuration en metadata_only ?")
+    ) {
+      return;
+    }
+    setEnabled(false);
+    setMode("metadata_only");
+    setTargetFile("");
+    setRestartRequired(false);
+    setCommandTemplate("");
+    setAllowedSettingsJson("{}");
+  };
+
+  const previewConfig = {
+    enabled,
+    mode,
+    target_file: targetFile || null,
+    restart_required: restartRequired,
+    command_template: commandTemplate || null,
+    allowed_settings: allowedSettingsJson.trim()
+      ? (() => {
+          try {
+            return JSON.parse(allowedSettingsJson);
+          } catch {
+            return { error: "JSON invalide" };
+          }
+        })()
+      : {},
+  };
+
+  const save = useMutation({
+    mutationFn: () => {
+      const parsed = allowedSettingsJson.trim() ? JSON.parse(allowedSettingsJson) : {};
+      return updateFn({
+        data: {
+          templateId: template.id,
+          config: {
+            enabled,
+            mode,
+            target_file: targetFile,
+            restart_required: restartRequired,
+            command_template: commandTemplate,
+            allowed_settings: parsed,
+          },
+        },
+      });
+    },
+    onSuccess: () => {
+      toast.success("Configuration de synchronisation sauvegardée");
+      qc.invalidateQueries({ queryKey: ["admin-game-catalog"] });
+      setOpen(false);
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline">
+          Sync paramètres
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>Synchronisation paramètres · {template.name}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            {(Object.keys(SETTINGS_SYNC_PRESETS) as Array<keyof typeof SETTINGS_SYNC_PRESETS>).map(
+              (presetKey) => (
+                <Button
+                  key={presetKey}
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => applyPreset(presetKey)}
+                >
+                  Appliquer preset {SETTINGS_SYNC_PRESETS[presetKey].label}
+                </Button>
+              ),
+            )}
+            <Button type="button" size="sm" variant="outline" onClick={resetMetadataOnly}>
+              Réinitialiser en metadata_only
+            </Button>
+          </div>
+          <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs text-primary">
+            Les presets n’incluent jamais max_players, slots, ports, tokens, secrets ni rcon
+            password. Le serveur revalide aussi la configuration à la sauvegarde.
+          </div>
+          {mode === "command_template" && (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+              Commande contrôlée : utiliser uniquement des scripts internes. Cette phase valide et
+              stocke la commande, l’exécution réelle reste contrôlée côté serveur.
+            </div>
+          )}
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(event) => setEnabled(event.target.checked)}
+              className="accent-[color:var(--primary)]"
+            />
+            Activer la synchronisation paramètres
+          </label>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="space-y-2">
+              <span className="text-sm font-medium">Mode</span>
+              <select
+                value={mode}
+                onChange={(event) => setMode(event.target.value as SettingsSyncConfig["mode"])}
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              >
+                <option value="metadata_only">metadata_only</option>
+                <option value="file_patch">file_patch</option>
+                <option value="command_template">command_template</option>
+              </select>
+            </label>
+            <label className="flex items-end gap-2 pb-2 text-sm">
+              <input
+                type="checkbox"
+                checked={restartRequired}
+                onChange={(event) => setRestartRequired(event.target.checked)}
+                className="accent-[color:var(--primary)]"
+              />
+              Redémarrage requis
+            </label>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Fichier cible</label>
+            <Input
+              value={targetFile}
+              onChange={(event) => setTargetFile(event.target.value)}
+              placeholder="ShooterGame/Saved/Config/LinuxServer/GameUserSettings.ini"
+            />
+            <div className="text-xs text-muted-foreground">
+              Chemin relatif uniquement. Chemins absolus et ../ refusés.
+            </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Command template</label>
+            <Textarea
+              value={commandTemplate}
+              onChange={(event) => setCommandTemplate(event.target.value)}
+              rows={3}
+              placeholder='xnt-apply-setting "{server_name}" "{motd}"'
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Allowed settings mapping JSON</label>
+            <Textarea
+              value={allowedSettingsJson}
+              onChange={(event) => setAllowedSettingsJson(event.target.value)}
+              rows={10}
+              placeholder={SETTINGS_SYNC_EXAMPLE}
+              className="font-mono text-xs"
+            />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium">Aperçu JSON</label>
+            <pre className="max-h-56 overflow-auto rounded-lg border border-primary/15 bg-background/40 p-3 text-xs text-muted-foreground">
+              {JSON.stringify(previewConfig, null, 2)}
+            </pre>
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Annuler
+          </Button>
+          <Button
+            disabled={save.isPending}
+            onClick={() => save.mutate()}
+            className="bg-primary text-primary-foreground hover:bg-primary/90"
+          >
+            Sauvegarder
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1749,6 +2130,7 @@ function AdminGameCatalogSection({ data }: { data?: AdminGameCatalogData }) {
                 <TableHead>Jeu</TableHead>
                 <TableHead>Configuration interne</TableHead>
                 <TableHead>Description</TableHead>
+                <TableHead>Sync paramètres</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Action</TableHead>
               </TableRow>
@@ -1774,11 +2156,15 @@ function AdminGameCatalogSection({ data }: { data?: AdminGameCatalogData }) {
                     <ModpackInstallBadge template={template} />
                   </TableCell>
                   <TableCell>
+                    <SettingsSyncBadge template={template} />
+                  </TableCell>
+                  <TableCell>
                     <StatusBadge status={template.is_active ? "active" : "disabled"} />
                   </TableCell>
                   <TableCell>
                     <div className="flex justify-end gap-2">
                       <EditTemplateModpackInstallDialog template={template} />
+                      <EditTemplateSettingsSyncDialog template={template} />
                       <ToggleButton
                         table="server_templates"
                         id={template.id}
