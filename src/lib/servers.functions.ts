@@ -2,6 +2,16 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
+import {
+  FORBIDDEN_SETTING_KEYS,
+  MAX_FILE_CONTENT_BYTES,
+  assertEditableFilePath,
+  assertNotProtectedServerPath,
+  hasBlockedExtension,
+  hasForbiddenServerSetting,
+  isProtectedServerPath,
+  normalizeServerPath,
+} from "@/lib/server-security";
 
 const deployInput = z.object({
   planId: z.string().uuid(),
@@ -32,36 +42,6 @@ const applyServerSettingsInput = z.object({
 });
 
 type ServerSettingValue = string | number | boolean | null;
-
-const FORBIDDEN_SETTING_KEYS = new Set([
-  "max_players",
-  "slot_count",
-  "slots",
-  "max-players",
-  "memory",
-  "ram",
-  "cpu",
-  "disk",
-  "port",
-  "ports",
-  "allocation",
-  "allocations",
-  "startup",
-  "egg",
-  "egg_id",
-  "nest",
-  "nest_id",
-  "docker",
-  "docker_image",
-  "node",
-  "node_id",
-  "token",
-  "api_key",
-  "apikey",
-  "secret",
-  "private_key",
-  "credentials",
-]);
 
 const MINECRAFT_SERVER_PROPERTIES_KEYS = {
   motd: "motd",
@@ -453,10 +433,6 @@ function getPurchasedPlayerSlots(metadata: unknown): number | null {
   return null;
 }
 
-function hasForbiddenServerSetting(input: Record<string, unknown>) {
-  return Object.keys(input).find((key) => FORBIDDEN_SETTING_KEYS.has(key.trim().toLowerCase()));
-}
-
 function sanitizeServerSettings(
   game: string | null | undefined,
   input: Record<string, unknown>,
@@ -505,56 +481,6 @@ function sanitizeServerSettings(
   }
   return sanitized;
 }
-
-const MAX_FILE_CONTENT_BYTES = 1024 * 1024;
-const BLOCKED_FILE_EXTENSIONS = new Set([
-  ".jar",
-  ".zip",
-  ".tar",
-  ".gz",
-  ".exe",
-  ".bin",
-  ".sqlite",
-  ".db",
-]);
-const MANAGED_FILE_MESSAGE =
-  "Ce fichier est géré par XNTServers. Modifie ces paramètres depuis l’onglet Paramètres serveur.";
-const PROTECTED_FILE_BASENAMES = new Set([
-  "server.properties",
-  "config.yml",
-  "paper.yml",
-  "paper-global.yml",
-  "paper-world-defaults.yml",
-  "spigot.yml",
-  "bukkit.yml",
-  "commands.yml",
-  "permissions.yml",
-  "velocity.toml",
-  "waterfall.yml",
-  "fabric-server-launcher.properties",
-  "forge-server.toml",
-  "eula.txt",
-  "xnt-install-modpack",
-  ".env",
-  ".env.local",
-  ".env.production",
-  "docker-compose.yml",
-  "docker-compose.yaml",
-  "gameusersettings.ini",
-  "game.ini",
-  "engine.ini",
-  "serversettings.ini",
-  "server.cfg",
-]);
-const PROTECTED_PATH_PREFIXES = [
-  "/bungeecord/config.yml",
-  "/.xnt",
-  "/.xnt-modpack-install",
-  "/.ptero",
-  "/.config/xnt",
-  "/scripts/xnt",
-  "/xnt",
-];
 
 type PteroAllocation = {
   attributes?: {
@@ -688,60 +614,15 @@ function byteLength(value: string) {
   return new TextEncoder().encode(value).length;
 }
 
-function hasBlockedExtension(path: string) {
-  const lower = path.toLowerCase();
-  return [...BLOCKED_FILE_EXTENSIONS].some((extension) => lower.endsWith(extension));
-}
-
-function normalizeServerPath(input: string, fallback = "/") {
-  const raw = (input || fallback).trim().replace(/\\/g, "/");
-  const prefixed = raw.startsWith("/") ? raw : `/${raw}`;
-  const parts = prefixed.split("/");
-  const clean: string[] = [];
-
-  for (const part of parts) {
-    if (!part || part === ".") continue;
-    if (part === "..") throw new Error("Chemin de fichier non autorisé.");
-    clean.push(part);
-  }
-
-  return `/${clean.join("/")}`;
-}
-
 function basename(path: string) {
   const normalized = normalizeServerPath(path);
   return normalized.split("/").pop() ?? "";
-}
-
-function isProtectedServerPath(path: string) {
-  const normalized = normalizeServerPath(path).toLowerCase();
-  const name = normalized.split("/").pop() ?? "";
-  if (PROTECTED_FILE_BASENAMES.has(name)) return true;
-  if (/(secret|token|private[_-]?key|api[_-]?key|credentials?)/i.test(name)) return true;
-  return PROTECTED_PATH_PREFIXES.some(
-    (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
-  );
-}
-
-function assertNotProtectedServerPath(path: string) {
-  const normalized = normalizeServerPath(path);
-  if (isProtectedServerPath(normalized)) throw new Error(MANAGED_FILE_MESSAGE);
-  return normalized;
 }
 
 function dirname(path: string) {
   const normalized = normalizeServerPath(path);
   const index = normalized.lastIndexOf("/");
   return index <= 0 ? "/" : normalized.slice(0, index);
-}
-
-function assertEditableFilePath(path: string) {
-  const normalized = normalizeServerPath(path);
-  assertNotProtectedServerPath(normalized);
-  if (hasBlockedExtension(normalized)) {
-    throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
-  }
-  return normalized;
 }
 
 function publicServerServiceError(
@@ -2661,6 +2542,7 @@ export const renameServerFile = createServerFn({ method: "POST" })
       if (file.includes("/") || file.includes("\\") || file === "." || file === "..") {
         throw new Error("Chemin de fichier non autorisé.");
       }
+      assertNotProtectedServerPath(`${root}/${file}`);
       if (hasBlockedExtension(file)) {
         throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
       }
