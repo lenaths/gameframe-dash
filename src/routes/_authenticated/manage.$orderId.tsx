@@ -46,7 +46,7 @@ import {
   deleteServerAllocation,
   renameServer,
   applyServerSettings,
-  syncMinecraftSettings,
+  syncGameSettings,
   reinstallServerClient,
   getServerStartup,
   updateServerStartup,
@@ -88,6 +88,11 @@ const PROTECTED_FILE_BASENAMES = new Set([
   ".env.production",
   "docker-compose.yml",
   "docker-compose.yaml",
+  "gameusersettings.ini",
+  "game.ini",
+  "engine.ini",
+  "serversettings.ini",
+  "server.cfg",
 ]);
 
 type SettingsChangeLogEntry = {
@@ -103,6 +108,7 @@ type SettingsSyncState = {
   last_sync_status: string | null;
   last_sync_error: string | null;
   restart_recommended: boolean;
+  purchased_slots?: number | null;
   changed_keys: string[];
 };
 
@@ -2060,7 +2066,7 @@ function ServerSettingsTab({
   title: string;
 }) {
   const applySettingsFn = useServerFn(applyServerSettings);
-  const syncMinecraftSettingsFn = useServerFn(syncMinecraftSettings);
+  const syncGameSettingsFn = useServerFn(syncGameSettings);
   const qc = useQueryClient();
   const maxPlayers = settings?.max_players ?? null;
   const isMinecraft = isMinecraftGame(game);
@@ -2103,13 +2109,17 @@ function ServerSettingsTab({
     setForm((current) => ({ ...current, [key]: value }));
 
   const syncMutation = useMutation({
-    mutationFn: () => syncMinecraftSettingsFn({ data: { orderId } }),
+    mutationFn: () => syncGameSettingsFn({ data: { orderId } }),
     onSuccess: (result) => {
-      toast.success(
-        result.restartRecommended
-          ? "Synchronisation réussie. Redémarrage recommandé."
-          : "Synchronisation réussie.",
-      );
+      if (result.status === "pending_template_support") {
+        toast.warning(result.message ?? "Synchronisation en attente d’un template compatible.");
+      } else {
+        toast.success(
+          result.restartRecommended
+            ? "Synchronisation réussie. Redémarrage recommandé."
+            : "Synchronisation réussie.",
+        );
+      }
       qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
     },
     onError: (error: Error) => toast.error(error.message),
@@ -2343,12 +2353,51 @@ function ServerSettingsTab({
             </div>
           </>
         ) : (
-          <GenericGameSettings
-            gameKey={gameKey}
-            form={form}
-            setValue={setValue}
-            serverName={serverName}
-          />
+          <>
+            <GenericGameSettings
+              gameKey={gameKey}
+              form={form}
+              setValue={setValue}
+              serverName={serverName}
+              purchasedSlots={syncState?.purchased_slots ?? null}
+            />
+            <div className="rounded-lg border border-primary/15 bg-background/35 p-3 md:col-span-2">
+              <div className="text-xs uppercase tracking-wider text-muted-foreground">
+                Synchronisation serveur
+              </div>
+              <Badge
+                variant="outline"
+                className={
+                  syncState?.last_sync_status === "success"
+                    ? "mt-2 border-success/40 bg-success/10 text-success"
+                    : syncState?.last_sync_status === "failed"
+                      ? "mt-2 border-destructive/40 bg-destructive/10 text-destructive"
+                      : "mt-2 border-accent/40 bg-accent/10 text-accent"
+                }
+              >
+                {formatSettingsSyncStatus(syncState?.last_sync_status)}
+              </Badge>
+              <div className="mt-2 text-xs text-muted-foreground">
+                Dernière synchronisation :{" "}
+                {syncState?.last_sync_at
+                  ? new Date(syncState.last_sync_at).toLocaleString()
+                  : "Jamais"}
+              </div>
+              {syncState?.last_sync_error && (
+                <div className="mt-2 text-xs text-accent">{syncState.last_sync_error}</div>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                disabled={syncMutation.isPending}
+                onClick={() => syncMutation.mutate()}
+              >
+                <RefreshCw className="mr-1.5 h-4 w-4" />
+                {syncMutation.isPending ? "Synchronisation…" : "Synchroniser maintenant"}
+              </Button>
+            </div>
+          </>
         )}
       </div>
       <div className="flex justify-end">
@@ -2375,12 +2424,17 @@ function GenericGameSettings({
   form,
   setValue,
   serverName,
+  purchasedSlots,
 }: {
   gameKey: ReturnType<typeof normalizeGameKey>;
   form: Record<string, unknown>;
   setValue: (key: string, value: unknown) => void;
   serverName: string;
+  purchasedSlots: number | null;
 }) {
+  const slotsLabel = purchasedSlots
+    ? `${purchasedSlots} joueur${purchasedSlots > 1 ? "s" : ""}`
+    : "Géré par votre offre";
   if (gameKey === "conan") {
     return (
       <>
@@ -2403,7 +2457,7 @@ function GenericGameSettings({
           maxLength={80}
           type="password"
         />
-        <InfoLine label="Slots achetés" value="Géré par votre offre" />
+        <InfoLine label="Slots achetés" value={slotsLabel} />
       </>
     );
   }
@@ -2453,7 +2507,7 @@ function GenericGameSettings({
           step={0.1}
           onChange={(value) => setValue("tamingRate", value)}
         />
-        <InfoLine label="Slots achetés" value="Géré par votre offre" />
+        <InfoLine label="Slots achetés" value={slotsLabel} />
       </>
     );
   }
@@ -2478,7 +2532,7 @@ function GenericGameSettings({
           onChange={(value) => setValue("collectionId", value)}
           maxLength={32}
         />
-        <InfoLine label="Slots achetés" value="Géré par votre offre" />
+        <InfoLine label="Slots achetés" value={slotsLabel} />
       </>
     );
   }
@@ -2694,6 +2748,14 @@ function formatInitialSyncStatus(status?: string | null) {
   if (status === "pending_template_support") return "En attente template compatible";
   if (status === "failed") return "Échec";
   return "Non lancée";
+}
+
+function formatSettingsSyncStatus(status?: string | null) {
+  if (status === "success") return "Synchronisation réussie";
+  if (status === "pending_template_support") return "En attente template compatible";
+  if (status === "pending") return "En attente";
+  if (status === "failed") return "Erreur de synchronisation";
+  return "Pas encore synchronisé";
 }
 
 /* ---------------- Settings ---------------- */

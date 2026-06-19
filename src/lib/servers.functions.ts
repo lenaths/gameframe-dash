@@ -55,6 +55,12 @@ const FORBIDDEN_SETTING_KEYS = new Set([
   "docker_image",
   "node",
   "node_id",
+  "token",
+  "api_key",
+  "apikey",
+  "secret",
+  "private_key",
+  "credentials",
 ]);
 
 const MINECRAFT_SERVER_PROPERTIES_KEYS = {
@@ -350,6 +356,10 @@ function selectedSettingsSync(metadata: unknown) {
     last_sync_status: typeof value.last_sync_status === "string" ? value.last_sync_status : null,
     last_sync_error: typeof value.last_sync_error === "string" ? value.last_sync_error : null,
     restart_recommended: value.restart_recommended === true,
+    purchased_slots:
+      typeof value.purchased_slots === "number" && Number.isFinite(value.purchased_slots)
+        ? Math.round(value.purchased_slots)
+        : null,
     changed_keys: Array.isArray(value.changed_keys)
       ? value.changed_keys.filter((key): key is string => typeof key === "string")
       : [],
@@ -503,6 +513,11 @@ const PROTECTED_FILE_BASENAMES = new Set([
   ".env.production",
   "docker-compose.yml",
   "docker-compose.yaml",
+  "GameUserSettings.ini",
+  "Game.ini",
+  "Engine.ini",
+  "ServerSettings.ini",
+  "server.cfg",
 ]);
 const PROTECTED_PATH_PREFIXES = [
   "/bungeecord/config.yml",
@@ -1178,6 +1193,113 @@ async function syncMinecraftSettingsInternal(orderId: string, userId: string) {
     });
     throw new Error(message);
   }
+}
+
+function supportedGenericGameLabel(gameKey: ReturnType<typeof normalizeGameKey>) {
+  if (gameKey === "ark") return "ARK";
+  if (gameKey === "conan") return "Conan Exiles";
+  if (gameKey === "gmod") return "Garry's Mod";
+  return "ce jeu";
+}
+
+async function markGenericGameSettingsPending(
+  order: AccessibleServerOrder,
+  syncedBy: string,
+  gameKey: ReturnType<typeof normalizeGameKey>,
+) {
+  const metadata =
+    order.metadata && typeof order.metadata === "object"
+      ? (order.metadata as Record<string, unknown>)
+      : {};
+  const settings = selectedServerSettings(metadata);
+  const changedKeys = Object.keys(settings);
+  const syncedAt = new Date().toISOString();
+  const message = `Application automatique des paramètres ${supportedGenericGameLabel(
+    gameKey,
+  )} en attente d’un template XNT compatible.`;
+  await updateServerOrderMetadata(order.id, {
+    ...metadata,
+    server_settings_sync: {
+      game: gameKey,
+      last_sync_at: syncedAt,
+      last_sync_status: "pending_template_support",
+      last_sync_error: message,
+      restart_recommended: false,
+      changed_keys: changedKeys,
+      purchased_slots: getPurchasedPlayerSlots(metadata),
+    },
+    server_settings_sync_history: [
+      ...selectedSettingsSyncHistory(metadata),
+      {
+        before: {},
+        after: settings,
+        synced_by: syncedBy,
+        synced_at: syncedAt,
+        status: "pending_template_support",
+        game: gameKey,
+      },
+    ].slice(-20),
+  });
+  console.info("[GameSettingsSync] pending template support", {
+    serverOrderId: order.id,
+    serverId: order.pterodactyl_server_id,
+    game: gameKey,
+    keysChanged: changedKeys,
+  });
+  return {
+    ok: true as const,
+    status: "pending_template_support" as const,
+    changedKeys,
+    restartRecommended: false,
+    message,
+  };
+}
+
+async function syncGameSettingsInternal(orderId: string, userId: string) {
+  const { order } = await loadAccessibleServerOrder(orderId, userId, "syncGameSettings");
+  const gameKey = normalizeGameKey(order.plans?.game);
+  if (isMinecraftGame(order.plans?.game)) {
+    const result = await syncMinecraftSettingsInternal(orderId, userId);
+    return {
+      ok: true as const,
+      status: "success" as const,
+      changedKeys: result.changedKeys,
+      restartRecommended: result.restartRecommended,
+      message: null as string | null,
+    };
+  }
+  if (gameKey === "ark" || gameKey === "conan" || gameKey === "gmod") {
+    return markGenericGameSettingsPending(order, userId, gameKey);
+  }
+  throw new Error("La synchronisation de ce jeu n’est pas encore disponible.");
+}
+
+export async function applyInitialGameSettings(
+  serverOrderId: string,
+  options: { syncedBy?: string | null } = {},
+) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const adminDb = supabaseAdmin as unknown as AdminDb;
+  const result = await adminDb
+    .from("server_orders")
+    .select(
+      "id, user_id, order_id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, metadata, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
+    )
+    .eq("id", serverOrderId)
+    .maybeSingle();
+  if (result.error) throw new Error(result.error.message);
+  if (!result.data) throw new Error("Serveur introuvable.");
+  const order = result.data as unknown as AccessibleServerOrder;
+  const gameKey = normalizeGameKey(order.plans?.game);
+  if (isMinecraftGame(order.plans?.game)) {
+    return applyInitialMinecraftSettings(serverOrderId, {
+      syncedBy: options.syncedBy ?? order.user_id,
+    });
+  }
+  if (gameKey === "ark" || gameKey === "conan" || gameKey === "gmod") {
+    return markGenericGameSettingsPending(order, options.syncedBy ?? "system", gameKey);
+  }
+  return { ok: true as const, status: "skipped" as const, skipped: true };
 }
 
 export async function applyInitialMinecraftSettings(
@@ -2107,34 +2229,54 @@ export const applyServerSettings = createServerFn({ method: "POST" })
       }
     }
 
-    let minecraftSync:
-      | { status: "success"; changedKeys: string[]; restartRecommended: boolean }
+    let settingsSync:
+      | {
+          status: "success";
+          changedKeys: string[];
+          restartRecommended: boolean;
+          message?: string | null;
+        }
+      | {
+          status: "pending_template_support";
+          changedKeys: string[];
+          restartRecommended: boolean;
+          message: string;
+        }
       | { status: "failed"; error: string }
       | { status: "skipped" } = { status: "skipped" };
-    if (isMinecraftGame(order.plans?.game)) {
-      try {
-        const syncResult = await syncMinecraftSettingsInternal(order.id, context.userId);
-        minecraftSync = {
-          status: "success",
-          changedKeys: syncResult.changedKeys,
-          restartRecommended: syncResult.restartRecommended,
-        };
-      } catch (syncError) {
-        minecraftSync = {
-          status: "failed",
-          error:
-            syncError instanceof Error
-              ? syncError.message
-              : "Synchronisation Minecraft impossible.",
-        };
-      }
+    try {
+      const syncResult = await syncGameSettingsInternal(order.id, context.userId);
+      settingsSync = syncResult;
+    } catch (syncError) {
+      settingsSync = {
+        status: "failed",
+        error:
+          syncError instanceof Error
+            ? syncError.message
+            : "Synchronisation des paramètres impossible.",
+      };
     }
 
     return {
       ok: true,
       changed: changes.map((change) => change.key),
       infrastructureRenamed,
-      minecraftSync,
+      settingsSync,
+      minecraftSync: settingsSync,
+    };
+  });
+
+export const syncGameSettings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const result = await syncGameSettingsInternal(data.orderId, context.userId);
+    return {
+      ok: true,
+      status: result.status,
+      changedKeys: result.changedKeys,
+      restartRecommended: result.restartRecommended,
+      message: result.message,
     };
   });
 
@@ -2148,6 +2290,33 @@ export const syncMinecraftSettings = createServerFn({ method: "POST" })
       changedKeys: result.changedKeys,
       restartRecommended: result.restartRecommended,
     };
+  });
+
+export const syncArkSettings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const result = await syncGameSettingsInternal(data.orderId, context.userId);
+    if (result.status !== "pending_template_support") {
+      return { ok: true, status: result.status, changedKeys: result.changedKeys };
+    }
+    return result;
+  });
+
+export const syncConanSettings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const result = await syncGameSettingsInternal(data.orderId, context.userId);
+    return result;
+  });
+
+export const syncGmodSettings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const result = await syncGameSettingsInternal(data.orderId, context.userId);
+    return result;
   });
 
 export const syncMinecraftServerProperties = createServerFn({ method: "POST" })
