@@ -37,6 +37,7 @@ const FORBIDDEN_SETTING_KEYS = new Set([
   "max_players",
   "slot_count",
   "slots",
+  "max-players",
   "memory",
   "ram",
   "cpu",
@@ -54,6 +55,43 @@ const FORBIDDEN_SETTING_KEYS = new Set([
   "docker_image",
   "node",
   "node_id",
+]);
+
+const MINECRAFT_SERVER_PROPERTIES_KEYS = {
+  motd: "motd",
+  difficulty: "difficulty",
+  gamemode: "gamemode",
+  hardcore: "hardcore",
+  pvp: "pvp",
+  whitelist: "white-list",
+  onlineMode: "online-mode",
+  allowFlight: "allow-flight",
+  spawnProtection: "spawn-protection",
+  viewDistance: "view-distance",
+  simulationDistance: "simulation-distance",
+  seed: "level-seed",
+} as const;
+
+const MINECRAFT_RESTART_RECOMMENDED_KEYS = new Set([
+  "difficulty",
+  "gamemode",
+  "hardcore",
+  "onlineMode",
+  "whitelist",
+]);
+
+const MINECRAFT_NEVER_SYNC_KEYS = new Set([
+  "max_players",
+  "slot_count",
+  "slots",
+  "max-players",
+  "server-port",
+  "query.port",
+  "rcon.port",
+  "rcon.password",
+  "enable-rcon",
+  "network-compression-threshold",
+  "server-ip",
 ]);
 
 const SERVER_SETTING_DEFINITIONS = {
@@ -291,6 +329,72 @@ function selectedSettingsChangeLog(metadata: unknown): ServerSettingsChangeLogEn
   return Array.isArray(root.settings_change_log)
     ? (root.settings_change_log as ServerSettingsChangeLogEntry[]).slice(-20)
     : [];
+}
+
+function selectedSettingsSync(metadata: unknown) {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const sync = root.server_settings_sync;
+  if (!sync || typeof sync !== "object") {
+    return {
+      last_sync_at: null as string | null,
+      last_sync_status: null as string | null,
+      last_sync_error: null as string | null,
+      restart_recommended: false,
+      changed_keys: [] as string[],
+    };
+  }
+  const value = sync as Record<string, unknown>;
+  return {
+    last_sync_at: typeof value.last_sync_at === "string" ? value.last_sync_at : null,
+    last_sync_status: typeof value.last_sync_status === "string" ? value.last_sync_status : null,
+    last_sync_error: typeof value.last_sync_error === "string" ? value.last_sync_error : null,
+    restart_recommended: value.restart_recommended === true,
+    changed_keys: Array.isArray(value.changed_keys)
+      ? value.changed_keys.filter((key): key is string => typeof key === "string")
+      : [],
+  };
+}
+
+function selectedSettingsSyncHistory(metadata: unknown) {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  return Array.isArray(root.server_settings_sync_history)
+    ? (root.server_settings_sync_history as Array<Record<string, unknown>>).slice(-20)
+    : [];
+}
+
+function getPurchasedPlayerSlots(metadata: unknown): number | null {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const minecraftSettings =
+    root.minecraft_settings && typeof root.minecraft_settings === "object"
+      ? (root.minecraft_settings as Record<string, unknown>)
+      : {};
+  const playerPricing =
+    root.player_pricing && typeof root.player_pricing === "object"
+      ? (root.player_pricing as Record<string, unknown>)
+      : {};
+  const candidates = [
+    root.max_players,
+    minecraftSettings.max_players,
+    playerPricing.selected_players,
+    playerPricing.players,
+  ];
+  for (const candidate of candidates) {
+    const value =
+      typeof candidate === "number"
+        ? candidate
+        : typeof candidate === "string" && candidate.trim()
+          ? Number(candidate)
+          : null;
+    if (Number.isFinite(value) && Number(value) > 0) return Math.round(Number(value));
+  }
+  return null;
+}
+
+function hasForbiddenServerSetting(input: Record<string, unknown>) {
+  return Object.keys(input).find((key) => FORBIDDEN_SETTING_KEYS.has(key.trim().toLowerCase()));
 }
 
 function sanitizeServerSettings(
@@ -807,6 +911,223 @@ async function loadOwnedIdentifier(
   return order.pterodactyl_server_identifier;
 }
 
+function parseServerProperties(contents: string) {
+  const values = new Map<string, string>();
+  const lines = contents.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const index = line.indexOf("=");
+    if (index <= 0) continue;
+    const key = line.slice(0, index).trim();
+    const value = line.slice(index + 1);
+    values.set(key, value);
+  }
+  return { lines, values };
+}
+
+function serializeServerProperties(
+  contents: string,
+  updates: Record<string, string>,
+): { contents: string; before: Record<string, string | null>; after: Record<string, string> } {
+  const parsed = parseServerProperties(contents);
+  const before: Record<string, string | null> = {};
+  const after: Record<string, string> = {};
+  const remaining = new Map(Object.entries(updates));
+  const nextLines = parsed.lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return line;
+    const index = line.indexOf("=");
+    if (index <= 0) return line;
+    const key = line.slice(0, index).trim();
+    if (!remaining.has(key)) return line;
+    const value = remaining.get(key) ?? "";
+    before[key] = parsed.values.get(key) ?? null;
+    after[key] = value;
+    remaining.delete(key);
+    return `${key}=${value}`;
+  });
+
+  for (const [key, value] of remaining) {
+    before[key] = parsed.values.get(key) ?? null;
+    after[key] = value;
+    nextLines.push(`${key}=${value}`);
+  }
+
+  return { contents: nextLines.join("\n"), before, after };
+}
+
+function minecraftSettingToPropertyValue(key: string, value: ServerSettingValue): string | null {
+  if (value == null) return null;
+  if (MINECRAFT_NEVER_SYNC_KEYS.has(key)) return null;
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") return String(Math.round(value));
+  return value.trim();
+}
+
+function buildMinecraftPropertiesUpdates(settings: Record<string, ServerSettingValue>) {
+  const updates: Record<string, string> = {};
+  for (const [settingKey, propertyKey] of Object.entries(MINECRAFT_SERVER_PROPERTIES_KEYS)) {
+    if (!(settingKey in settings)) continue;
+    const value = minecraftSettingToPropertyValue(settingKey, settings[settingKey]);
+    if (value == null) continue;
+    updates[propertyKey] = value;
+  }
+  return updates;
+}
+
+async function updateServerOrderMetadata(
+  serverOrderId: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const adminDb = supabaseAdmin as unknown as AdminDb;
+  const result = await adminDb.from("server_orders").update({ metadata }).eq("id", serverOrderId);
+  if (result.error) throw new Error(result.error.message);
+}
+
+async function syncMinecraftServerPropertiesInternal(
+  order: AccessibleServerOrder,
+  syncedBy: string,
+): Promise<{
+  ok: true;
+  changedKeys: string[];
+  restartRecommended: boolean;
+  before: Record<string, string | null>;
+  after: Record<string, string>;
+}> {
+  if (!isMinecraftGame(order.plans?.game)) {
+    throw new Error("La synchronisation Minecraft est disponible uniquement pour Minecraft.");
+  }
+  if (!order.pterodactyl_server_identifier) {
+    throw new Error("Serveur indisponible pour la synchronisation.");
+  }
+
+  const metadata =
+    order.metadata && typeof order.metadata === "object"
+      ? (order.metadata as Record<string, unknown>)
+      : {};
+  const slots = getPurchasedPlayerSlots(metadata);
+  const settings = selectedServerSettings(metadata);
+  const updates = buildMinecraftPropertiesUpdates(settings);
+  const changedSettingKeys = Object.keys(updates)
+    .map(
+      (propertyKey) =>
+        Object.entries(MINECRAFT_SERVER_PROPERTIES_KEYS).find(
+          ([, value]) => value === propertyKey,
+        )?.[0],
+    )
+    .filter((key): key is string => Boolean(key));
+  const restartRecommended = changedSettingKeys.some((key) =>
+    MINECRAFT_RESTART_RECOMMENDED_KEYS.has(key),
+  );
+
+  if (Object.keys(updates).length === 0) {
+    throw new Error("Aucun paramètre Minecraft synchronisable.");
+  }
+
+  const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+  assertPteroClientConfigured();
+  const file = "/server.properties";
+  const current = (await ptero.client(
+    `/servers/${order.pterodactyl_server_identifier}/files/contents?file=${encodeURIComponent(
+      file,
+    )}`,
+    { raw: true },
+  )) as string;
+  const serialized = serializeServerProperties(current, updates);
+
+  await ptero.client(
+    `/servers/${order.pterodactyl_server_identifier}/files/write?file=${encodeURIComponent(file)}`,
+    {
+      method: "POST",
+      body: serialized.contents,
+      contentType: "text/plain",
+    },
+  );
+
+  const syncedAt = new Date().toISOString();
+  const nextMetadata = {
+    ...metadata,
+    server_settings_sync: {
+      last_sync_at: syncedAt,
+      last_sync_status: "success",
+      last_sync_error: null,
+      restart_recommended: restartRecommended,
+      changed_keys: changedSettingKeys,
+      purchased_slots: slots,
+    },
+    server_settings_sync_history: [
+      ...selectedSettingsSyncHistory(metadata),
+      {
+        before: serialized.before,
+        after: serialized.after,
+        synced_by: syncedBy,
+        synced_at: syncedAt,
+        restart_recommended: restartRecommended,
+      },
+    ].slice(-20),
+  };
+  await updateServerOrderMetadata(order.id, nextMetadata);
+
+  console.info("[MinecraftSettingsSync] success", {
+    serverOrderId: order.id,
+    serverId: order.pterodactyl_server_id,
+    keysChanged: changedSettingKeys,
+    restartRecommended,
+  });
+
+  return {
+    ok: true,
+    changedKeys: changedSettingKeys,
+    restartRecommended,
+    before: serialized.before,
+    after: serialized.after,
+  };
+}
+
+async function syncMinecraftSettingsInternal(orderId: string, userId: string) {
+  const { order } = await loadAccessibleServerOrder(orderId, userId, "syncMinecraftSettings");
+  try {
+    return await syncMinecraftServerPropertiesInternal(order, userId);
+  } catch (error) {
+    const metadata =
+      order.metadata && typeof order.metadata === "object"
+        ? (order.metadata as Record<string, unknown>)
+        : {};
+    const syncedAt = new Date().toISOString();
+    const message =
+      error instanceof Error ? error.message : "Synchronisation Minecraft impossible.";
+    await updateServerOrderMetadata(order.id, {
+      ...metadata,
+      server_settings_sync: {
+        last_sync_at: syncedAt,
+        last_sync_status: "failed",
+        last_sync_error: message,
+        restart_recommended: false,
+        changed_keys: [],
+        purchased_slots: getPurchasedPlayerSlots(metadata),
+      },
+      server_settings_sync_history: [
+        ...selectedSettingsSyncHistory(metadata),
+        {
+          before: {},
+          after: {},
+          synced_by: userId,
+          synced_at: syncedAt,
+          error: message,
+        },
+      ].slice(-20),
+    });
+    console.warn("[MinecraftSettingsSync] failed", {
+      serverOrderId: order.id,
+      serverId: order.pterodactyl_server_id,
+      error: message,
+    });
+    throw new Error(message);
+  }
+}
+
 export const listMyServers = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
@@ -1032,6 +1353,7 @@ export const getServerDetail = createServerFn({ method: "POST" })
         : null,
       server_settings: selectedServerSettings(metadata),
       settings_change_log: selectedSettingsChangeLog(metadata),
+      settings_sync: selectedSettingsSync(metadata),
     };
     if (!order.pterodactyl_server_identifier) {
       return { order: orderWithMinecraft, live: null, modpackInstallJob, access: accessInfo };
@@ -1581,6 +1903,15 @@ export const applyServerSettings = createServerFn({ method: "POST" })
     );
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const adminDb = supabaseAdmin as unknown as AdminDb;
+    const forbiddenKey = hasForbiddenServerSetting(data.settings);
+    if (forbiddenKey) {
+      console.warn("[ServerSettings] forbidden setting rejected", {
+        serverOrderId: order.id,
+        userId: context.userId,
+        key: forbiddenKey,
+      });
+      throw new Error("Ce paramètre est verrouillé par votre offre XNTServers.");
+    }
 
     const sanitized = sanitizeServerSettings(order.plans?.game, data.settings);
     const existingMetadata =
@@ -1640,10 +1971,58 @@ export const applyServerSettings = createServerFn({ method: "POST" })
       }
     }
 
+    let minecraftSync:
+      | { status: "success"; changedKeys: string[]; restartRecommended: boolean }
+      | { status: "failed"; error: string }
+      | { status: "skipped" } = { status: "skipped" };
+    if (isMinecraftGame(order.plans?.game)) {
+      try {
+        const syncResult = await syncMinecraftSettingsInternal(order.id, context.userId);
+        minecraftSync = {
+          status: "success",
+          changedKeys: syncResult.changedKeys,
+          restartRecommended: syncResult.restartRecommended,
+        };
+      } catch (syncError) {
+        minecraftSync = {
+          status: "failed",
+          error:
+            syncError instanceof Error
+              ? syncError.message
+              : "Synchronisation Minecraft impossible.",
+        };
+      }
+    }
+
     return {
       ok: true,
       changed: changes.map((change) => change.key),
       infrastructureRenamed,
+      minecraftSync,
+    };
+  });
+
+export const syncMinecraftSettings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const result = await syncMinecraftSettingsInternal(data.orderId, context.userId);
+    return {
+      ok: true,
+      changedKeys: result.changedKeys,
+      restartRecommended: result.restartRecommended,
+    };
+  });
+
+export const syncMinecraftServerProperties = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => orderInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const result = await syncMinecraftSettingsInternal(data.orderId, context.userId);
+    return {
+      ok: true,
+      changedKeys: result.changedKeys,
+      restartRecommended: result.restartRecommended,
     };
   });
 

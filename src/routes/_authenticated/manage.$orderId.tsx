@@ -46,6 +46,7 @@ import {
   deleteServerAllocation,
   renameServer,
   applyServerSettings,
+  syncMinecraftSettings,
   reinstallServerClient,
   getServerStartup,
   updateServerStartup,
@@ -95,6 +96,14 @@ type SettingsChangeLogEntry = {
   key: string;
   old_value: unknown;
   new_value: unknown;
+};
+
+type SettingsSyncState = {
+  last_sync_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+  restart_recommended: boolean;
+  changed_keys: string[];
 };
 
 const WS_ERROR_MESSAGE =
@@ -240,6 +249,14 @@ function ServerDetail() {
           }
         | undefined
     )?.settings_change_log ?? [];
+  const settingsSync =
+    (
+      order as
+        | {
+            settings_sync?: SettingsSyncState | null;
+          }
+        | undefined
+    )?.settings_sync ?? null;
   const serverSettingsLabel = getServerSettingsLabel(gameKey);
 
   return (
@@ -466,6 +483,7 @@ function ServerDetail() {
                   settings={minecraftSettings}
                   serverSettings={serverSettings}
                   changeLog={settingsChangeLog}
+                  syncState={settingsSync}
                   serverName={order.server_name}
                   planName={order.plans?.name ?? null}
                   game={order.plans?.game ?? null}
@@ -1998,6 +2016,7 @@ function ServerSettingsTab({
   settings,
   serverSettings,
   changeLog,
+  syncState,
   serverName,
   planName,
   game,
@@ -2015,6 +2034,7 @@ function ServerSettingsTab({
   } | null;
   serverSettings: Record<string, unknown>;
   changeLog: SettingsChangeLogEntry[];
+  syncState: SettingsSyncState | null;
   serverName: string;
   planName: string | null;
   game: string | null;
@@ -2022,6 +2042,7 @@ function ServerSettingsTab({
   title: string;
 }) {
   const applySettingsFn = useServerFn(applyServerSettings);
+  const syncMinecraftSettingsFn = useServerFn(syncMinecraftSettings);
   const qc = useQueryClient();
   const maxPlayers = settings?.max_players ?? null;
   const isMinecraft = isMinecraftGame(game);
@@ -2036,11 +2057,23 @@ function ServerSettingsTab({
   const applySettingsMutation = useMutation({
     mutationFn: () => applySettingsFn({ data: { orderId, settings: form } }),
     onSuccess: (result) => {
-      toast.success(
-        result.infrastructureRenamed
-          ? "Paramètres sauvegardés et nom synchronisé."
-          : "Paramètres sauvegardés dans XNT.",
-      );
+      if (result.minecraftSync?.status === "success") {
+        toast.success(
+          result.minecraftSync.restartRecommended
+            ? "Paramètres sauvegardés et synchronisés. Redémarrage recommandé."
+            : "Paramètres sauvegardés et synchronisés.",
+        );
+      } else if (result.minecraftSync?.status === "failed") {
+        toast.warning(
+          `Paramètres sauvegardés, synchronisation à vérifier: ${result.minecraftSync.error}`,
+        );
+      } else {
+        toast.success(
+          result.infrastructureRenamed
+            ? "Paramètres sauvegardés et nom synchronisé."
+            : "Paramètres sauvegardés dans XNT.",
+        );
+      }
       qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
       qc.invalidateQueries({ queryKey: ["my-servers"] });
       qc.invalidateQueries({ queryKey: ["my-billing"] });
@@ -2050,6 +2083,19 @@ function ServerSettingsTab({
 
   const setValue = (key: string, value: unknown) =>
     setForm((current) => ({ ...current, [key]: value }));
+
+  const syncMutation = useMutation({
+    mutationFn: () => syncMinecraftSettingsFn({ data: { orderId } }),
+    onSuccess: (result) => {
+      toast.success(
+        result.restartRecommended
+          ? "Synchronisation réussie. Redémarrage recommandé."
+          : "Synchronisation réussie.",
+      );
+      qc.invalidateQueries({ queryKey: ["server-detail", orderId] });
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
 
   return (
     <div className="xnt-card space-y-5 rounded-xl p-6">
@@ -2190,20 +2236,60 @@ function ServerSettingsTab({
             </div>
             <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
               <div className="text-xs uppercase tracking-wider text-muted-foreground">
-                Application serveur
+                Synchronisation serveur
               </div>
               <Badge
                 variant="outline"
                 className={
-                  settings?.max_players_applied
+                  syncState?.last_sync_status === "success"
                     ? "mt-2 border-success/40 bg-success/10 text-success"
-                    : "mt-2 border-accent/40 bg-accent/10 text-accent"
+                    : syncState?.last_sync_status === "failed"
+                      ? "mt-2 border-destructive/40 bg-destructive/10 text-destructive"
+                      : "mt-2 border-accent/40 bg-accent/10 text-accent"
                 }
               >
-                {settings?.max_players_applied
-                  ? "Appliqué par le template"
-                  : "En attente template compatible"}
+                {syncState?.last_sync_status === "success"
+                  ? "Synchronisation réussie"
+                  : syncState?.last_sync_status === "failed"
+                    ? "Erreur de synchronisation"
+                    : "Pas encore synchronisé"}
               </Badge>
+              <div className="mt-2 text-xs text-muted-foreground">
+                Dernière synchronisation :{" "}
+                {syncState?.last_sync_at
+                  ? new Date(syncState.last_sync_at).toLocaleString()
+                  : "Jamais"}
+              </div>
+              {syncState?.restart_recommended && (
+                <div className="mt-2 text-xs text-accent">Redémarrage recommandé.</div>
+              )}
+              {syncState?.last_sync_error && (
+                <div className="mt-2 text-xs text-destructive">{syncState.last_sync_error}</div>
+              )}
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                disabled={syncMutation.isPending}
+                onClick={() => syncMutation.mutate()}
+              >
+                <RefreshCw className="mr-1.5 h-4 w-4" />
+                {syncMutation.isPending ? "Synchronisation…" : "Synchroniser maintenant"}
+              </Button>
+            </div>
+            <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
+              <div className="text-xs uppercase tracking-wider text-muted-foreground">
+                Protection slots
+              </div>
+              <Badge
+                variant="outline"
+                className="mt-2 border-primary/40 bg-primary/10 text-primary"
+              >
+                Verrouillé après achat
+              </Badge>
+              <p className="mt-2 text-xs text-muted-foreground">
+                Les slots ne sont jamais synchronisés depuis l’interface Manage.
+              </p>
             </div>
           </>
         ) : (
