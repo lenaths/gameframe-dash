@@ -540,10 +540,10 @@ const PROTECTED_FILE_BASENAMES = new Set([
   ".env.production",
   "docker-compose.yml",
   "docker-compose.yaml",
-  "GameUserSettings.ini",
-  "Game.ini",
-  "Engine.ini",
-  "ServerSettings.ini",
+  "gameusersettings.ini",
+  "game.ini",
+  "engine.ini",
+  "serversettings.ini",
   "server.cfg",
 ]);
 const PROTECTED_PATH_PREFIXES = [
