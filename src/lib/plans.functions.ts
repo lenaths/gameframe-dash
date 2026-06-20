@@ -329,7 +329,7 @@ export const listPlans = createServerFn({ method: "GET" }).handler(async () => {
   const { data, error } = await supabaseAdmin
     .from("plans")
     .select(
-      "id, slug, game, name, description, price_monthly_cents, ram_mb, cpu_percent, disk_mb, sort_order, allowed_eggs, pterodactyl_nest_id, pterodactyl_egg_id, docker_image, startup, environment",
+      "id, slug, game, name, description, price_monthly_cents, ram_mb, cpu_percent, disk_mb, sort_order, is_active, allowed_eggs, pterodactyl_nest_id, pterodactyl_egg_id, docker_image, startup, environment",
     )
     .eq("is_active", true)
     .order("sort_order", { ascending: true });
@@ -341,6 +341,7 @@ export const listPlans = createServerFn({ method: "GET" }).handler(async () => {
         id: plan.id,
         slug: plan.slug,
         code: plan.slug,
+        is_active: plan.is_active,
         game: plan.game,
         name: plan.name,
         description: plan.description,

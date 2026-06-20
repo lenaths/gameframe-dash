@@ -90,7 +90,8 @@ function Deploy() {
   );
   const planLocked = isPlanLockedSearchValue(preselectedPlanLocked);
 
-  const { data: plansData } = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
+  const plansQ = useQuery({ queryKey: ["plans"], queryFn: () => fetchPlans() });
+  const plansData = plansQ.data;
   const allPlans = useMemo(() => plansData?.plans ?? [], [plansData?.plans]);
   const routePlanState = resolveDeployPlanState({
     plans: allPlans,
@@ -168,11 +169,12 @@ function Deploy() {
     }
   }, [deployType, preselectedModpack]);
   useEffect(() => {
+    if (deployType !== "modpack") return;
     if (selectedModpackId === preselectedModpack && preselectedVersion) return;
     setSelectedVersionId("");
     setPlanId("");
     setVariantIndex(0);
-  }, [preselectedModpack, preselectedVersion, selectedModpackId]);
+  }, [deployType, preselectedModpack, preselectedVersion, selectedModpackId]);
   const currentVariant = opts.data?.variants[variantIndex];
   useEffect(() => {
     if (!currentVariant) return;
@@ -242,11 +244,12 @@ function Deploy() {
   const unlockedResolvedPlan = resolveDeployPlan(unlockedPlanOptions, planId);
   const visiblePlanOptions = planLocked ? routePlanState.visiblePlans : unlockedPlanOptions;
   const selectedPlan = planLocked ? routePlanState.selectedPlan : unlockedResolvedPlan;
-  const lockedPlanError = planLocked && plansData ? routePlanState.error : null;
-  const lockedPlanFailureReason = planLocked && plansData ? routePlanState.failureReason : null;
+  const plansLoaded = plansQ.isSuccess;
+  const lockedPlanError = planLocked && plansLoaded ? routePlanState.error : null;
+  const lockedPlanFailureReason = planLocked && plansLoaded ? routePlanState.failureReason : null;
 
   useEffect(() => {
-    if (!import.meta.env.DEV || !plansData) return;
+    if (!import.meta.env.DEV || !plansLoaded) return;
     const availablePlans = allPlans.map((plan) => ({
       id: plan.id,
       slug: plan.slug ?? null,
@@ -269,7 +272,53 @@ function Deploy() {
       planLocked,
       failureReason: lockedPlanFailureReason,
     });
-  }, [allPlans, lockedPlanFailureReason, planId, planLocked, plansData, preselected, selectedPlan]);
+  }, [
+    allPlans,
+    lockedPlanFailureReason,
+    planId,
+    planLocked,
+    plansLoaded,
+    preselected,
+    selectedPlan,
+  ]);
+
+  const deployDebugInfo = {
+    query: {
+      plan: preselected ?? null,
+      variant: preselectedVariant ?? null,
+      template: preselectedTemplate ?? null,
+      server_type: preselectedServerType ?? null,
+      minecraft_version: preselectedMinecraftVersion ?? null,
+      players: preselectedPlayers ?? preselectedMaxPlayers ?? null,
+      plan_locked: preselectedPlanLocked ?? null,
+    },
+    state: {
+      planId,
+      canonicalRoutePlanId,
+      deployOptionsPlanId: deployOptionsPlanId || null,
+      planLocked,
+      plansLoading: plansQ.isLoading,
+      plansLoaded,
+      plansError: plansQ.error instanceof Error ? plansQ.error.message : null,
+    },
+    availablePlans: allPlans.map((plan) => ({
+      id: plan.id,
+      slug: plan.slug ?? null,
+      code: plan.code ?? null,
+      name: plan.name,
+      is_active: plan.is_active ?? null,
+    })),
+    resolvedPlan: selectedPlan
+      ? {
+          id: selectedPlan.id,
+          slug: selectedPlan.slug ?? null,
+          code: selectedPlan.code ?? null,
+          name: selectedPlan.name,
+          is_active: selectedPlan.is_active ?? null,
+        }
+      : null,
+    failureReason: lockedPlanFailureReason,
+  };
 
   const isMinecraft = selectedPlan ? isMinecraftGame(selectedPlan.game) : false;
   const maxPlayersLimit = selectedPlan
@@ -356,6 +405,15 @@ function Deploy() {
         <p className="text-muted-foreground mt-2">
           Choisis un plan, un template serveur et les paramètres avant paiement.
         </p>
+
+        {import.meta.env.DEV && (
+          <div className="mt-6 rounded-xl border border-primary/25 bg-background/60 p-4 text-xs">
+            <div className="mb-2 font-semibold text-primary">Deploy debug développement</div>
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words text-muted-foreground">
+              {JSON.stringify(deployDebugInfo, null, 2)}
+            </pre>
+          </div>
+        )}
 
         <form
           onSubmit={(e) => {
@@ -527,9 +585,24 @@ function Deploy() {
                 Aucun plan compatible. Installation modpack bientôt disponible.
               </div>
             )}
-            {planLocked && !plansData ? (
+            {planLocked && !plansLoaded && !plansQ.isError ? (
               <div className="rounded-xl border border-primary/20 bg-background/35 p-4 text-sm text-muted-foreground">
                 Chargement du plan sélectionné…
+              </div>
+            ) : planLocked && plansQ.isError ? (
+              <div className="rounded-xl border border-destructive/35 bg-destructive/10 p-4">
+                <div className="font-medium text-destructive">Impossible de charger les plans.</div>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {plansQ.error instanceof Error ? plansQ.error.message : "Erreur inconnue"}
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-3"
+                  onClick={() => navigate({ to: "/pricing" })}
+                >
+                  Retour Pricing
+                </Button>
               </div>
             ) : planLocked && lockedPlanError ? (
               <div className="rounded-xl border border-destructive/35 bg-destructive/10 p-4">

@@ -373,6 +373,8 @@ test("Deploy resolves plan by id, slug and code", () => {
   assert.equal(resolveDeployPlan(plans, "plan-iron")?.id, "plan-iron");
   assert.equal(resolveDeployPlan(plans, "mc-iron")?.id, "plan-iron");
   assert.equal(resolveDeployPlan(plans, "iron-code")?.id, "plan-iron");
+  assert.equal(resolveDeployPlan(plans, "Iron")?.id, "plan-iron");
+  assert.equal(resolveDeployPlan(plans, "Minecraft Iron")?.id, "plan-iron");
   assert.equal(resolveDeployPlan(plans, "missing"), null);
 });
 

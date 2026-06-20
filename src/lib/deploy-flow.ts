@@ -43,6 +43,7 @@ export type DeployPlanSummary = {
   id: string;
   slug?: string | null;
   code?: string | null;
+  is_active?: boolean | null;
   game: string;
   name: string;
   price_monthly_cents: number;
@@ -63,17 +64,30 @@ export function isPlanLockedSearchValue(value: unknown) {
 export function resolveDeployPlan(plans: DeployPlanSummary[], planParam?: string | null) {
   const rawParam = planParam?.trim();
   if (!rawParam) return null;
-  const normalizedParam = rawParam.toLowerCase();
+  const normalizedParam = normalizePlanLookup(rawParam);
   return (
     plans.find((plan) => {
-      const candidates = [plan.id, plan.slug, plan.code].filter(
-        (value): value is string => typeof value === "string" && value.trim().length > 0,
-      );
+      const candidates = [
+        plan.id,
+        plan.slug,
+        plan.code,
+        plan.name,
+        plan.game + "-" + plan.name,
+      ].filter((value): value is string => typeof value === "string" && value.trim().length > 0);
       return candidates.some(
-        (candidate) => candidate === rawParam || candidate.toLowerCase() === normalizedParam,
+        (candidate) => candidate === rawParam || normalizePlanLookup(candidate) === normalizedParam,
       );
     }) ?? null
   );
+}
+
+function normalizePlanLookup(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
 }
 
 export function resolveDeployPlanState(input: {
