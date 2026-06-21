@@ -50,6 +50,7 @@ type ServerLinkRow = {
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
   minecraft_settings?: MinecraftSettings | null;
+  initial_minecraft_sync?: InitialMinecraftSyncInfo | null;
 };
 type ServerDetailRow = ServerLinkRow & {
   user_id: string | null;
@@ -90,6 +91,32 @@ function selectedModpackLabel(metadata: unknown) {
   return typeof selectedModpack?.name === "string" && selectedModpack.name.trim()
     ? selectedModpack.name
     : null;
+}
+
+type InitialMinecraftSyncInfo = {
+  status: string | null;
+  retry_count: number;
+  next_retry_at: string | null;
+  last_attempt_at: string | null;
+  last_error: string | null;
+};
+
+function selectedInitialMinecraftSync(metadata: unknown): InitialMinecraftSyncInfo | null {
+  const root =
+    metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const sync = root.initial_minecraft_sync;
+  if (!sync || typeof sync !== "object") return null;
+  const value = sync as Record<string, unknown>;
+  return {
+    status: typeof value.status === "string" ? value.status : null,
+    retry_count:
+      typeof value.retry_count === "number" && Number.isFinite(value.retry_count)
+        ? Math.max(0, Math.round(value.retry_count))
+        : 0,
+    next_retry_at: typeof value.next_retry_at === "string" ? value.next_retry_at : null,
+    last_attempt_at: typeof value.last_attempt_at === "string" ? value.last_attempt_at : null,
+    last_error: typeof value.last_error === "string" ? value.last_error : null,
+  };
 }
 
 function selectedMinecraftSettings(metadata: unknown): MinecraftSettings | null {
@@ -1465,6 +1492,7 @@ export const adminListOrdersDetailed = createServerFn({ method: "GET" })
         selected_template_label: selectedTemplateLabel(metadata),
         selected_modpack_label: selectedModpackLabel(metadata),
         minecraft_settings: selectedMinecraftSettings(metadata),
+        initial_minecraft_sync: selectedInitialMinecraftSync(metadata),
       }),
     );
     const profilesById = await getProfilesById(orderRows.map((order) => order.user_id));
@@ -1475,6 +1503,7 @@ export const adminListOrdersDetailed = createServerFn({ method: "GET" })
           selected_template_label: selectedTemplateLabel(metadata),
           selected_modpack_label: selectedModpackLabel(metadata),
           minecraft_settings: selectedMinecraftSettings(metadata),
+          initial_minecraft_sync: selectedInitialMinecraftSync(metadata),
         }))
         .filter((server) => server.order_id)
         .map((server) => [server.order_id as string, server]),
@@ -1509,6 +1538,7 @@ export const adminListServersDetailed = createServerFn({ method: "GET" })
         selected_template_label: selectedTemplateLabel(metadata),
         selected_modpack_label: selectedModpackLabel(metadata),
         minecraft_settings: selectedMinecraftSettings(metadata),
+        initial_minecraft_sync: selectedInitialMinecraftSync(metadata),
       }),
     );
     const profilesById = await getProfilesById(servers.map((server) => server.user_id));
@@ -1598,6 +1628,71 @@ export const adminSyncServerStatus = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await assertAdmin(context.userId);
     return syncServerOrderStatus(data.serverOrderId, context.userId);
+  });
+
+export const adminListMinecraftSyncQueue = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    const { data, error } = await db
+      .from("server_orders")
+      .select(
+        "id, user_id, server_name, status, pterodactyl_server_id, pterodactyl_server_identifier, metadata, created_at, plans(name, game)",
+      )
+      .order("created_at", { ascending: false })
+      .limit(200);
+    if (error) throw new Error(error.message);
+    const rows = ((data ?? []) as Array<ServerDetailRow & { metadata?: unknown }>)
+      .map(({ metadata, ...server }) => ({
+        ...server,
+        initial_minecraft_sync: selectedInitialMinecraftSync(metadata),
+      }))
+      .filter((server) => server.plans?.game?.toLowerCase().includes("minecraft"))
+      .filter((server) => server.initial_minecraft_sync?.status === "pending");
+    const profilesById = await getProfilesById(rows.map((row) => row.user_id));
+    return {
+      queue: rows.map((row) => ({
+        ...row,
+        profile: row.user_id ? (profilesById.get(row.user_id) ?? null) : null,
+      })),
+    };
+  });
+
+export const adminProcessPendingMinecraftSyncs = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) =>
+    z
+      .object({ limit: z.number().int().min(1).max(50).optional() })
+      .optional()
+      .parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { processPendingMinecraftSyncs } = await import("@/lib/servers.functions");
+    return processPendingMinecraftSyncs({ limit: data?.limit ?? 25, syncedBy: context.userId });
+  });
+
+export const adminRetryInitialMinecraftSync = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => z.object({ serverOrderId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { processPendingMinecraftSyncs } = await import("@/lib/servers.functions");
+    return processPendingMinecraftSyncs({
+      forceServerOrderId: data.serverOrderId,
+      syncedBy: context.userId,
+    });
+  });
+
+export const adminMarkInitialMinecraftSyncFailed = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => z.object({ serverOrderId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { markInitialMinecraftSyncFailed } = await import("@/lib/servers.functions");
+    return markInitialMinecraftSyncFailed(data.serverOrderId);
   });
 
 export const adminGetMonitoring = createServerFn({ method: "GET" })

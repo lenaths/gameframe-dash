@@ -3,6 +3,11 @@ import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
 import {
+  INITIAL_MINECRAFT_SYNC_MAX_ATTEMPTS,
+  isRetryableInitialMinecraftSyncError,
+  nextInitialMinecraftSyncRetry,
+} from "@/lib/minecraft-sync-retry";
+import {
   FORBIDDEN_SETTING_KEYS,
   MAX_FILE_CONTENT_BYTES,
   assertEditableFilePath,
@@ -157,9 +162,11 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
 };
 
-type AdminTableQuery = {
+type AdminTableQuery = PromiseLike<SupabaseResult<unknown>> & {
   select: (columns: string) => AdminTableQuery;
   eq: (column: string, value: unknown) => AdminTableQuery;
+  order: (column: string, options?: Record<string, unknown>) => AdminTableQuery;
+  limit: (count: number) => AdminTableQuery;
   maybeSingle: () => Promise<SupabaseResult<unknown>>;
   update: (values: Record<string, unknown>) => {
     eq: (column: string, value: unknown) => Promise<SupabaseResult>;
@@ -383,6 +390,10 @@ function selectedInitialMinecraftSync(metadata: unknown) {
       synced_at: null as string | null,
       changed_keys: [] as string[],
       error: null as string | null,
+      retry_count: 0,
+      next_retry_at: null as string | null,
+      last_attempt_at: null as string | null,
+      last_error: null as string | null,
     };
   }
   const value = sync as Record<string, unknown>;
@@ -393,6 +404,13 @@ function selectedInitialMinecraftSync(metadata: unknown) {
       ? value.changed_keys.filter((key): key is string => typeof key === "string")
       : [],
     error: typeof value.error === "string" ? value.error : null,
+    retry_count:
+      typeof value.retry_count === "number" && Number.isFinite(value.retry_count)
+        ? Math.max(0, Math.round(value.retry_count))
+        : 0,
+    next_retry_at: typeof value.next_retry_at === "string" ? value.next_retry_at : null,
+    last_attempt_at: typeof value.last_attempt_at === "string" ? value.last_attempt_at : null,
+    last_error: typeof value.last_error === "string" ? value.last_error : null,
   };
 }
 
@@ -1169,6 +1187,10 @@ async function syncMinecraftServerPropertiesInternal(
             synced_at: syncedAt,
             changed_keys: Object.keys(serialized.after),
             error: null,
+            retry_count: 0,
+            next_retry_at: null,
+            last_attempt_at: syncedAt,
+            last_error: null,
           },
         }
       : {}),
@@ -1526,8 +1548,13 @@ export async function applyInitialMinecraftSettings(
     const syncedAt = new Date().toISOString();
     const message =
       error instanceof Error ? error.message : "Synchronisation initiale Minecraft impossible.";
-    const status = /fichier|file|contents|not found|introuvable|install/i.test(message)
-      ? "pending"
+    const retryable = isRetryableInitialMinecraftSyncError(message);
+    const previousRetryCount = initialSync?.retry_count;
+    const retry = retryable ? nextInitialMinecraftSyncRetry(previousRetryCount) : null;
+    const status = retryable
+      ? retry && retry.retryCount >= INITIAL_MINECRAFT_SYNC_MAX_ATTEMPTS
+        ? "failed"
+        : "pending"
       : "failed";
     await updateServerOrderMetadata(order.id, {
       ...metadata,
@@ -1536,6 +1563,10 @@ export async function applyInitialMinecraftSettings(
         synced_at: syncedAt,
         changed_keys: [],
         error: message,
+        retry_count: retry?.retryCount ?? 0,
+        next_retry_at: status === "pending" ? retry?.nextRetryAt : null,
+        last_attempt_at: syncedAt,
+        last_error: message,
       },
       server_settings_sync: {
         ...selectedSettingsSync(metadata),
@@ -1551,10 +1582,108 @@ export async function applyInitialMinecraftSettings(
       serverOrderId: order.id,
       serverId: order.pterodactyl_server_id,
       status,
+      retryCount: retry?.retryCount ?? 0,
+      nextRetryAt: status === "pending" ? retry?.nextRetryAt : null,
       error: message,
     });
-    return { ok: false as const, status, skipped: false, error: message };
+    return {
+      ok: false as const,
+      status,
+      skipped: false,
+      error: message,
+      retryCount: retry?.retryCount ?? 0,
+      nextRetryAt: status === "pending" ? retry?.nextRetryAt : null,
+    };
   }
+}
+
+export async function processPendingMinecraftSyncs(
+  options: {
+    limit?: number;
+    now?: Date;
+    forceServerOrderId?: string;
+    syncedBy?: string | null;
+  } = {},
+) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const adminDb = supabaseAdmin as unknown as AdminDb;
+  const now = options.now ?? new Date();
+  const result = await adminDb
+    .from("server_orders")
+    .select(
+      "id, user_id, order_id, server_name, status, pterodactyl_server_identifier, pterodactyl_server_id, error_message, metadata, created_at, plans(name, game, ram_mb, cpu_percent, disk_mb)",
+    )
+    .order("created_at", { ascending: true })
+    .limit(options.limit ?? 25);
+  if (result.error) throw new Error(result.error.message);
+
+  const candidates = ((result.data ?? []) as unknown as AccessibleServerOrder[])
+    .filter((order) => isMinecraftGame(order.plans?.game))
+    .filter((order) => {
+      if (options.forceServerOrderId) return order.id === options.forceServerOrderId;
+      const sync = selectedInitialMinecraftSync(order.metadata);
+      if (sync.status !== "pending") return false;
+      if (!sync.next_retry_at) return true;
+      return new Date(sync.next_retry_at).getTime() <= now.getTime();
+    })
+    .slice(0, options.limit ?? 25);
+
+  const processed = [];
+  for (const order of candidates) {
+    try {
+      const sync = await applyInitialMinecraftSettings(order.id, {
+        force: true,
+        syncedBy: options.syncedBy ?? order.user_id,
+      });
+      processed.push({ serverOrderId: order.id, ok: sync.ok, status: sync.status, sync });
+    } catch (error) {
+      processed.push({
+        serverOrderId: order.id,
+        ok: false,
+        status: "failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return {
+    ok: true as const,
+    checked: candidates.length,
+    processed,
+  };
+}
+
+export async function markInitialMinecraftSyncFailed(
+  serverOrderId: string,
+  error = "Marqué échoué par admin.",
+) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const adminDb = supabaseAdmin as unknown as AdminDb;
+  const result = await adminDb
+    .from("server_orders")
+    .select("id, metadata")
+    .eq("id", serverOrderId)
+    .maybeSingle();
+  if (result.error) throw new Error(result.error.message);
+  if (!result.data) throw new Error("Serveur introuvable.");
+  const row = result.data as { metadata?: unknown };
+  const metadata =
+    row.metadata && typeof row.metadata === "object"
+      ? (row.metadata as Record<string, unknown>)
+      : {};
+  const at = new Date().toISOString();
+  await updateServerOrderMetadata(serverOrderId, {
+    ...metadata,
+    initial_minecraft_sync: {
+      ...selectedInitialMinecraftSync(metadata),
+      status: "failed",
+      next_retry_at: null,
+      last_attempt_at: at,
+      last_error: error,
+      error,
+    },
+  });
+  return { ok: true as const, status: "failed" as const };
 }
 
 export const listMyServers = createServerFn({ method: "GET" })

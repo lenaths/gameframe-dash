@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "preview:prod": "vite preview --host 0.0.0.0",
     "stripe:sync-plans": "tsx scripts/sync-stripe-plans.ts",
+    "staging:provisioning-audit": "tsx scripts/staging-provisioning-audit.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx tests/run.ts",
     "lint": "eslint .",

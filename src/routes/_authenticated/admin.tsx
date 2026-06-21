@@ -43,6 +43,10 @@ import {
   adminListAll,
   adminListLogsDetailed,
   adminGetMonitoring,
+  adminListMinecraftSyncQueue,
+  adminMarkInitialMinecraftSyncFailed,
+  adminProcessPendingMinecraftSyncs,
+  adminRetryInitialMinecraftSync,
   adminCreateCurseForgeTemplateMapping,
   adminDeleteCurseForgeTemplateMapping,
   adminImportCurseForgeModpack,
@@ -93,6 +97,7 @@ function Admin() {
   const fetchLogs = useServerFn(adminListLogsDetailed);
   const fetchTickets = useServerFn(adminListTickets);
   const fetchMonitoring = useServerFn(adminGetMonitoring);
+  const fetchMinecraftSyncQueue = useServerFn(adminListMinecraftSyncQueue);
   const fetchReconciliation = useServerFn(adminListReconciliation);
   const fetchCatalog = useServerFn(adminListGameCatalog);
   const fetchCurseForgeModpacks = useServerFn(listCurseForgeModpacks);
@@ -131,6 +136,11 @@ function Admin() {
   const monitoringQ = useQuery({
     queryKey: ["admin-monitoring"],
     queryFn: () => fetchMonitoring(),
+    retry: false,
+  });
+  const minecraftSyncQueueQ = useQuery({
+    queryKey: ["admin-minecraft-sync-queue"],
+    queryFn: () => fetchMinecraftSyncQueue(),
     retry: false,
   });
   const reconciliationQ = useQuery({
@@ -178,6 +188,7 @@ function Admin() {
     logsQ.error ??
     ticketsQ.error ??
     monitoringQ.error ??
+    minecraftSyncQueueQ.error ??
     reconciliationQ.error ??
     catalogQ.error ??
     curseForgeModpacksQ.error ??
@@ -211,6 +222,7 @@ function Admin() {
             <TabsTrigger value="orders">Orders</TabsTrigger>
             <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
             <TabsTrigger value="reconciliation">Reconciliation</TabsTrigger>
+            <TabsTrigger value="minecraft-sync">Minecraft Sync</TabsTrigger>
             <TabsTrigger value="servers">Servers</TabsTrigger>
             <TabsTrigger value="payments">Payments</TabsTrigger>
             <TabsTrigger value="logs">Logs</TabsTrigger>
@@ -230,6 +242,11 @@ function Admin() {
           <TabsContent value="reconciliation" className="mt-6">
             <AdminReconciliationSection
               anomalies={(reconciliationQ.data?.anomalies ?? []) as AdminAnomaly[]}
+            />
+          </TabsContent>
+          <TabsContent value="minecraft-sync" className="mt-6">
+            <AdminMinecraftSyncQueueSection
+              queue={(minecraftSyncQueueQ.data?.queue ?? []) as AdminMinecraftSyncQueueItem[]}
             />
           </TabsContent>
           <TabsContent value="servers" className="mt-6">
@@ -336,6 +353,24 @@ type AdminServer = {
   minecraft_settings?: AdminMinecraftSettings;
   error_message: string | null;
   created_at: string;
+  profile?: AdminProfileRef | null;
+  plans?: AdminPlanRef;
+};
+
+type AdminMinecraftSyncQueueItem = {
+  id: string;
+  user_id: string | null;
+  server_name: string;
+  status: string;
+  pterodactyl_server_id: number | null;
+  pterodactyl_server_identifier: string | null;
+  initial_minecraft_sync?: {
+    status: string | null;
+    retry_count: number;
+    next_retry_at: string | null;
+    last_attempt_at: string | null;
+    last_error: string | null;
+  } | null;
   profile?: AdminProfileRef | null;
   plans?: AdminPlanRef;
 };
@@ -764,6 +799,113 @@ function AdminServersSection({ servers }: { servers: AdminServer[] }) {
                       onClick={() => sync.mutate(server.id)}
                     >
                       <RefreshCw className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </TableShell>
+    </section>
+  );
+}
+
+function AdminMinecraftSyncQueueSection({ queue }: { queue: AdminMinecraftSyncQueueItem[] }) {
+  const qc = useQueryClient();
+  const processFn = useServerFn(adminProcessPendingMinecraftSyncs);
+  const retryFn = useServerFn(adminRetryInitialMinecraftSync);
+  const markFailedFn = useServerFn(adminMarkInitialMinecraftSyncFailed);
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["admin-minecraft-sync-queue"] });
+    qc.invalidateQueries({ queryKey: ["admin-servers-detailed"] });
+  };
+
+  const process = useMutation({
+    mutationFn: () => processFn({ data: { limit: 25 } }),
+    onSuccess: (result) => {
+      toast.success(`${result.processed.length} synchronisation(s) traitée(s).`);
+      refresh();
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+  const retry = useMutation({
+    mutationFn: (serverOrderId: string) => retryFn({ data: { serverOrderId } }),
+    onSuccess: () => {
+      toast.success("Retry lancé.");
+      refresh();
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+  const markFailed = useMutation({
+    mutationFn: (serverOrderId: string) => markFailedFn({ data: { serverOrderId } }),
+    onSuccess: () => {
+      toast.success("Synchronisation marquée échouée.");
+      refresh();
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  return (
+    <section>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <SectionTitle
+          icon={<RefreshCw className="h-5 w-5" />}
+          title={`Minecraft Sync Queue (${queue.length})`}
+        />
+        <Button variant="outline" disabled={process.isPending} onClick={() => process.mutate()}>
+          <RefreshCw className="mr-1.5 h-4 w-4" />
+          {process.isPending ? "Traitement…" : "Process pending"}
+        </Button>
+      </div>
+      <TableShell
+        empty={queue.length === 0 ? "Aucune synchronisation Minecraft en attente." : null}
+      >
+        <Table>
+          <TableHeader className="bg-surface-2">
+            <TableRow>
+              <TableHead>Serveur</TableHead>
+              <TableHead>Client</TableHead>
+              <TableHead>Retry</TableHead>
+              <TableHead>Prochain retry</TableHead>
+              <TableHead>Dernière erreur</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {queue.map((item) => (
+              <TableRow key={item.id}>
+                <TableCell>
+                  <div className="font-medium">{item.server_name}</div>
+                  <div className="font-mono text-xs text-muted-foreground">{shortId(item.id)}</div>
+                </TableCell>
+                <TableCell>{item.profile?.email ?? shortId(item.user_id)}</TableCell>
+                <TableCell>{item.initial_minecraft_sync?.retry_count ?? 0}/5</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {item.initial_minecraft_sync?.next_retry_at
+                    ? new Date(item.initial_minecraft_sync.next_retry_at).toLocaleString()
+                    : "Maintenant"}
+                </TableCell>
+                <TableCell className="max-w-80 truncate text-xs text-muted-foreground">
+                  {item.initial_minecraft_sync?.last_error ?? "—"}
+                </TableCell>
+                <TableCell>
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={retry.isPending}
+                      onClick={() => retry.mutate(item.id)}
+                    >
+                      Retry now
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={markFailed.isPending}
+                      onClick={() => markFailed.mutate(item.id)}
+                    >
+                      Mark failed
                     </Button>
                   </div>
                 </TableCell>

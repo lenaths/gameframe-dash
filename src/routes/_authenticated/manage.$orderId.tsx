@@ -119,6 +119,10 @@ type InitialMinecraftSyncState = {
   synced_at: string | null;
   changed_keys: string[];
   error: string | null;
+  retry_count?: number | null;
+  next_retry_at?: string | null;
+  last_attempt_at?: string | null;
+  last_error?: string | null;
 };
 
 const WS_ERROR_MESSAGE =
@@ -2282,12 +2286,28 @@ function ServerSettingsTab({
               </Badge>
               <div className="mt-2 text-xs text-muted-foreground">
                 Dernière tentative :{" "}
-                {initialSyncState?.synced_at
-                  ? new Date(initialSyncState.synced_at).toLocaleString()
+                {(initialSyncState?.last_attempt_at ?? initialSyncState?.synced_at)
+                  ? new Date(
+                      initialSyncState.last_attempt_at ?? initialSyncState.synced_at ?? "",
+                    ).toLocaleString()
                   : "Jamais"}
               </div>
-              {initialSyncState?.error && (
-                <div className="mt-2 text-xs text-destructive">{initialSyncState.error}</div>
+              {initialSyncState?.status === "pending" && (
+                <div className="mt-2 rounded-md border border-accent/25 bg-accent/10 p-2 text-xs text-accent">
+                  Le serveur est en cours d'installation. Les paramètres Minecraft seront appliqués
+                  automatiquement dès que les fichiers seront disponibles.
+                  <div className="mt-1 text-muted-foreground">
+                    Tentative {initialSyncState.retry_count ?? 0}/5
+                    {initialSyncState.next_retry_at
+                      ? ` · Prochain essai ${new Date(initialSyncState.next_retry_at).toLocaleString()}`
+                      : ""}
+                  </div>
+                </div>
+              )}
+              {(initialSyncState?.last_error ?? initialSyncState?.error) && (
+                <div className="mt-2 text-xs text-destructive">
+                  {initialSyncState.last_error ?? initialSyncState.error}
+                </div>
               )}
               {initialSyncState?.status && initialSyncState.status !== "success" && (
                 <div className="mt-2 text-xs text-accent">
