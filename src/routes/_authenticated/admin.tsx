@@ -62,6 +62,7 @@ import {
   adminListPlans,
   adminListServersDetailed,
   adminRepairReconciliation,
+  adminRestoreServerOrderVisibility,
   adminRetryProvisioning,
   adminSearchCurseForgeModpacks,
   adminSyncServerStatus,
@@ -338,6 +339,8 @@ type AdminOrder = {
     selected_template_label?: string | null;
     selected_modpack_label?: string | null;
     minecraft_settings?: AdminMinecraftSettings;
+    is_archived?: boolean;
+    hidden_from_customer?: boolean;
   } | null;
 };
 
@@ -352,6 +355,8 @@ type AdminServer = {
   selected_template_label?: string | null;
   selected_modpack_label?: string | null;
   minecraft_settings?: AdminMinecraftSettings;
+  is_archived?: boolean;
+  hidden_from_customer?: boolean;
   error_message: string | null;
   created_at: string;
   profile?: AdminProfileRef | null;
@@ -793,6 +798,12 @@ function AdminOrdersSection({ orders }: { orders: AdminOrder[] }) {
                         <div className="font-mono text-xs">{shortId(order.server_order.id)}</div>
                         <StatusBadge status={order.server_order.status} />
                         {failed && <Badge variant="destructive">erreur</Badge>}
+                        {order.server_order.is_archived ? (
+                          <Badge variant="outline">Archivé</Badge>
+                        ) : null}
+                        {order.server_order.hidden_from_customer ? (
+                          <Badge variant="outline">Masqué client</Badge>
+                        ) : null}
                       </div>
                     ) : (
                       <Badge variant="outline">aucun</Badge>
@@ -826,12 +837,23 @@ function AdminOrdersSection({ orders }: { orders: AdminOrder[] }) {
 function AdminServersSection({ servers }: { servers: AdminServer[] }) {
   const qc = useQueryClient();
   const syncFn = useServerFn(adminSyncServerStatus);
+  const restoreVisibilityFn = useServerFn(adminRestoreServerOrderVisibility);
   const sync = useMutation({
     mutationFn: (serverOrderId: string) => syncFn({ data: { serverOrderId } }),
     onSuccess: (result) => {
       toast.success(`Statut synchronisé: ${result.status}`);
       qc.invalidateQueries({ queryKey: ["admin-servers-detailed"] });
       qc.invalidateQueries({ queryKey: ["admin-orders-detailed"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const restoreVisibility = useMutation({
+    mutationFn: (serverOrderId: string) => restoreVisibilityFn({ data: { serverOrderId } }),
+    onSuccess: () => {
+      toast.success("Visibilité client restaurée");
+      qc.invalidateQueries({ queryKey: ["admin-servers-detailed"] });
+      qc.invalidateQueries({ queryKey: ["admin-orders-detailed"] });
+      qc.invalidateQueries({ queryKey: ["admin-reconciliation"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -879,7 +901,13 @@ function AdminServersSection({ servers }: { servers: AdminServer[] }) {
                   <MinecraftMetaLine settings={server.minecraft_settings} />
                 </TableCell>
                 <TableCell>
-                  <StatusBadge status={server.status} />
+                  <div className="flex flex-wrap gap-1">
+                    <StatusBadge status={server.status} />
+                    {server.is_archived ? <Badge variant="outline">Archivé</Badge> : null}
+                    {server.hidden_from_customer ? (
+                      <Badge variant="outline">Masqué client</Badge>
+                    ) : null}
+                  </div>
                 </TableCell>
                 <TableCell>{server.pterodactyl_server_id ?? "—"}</TableCell>
                 <TableCell className="font-mono text-xs">
@@ -895,6 +923,20 @@ function AdminServersSection({ servers }: { servers: AdminServer[] }) {
                         Manage
                       </Link>
                     </Button>
+                    {server.hidden_from_customer ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={restoreVisibility.isPending}
+                        onClick={() => {
+                          if (confirm("Restaurer la visibilité client de ce serveur archivé ?")) {
+                            restoreVisibility.mutate(server.id);
+                          }
+                        }}
+                      >
+                        Restaurer visibilité
+                      </Button>
+                    ) : null}
                     <Button
                       size="sm"
                       variant="outline"

@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import {
   buildMissingServerArchiveMetadata,
   canCleanupStagingMissingServer,
+  canShowServerOrderToCustomer,
   isArchivedServerOrderMetadata,
+  isHiddenFromCustomerMetadata,
   isStagingServerOrderMetadata,
+  restoreCustomerVisibilityMetadata,
 } from "../src/lib/reconciliation-cleanup";
 
 function test(name: string, fn: () => void) {
@@ -70,4 +73,42 @@ test("archive metadata preserves history and never touches payment objects", () 
   assert.equal(metadata.cleanup_source, "admin_reconciliation");
   assert.equal("payment_id" in metadata, false);
   assert.equal("invoice_id" in metadata, false);
+});
+
+test("staging cleanup hides server from customer", () => {
+  const metadata = buildMissingServerArchiveMetadata({
+    existingMetadata: { staging: true, run_id: "staging-1" },
+    actorUserId: "admin-user",
+    archivedAt: "2026-06-22T10:00:00.000Z",
+    hideFromCustomer: true,
+    hiddenReason: "staging_cleanup",
+  });
+  assert.equal(metadata.hidden_from_customer, true);
+  assert.equal(metadata.hidden_reason, "staging_cleanup");
+  assert.equal(isHiddenFromCustomerMetadata(metadata), true);
+  assert.equal(canShowServerOrderToCustomer(metadata), false);
+});
+
+test("real customer archive remains visible unless explicitly hidden", () => {
+  const metadata = buildMissingServerArchiveMetadata({
+    existingMetadata: { selected_game: "minecraft" },
+    actorUserId: "admin-user",
+    archivedAt: "2026-06-22T10:00:00.000Z",
+  });
+  assert.equal(isHiddenFromCustomerMetadata(metadata), false);
+  assert.equal(canShowServerOrderToCustomer(metadata), true);
+});
+
+test("restoring visibility removes only customer hidden metadata", () => {
+  const restored = restoreCustomerVisibilityMetadata({
+    staging: true,
+    archived_at: "2026-06-22T10:00:00.000Z",
+    hidden_from_customer: true,
+    hidden_at: "2026-06-22T10:00:00.000Z",
+    hidden_reason: "staging_cleanup",
+  });
+  assert.equal(restored.staging, true);
+  assert.equal(restored.archived_at, "2026-06-22T10:00:00.000Z");
+  assert.equal("hidden_from_customer" in restored, false);
+  assert.equal(canShowServerOrderToCustomer(restored), true);
 });

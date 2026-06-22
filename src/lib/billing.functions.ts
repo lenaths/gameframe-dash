@@ -1,5 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { isHiddenFromCustomerMetadata } from "@/lib/reconciliation-cleanup";
 
 type SupabaseAny = {
   from: (table: string) => SupabaseQuery;
@@ -14,6 +15,7 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   select: (columns: string) => SupabaseQuery<T>;
   eq: (column: string, value: unknown) => SupabaseQuery<T>;
   order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
+  in: (column: string, values: unknown[]) => SupabaseQuery<T>;
 };
 
 type BillingOrder = {
@@ -83,6 +85,9 @@ type BillingPayment = {
   stripe_invoice_id?: string | null;
 };
 
+type BillingOrderRow = BillingOrder & { metadata?: unknown };
+type BillingServerOrderRow = BillingServerOrder & { metadata?: unknown };
+
 export const listMyBilling = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
@@ -112,13 +117,13 @@ export const listMyBilling = createServerFn({ method: "GET" })
       db
         .from("orders")
         .select(
-          "id, status, currency, total_cents, current_period_end, renews_at, stripe_subscription_id, created_at, plans(name, game)",
+          "id, status, currency, total_cents, current_period_end, renews_at, stripe_subscription_id, created_at, metadata, plans(name, game)",
         )
         .eq("user_id", context.userId)
         .order("created_at", { ascending: false }),
       db
         .from("server_orders")
-        .select("id, order_id, server_name, status, pterodactyl_server_identifier")
+        .select("id, order_id, server_name, status, pterodactyl_server_identifier, metadata")
         .eq("user_id", context.userId)
         .order("created_at", { ascending: false }),
     ]);
@@ -128,19 +133,37 @@ export const listMyBilling = createServerFn({ method: "GET" })
     if (ordersError) throw new Error(ordersError.message);
     if (serversError) throw new Error(serversError.message);
 
-    const serversByOrderId = new Map(
-      ((servers ?? []) as BillingServerOrder[])
-        .filter((server) => server.order_id)
-        .map((server) => [server.order_id as string, server]),
+    const visibleServers = ((servers ?? []) as BillingServerOrderRow[]).filter(
+      (server) => !isHiddenFromCustomerMetadata(server.metadata),
     );
-    const enrichedOrders = ((orders ?? []) as BillingOrder[]).map((order) => ({
+    const hiddenOrderIds = new Set(
+      ((servers ?? []) as BillingServerOrderRow[])
+        .filter((server) => server.order_id && isHiddenFromCustomerMetadata(server.metadata))
+        .map((server) => server.order_id as string),
+    );
+    for (const order of (orders ?? []) as BillingOrderRow[]) {
+      if (isHiddenFromCustomerMetadata(order.metadata)) hiddenOrderIds.add(order.id);
+    }
+    const serversByOrderId = new Map(
+      visibleServers
+        .filter((server) => server.order_id)
+        .map(({ metadata, ...server }) => [server.order_id as string, server]),
+    );
+    const visibleOrders = ((orders ?? []) as BillingOrderRow[]).filter(
+      (order) => !hiddenOrderIds.has(order.id) && !isHiddenFromCustomerMetadata(order.metadata),
+    );
+    const enrichedOrders = visibleOrders.map(({ metadata, ...order }) => ({
       ...order,
       server_order: serversByOrderId.get(order.id) ?? null,
     }));
 
     return {
-      invoices: (invoices ?? []) as BillingInvoice[],
-      payments: (payments ?? []) as BillingPayment[],
+      invoices: ((invoices ?? []) as BillingInvoice[]).filter(
+        (invoice) => !invoice.order_id || !hiddenOrderIds.has(invoice.order_id),
+      ),
+      payments: ((payments ?? []) as BillingPayment[]).filter(
+        (payment) => !payment.order_id || !hiddenOrderIds.has(payment.order_id),
+      ),
       orders: enrichedOrders,
     };
   });

@@ -3,7 +3,9 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import {
   buildMissingServerArchiveMetadata,
   isArchivedServerOrderMetadata,
+  isHiddenFromCustomerMetadata,
   isStagingServerOrderMetadata,
+  restoreCustomerVisibilityMetadata,
 } from "@/lib/reconciliation-cleanup";
 
 type SupabaseAny = {
@@ -1511,6 +1513,8 @@ export const adminListOrdersDetailed = createServerFn({ method: "GET" })
           selected_modpack_label: selectedModpackLabel(metadata),
           minecraft_settings: selectedMinecraftSettings(metadata),
           initial_minecraft_sync: selectedInitialMinecraftSync(metadata),
+          is_archived: isArchivedServerOrderMetadata(metadata),
+          hidden_from_customer: isHiddenFromCustomerMetadata(metadata),
         }))
         .filter((server) => server.order_id)
         .map((server) => [server.order_id as string, server]),
@@ -2181,6 +2185,8 @@ async function archiveMissingServerOrder(
     existingMetadata: typed.metadata,
     actorUserId,
     archivedAt,
+    hideFromCustomer: options.stagingOnly,
+    hiddenReason: options.stagingOnly ? "staging_cleanup" : undefined,
   });
   const { error: updateError } = await db
     .from("server_orders")
@@ -2203,6 +2209,9 @@ async function archiveMissingServerOrder(
           archived_at: archivedAt,
           archived_by: actorUserId,
           cleanup_source: "admin_reconciliation",
+          hidden_from_customer: true,
+          hidden_at: archivedAt,
+          hidden_reason: "staging_cleanup",
         },
       })
       .eq("id", typed.order_id);
@@ -2225,6 +2234,60 @@ async function archiveMissingServerOrder(
   });
   return { ok: true as const, skipped: false, status: "cancelled" as const, archivedAt };
 }
+
+async function restoreServerOrderCustomerVisibility(serverOrderId: string, actorUserId: string) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const db = supabaseAdmin as unknown as SupabaseAny;
+  const { data: server, error } = await db
+    .from("server_orders")
+    .select("id, order_id, metadata")
+    .eq("id", serverOrderId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!server) throw new Error("Server order introuvable.");
+  const typed = server as { id: string; order_id: string | null; metadata?: unknown };
+  const metadata = restoreCustomerVisibilityMetadata(typed.metadata);
+  const { error: updateError } = await db
+    .from("server_orders")
+    .update({ metadata })
+    .eq("id", typed.id);
+  if (updateError) throw new Error(updateError.message);
+
+  if (typed.order_id) {
+    const { data: order, error: orderError } = await db
+      .from("orders")
+      .select("id, metadata")
+      .eq("id", typed.order_id)
+      .maybeSingle();
+    if (orderError) throw new Error(orderError.message);
+    if (order) {
+      const orderRow = order as { id: string; metadata?: unknown };
+      const orderMetadata = restoreCustomerVisibilityMetadata(orderRow.metadata);
+      const { error: orderUpdateError } = await db
+        .from("orders")
+        .update({ metadata: orderMetadata })
+        .eq("id", orderRow.id);
+      if (orderUpdateError) throw new Error(orderUpdateError.message);
+    }
+  }
+
+  await writeAdminAuditLog({
+    actorUserId,
+    action: "admin.reconciliation.restore_customer_visibility",
+    entityType: "server_order",
+    entityId: typed.id,
+    after: { hidden_from_customer: false },
+  });
+  return { ok: true as const, serverOrderId: typed.id, hidden_from_customer: false };
+}
+
+export const adminRestoreServerOrderVisibility = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => z.object({ serverOrderId: z.string().uuid() }).parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    return restoreServerOrderCustomerVisibility(data.serverOrderId, context.userId);
+  });
 
 async function cleanupStagingMissingServers(actorUserId: string, serverOrderId?: string | null) {
   if (serverOrderId) {

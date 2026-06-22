@@ -3,6 +3,7 @@ import { reportSyncError } from "@/lib/monitoring.server";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
+import { canShowServerOrderToCustomer } from "@/lib/reconciliation-cleanup";
 import {
   INITIAL_MINECRAFT_SYNC_MAX_ATTEMPTS,
   isRetryableInitialMinecraftSyncError,
@@ -815,6 +816,17 @@ async function loadAccessibleServerOrder(
   }
 
   const typedOrder = order as unknown as AccessibleServerOrder;
+  if (!canShowServerOrderToCustomer(typedOrder.metadata) && !isAdmin) {
+    console.info("[ManageAccess] hidden server order denied", {
+      userId,
+      isAdmin,
+      orderId,
+      ownerId: typedOrder.user_id,
+      granted: false,
+      reason,
+    });
+    throw new Error("Ce serveur est archivé et n’est plus visible côté client.");
+  }
   const isOwner = typedOrder.user_id === userId;
   if (!isOwner && !isAdmin) {
     console.info("[ManageAccess] access denied", {
@@ -1712,16 +1724,16 @@ export const listMyServers = createServerFn({ method: "GET" })
       .eq("user_id", context.userId)
       .order("created_at", { ascending: false });
     if (error) throw new Error(error.message);
-    const servers = ((data ?? []) as Array<ServerListRow & { metadata?: unknown }>).map(
-      ({ metadata, ...server }) => ({
+    const servers = ((data ?? []) as Array<ServerListRow & { metadata?: unknown }>)
+      .filter(({ metadata }) => canShowServerOrderToCustomer(metadata))
+      .map(({ metadata, ...server }) => ({
         ...server,
         selected_template_label: selectedTemplateLabel(metadata),
         selected_modpack_label: selectedModpackLabel(metadata),
         minecraft_settings: isMinecraftGame(server.plans?.game)
           ? selectedMinecraftSettings(metadata)
           : null,
-      }),
-    );
+      }));
     const orderIds = servers
       .map((server) => server.order_id)
       .filter((id): id is string => Boolean(id));
