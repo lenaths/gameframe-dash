@@ -7,7 +7,7 @@
     "dev": "vite dev",
     "dev:host": "vite dev --host 0.0.0.0",
     "build": "vite build",
-    "build:prod": "vite build --mode production",
+    "build:prod": "vite build --mode production && node scripts/build-report.mjs",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "preview:prod": "vite preview --host 0.0.0.0",
