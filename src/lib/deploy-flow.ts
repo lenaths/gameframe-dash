@@ -1,4 +1,4 @@
-import { getMinecraftPlayerPricingRules, normalizeMinecraftServerType } from "@/lib/game-config";
+import { getPlayerCapacityPricingRules, normalizeMinecraftServerType } from "@/lib/game-config";
 
 export type PricingDeploySearchInput = {
   planId: string;
@@ -121,6 +121,11 @@ export function resolveDeployPlanState(input: {
   };
 }
 
-export function defaultPlayersForPricingPlan(plan: { name: string; ram_mb: number }) {
-  return getMinecraftPlayerPricingRules(plan.name, plan.ram_mb).defaultPlayers;
+export function defaultPlayersForPricingPlan(plan: {
+  game?: string | null;
+  name: string;
+  ram_mb: number;
+  price_monthly_cents?: number | null;
+}) {
+  return getPlayerCapacityPricingRules(plan).defaultPlayers;
 }

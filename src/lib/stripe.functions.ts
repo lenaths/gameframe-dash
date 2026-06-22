@@ -148,7 +148,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
       });
       const serverName = data.serverName?.trim();
       if (!serverName) throw new Error("Nom du serveur obligatoire avant paiement.");
-      const playerPricing = buildCheckoutPricing(plan, minecraft ? data.maxPlayers : undefined);
+      const playerPricing = buildCheckoutPricing(plan, data.maxPlayers);
       const maxPlayers = playerPricing.max_players;
       const orderMetadata = buildOrderMetadata({
         plan,
@@ -201,7 +201,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
           plan_id: plan.id,
           template: template.selectedTemplateLabel,
           game: gameKey,
-          ...(minecraft && maxPlayers ? { max_players: String(maxPlayers) } : {}),
+          ...(maxPlayers ? { max_players: String(maxPlayers) } : {}),
           total_price_cents: String(playerPricing.total_price_cents),
           extra_price_cents: String(playerPricing.extra_price_cents),
           ...(minecraft && template.selectedVersionLabel
@@ -217,7 +217,7 @@ export const createCheckoutSession = createServerFn({ method: "POST" })
             plan_id: plan.id,
             template: template.selectedTemplateLabel,
             game: gameKey,
-            ...(minecraft && maxPlayers ? { max_players: String(maxPlayers) } : {}),
+            ...(maxPlayers ? { max_players: String(maxPlayers) } : {}),
             total_price_cents: String(playerPricing.total_price_cents),
             extra_price_cents: String(playerPricing.extra_price_cents),
             ...(minecraft && template.selectedVersionLabel

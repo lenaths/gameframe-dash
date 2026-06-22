@@ -59,6 +59,54 @@ const conanPlan: CheckoutPlan = {
   pterodactyl_egg_id: 88,
 };
 
+const arkPlan: CheckoutPlan = {
+  id: "plan-ark",
+  product_id: "product-ark",
+  game: "ARK Survival Ascended",
+  name: "Survivor",
+  description: "Serveur ARK",
+  price_monthly_cents: 1499,
+  ram_mb: 8192,
+  cpu_percent: 300,
+  currency: "EUR",
+  billing_interval: "monthly",
+  stripe_price_id: "price_fixed_ark",
+  pterodactyl_nest_id: 42,
+  pterodactyl_egg_id: 10,
+};
+
+const gmodPlan: CheckoutPlan = {
+  id: "plan-gmod",
+  product_id: "product-gmod",
+  game: "Garry's Mod",
+  name: "Roleplay",
+  description: "Serveur GMod",
+  price_monthly_cents: 999,
+  ram_mb: 4096,
+  cpu_percent: 200,
+  currency: "EUR",
+  billing_interval: "monthly",
+  stripe_price_id: "price_fixed_gmod",
+  pterodactyl_nest_id: 42,
+  pterodactyl_egg_id: 7,
+};
+
+const rustPlan: CheckoutPlan = {
+  id: "plan-rust",
+  product_id: "product-rust",
+  game: "Rust",
+  name: "Starter",
+  description: "Serveur Rust",
+  price_monthly_cents: 1099,
+  ram_mb: 8192,
+  cpu_percent: 300,
+  currency: "EUR",
+  billing_interval: "monthly",
+  stripe_price_id: "price_fixed_rust",
+  pterodactyl_nest_id: 99,
+  pterodactyl_egg_id: 100,
+};
+
 const diamondPlan: CheckoutPlan = {
   id: "plan-diamond",
   product_id: "product-minecraft",
@@ -138,6 +186,7 @@ function buildMinecraftCheckoutCase(input: {
       total: "1",
       subtotal: "1",
       price: "1",
+      MAX_PLAYERS: "1",
     },
   });
   const lineItem = buildStripeCheckoutLineItem({
@@ -168,6 +217,7 @@ test("Minecraft Iron 3 players ignores forged client total and sends 394 cents t
     394,
   );
   assert.equal((order.metadata.environment as Record<string, string>).total, "1");
+  assert.equal("MAX_PLAYERS" in (order.metadata.environment as Record<string, string>), false);
 });
 
 test("Minecraft Iron 10 players keeps fixed Stripe price and stores correct metadata", () => {
@@ -209,37 +259,71 @@ test("Minecraft Iron 999 players clamps to 30 and sends 799 cents", () => {
   assert.equal(order.metadata.max_players, 30);
 });
 
-test("Non-Minecraft checkout keeps base price and omits Minecraft metadata", () => {
+test("Unsupported game checkout keeps base price and omits capacity metadata", () => {
   const template = resolveCheckoutTemplate({
-    plan: conanPlan,
+    plan: rustPlan,
     variants: [
       {
-        nest_id: 42,
-        egg_id: 88,
-        label: "Conan Exiles",
+        nest_id: 99,
+        egg_id: 100,
+        label: "Rust",
         source: "allowed_eggs",
       },
     ],
     requestedVariantIndex: 0,
   });
-  const pricing = buildCheckoutPricing(conanPlan, 999);
+  const pricing = buildCheckoutPricing(rustPlan, 999);
   const order = buildOrderMetadata({
-    plan: conanPlan,
-    serverName: "Conan Test",
+    plan: rustPlan,
+    serverName: "Rust Test",
     pricing,
     template,
   });
   const lineItem = buildStripeCheckoutLineItem({
-    plan: conanPlan,
+    plan: rustPlan,
     currency: "eur",
     pricing,
   });
-  assert.equal(pricing.total_price_cents, 1299);
-  assert.deepEqual(lineItem, { price: "price_fixed_conan", quantity: 1 });
-  assert.equal(order.metadata.selected_game, "conan");
+  assert.equal(pricing.total_price_cents, 1099);
+  assert.deepEqual(lineItem, { price: "price_fixed_rust", quantity: 1 });
+  assert.equal(order.metadata.selected_game, "rust");
   assert.equal("max_players" in order.metadata, false);
   assert.equal("minecraft_settings" in order.metadata, false);
   assert.equal("player_pricing" in order.metadata, false);
+});
+
+test("ARK, Conan and GMod checkout recalculate capacity pricing server-side", () => {
+  for (const { plan, players, total, max } of [
+    { plan: arkPlan, players: 20, total: 1699, max: 20 },
+    { plan: conanPlan, players: 999, total: 1749, max: 40 },
+    { plan: gmodPlan, players: 20, total: 1149, max: 20 },
+  ]) {
+    const template = resolveCheckoutTemplate({
+      plan,
+      variants: [
+        {
+          nest_id: plan.pterodactyl_nest_id,
+          egg_id: plan.pterodactyl_egg_id,
+          label: plan.game,
+          source: "allowed_eggs",
+        },
+      ],
+      requestedVariantIndex: 0,
+    });
+    const pricing = buildCheckoutPricing(plan, players);
+    const order = buildOrderMetadata({ plan, serverName: `${plan.game} Test`, pricing, template });
+    const lineItem = buildStripeCheckoutLineItem({ plan, currency: "eur", pricing });
+
+    assert.equal(pricing.max_players, max);
+    assert.equal(pricing.total_price_cents, total);
+    assert.equal(unitAmount(lineItem), total);
+    assert.equal(order.metadata.max_players, max);
+    assert.equal("minecraft_settings" in order.metadata, false);
+    assert.equal(
+      (order.metadata.player_pricing as { total_price_cents: number }).total_price_cents,
+      total,
+    );
+  }
 });
 
 test("Minecraft template resolution maps playable types to correct egg IDs", () => {

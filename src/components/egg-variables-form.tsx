@@ -1,3 +1,4 @@
+import { isManagedCapacityVariable } from "@/lib/server-security";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -46,7 +47,11 @@ export function EggVariablesForm({
   onChange: (next: Record<string, string>) => void;
   disabled?: boolean;
 }) {
-  if (variables.length === 0) {
+  const visibleVariables = variables.filter(
+    (variable) => !isManagedCapacityVariable(variable.env_variable),
+  );
+
+  if (visibleVariables.length === 0) {
     return (
       <p className="text-sm text-muted-foreground">This server has no configurable variables.</p>
     );
@@ -56,7 +61,7 @@ export function EggVariablesForm({
 
   return (
     <div className="grid gap-4">
-      {variables.map((v) => {
+      {visibleVariables.map((v) => {
         const value = values[v.env_variable] ?? v.default_value ?? "";
         const choices = parseChoices(v.rules);
         const editable = v.user_editable !== false && !disabled;

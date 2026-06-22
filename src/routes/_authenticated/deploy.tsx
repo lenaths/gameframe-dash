@@ -17,13 +17,15 @@ import {
 } from "@/lib/modpacks.functions";
 import { createCheckoutSession } from "@/lib/stripe.functions";
 import {
-  calculateMinecraftPlayerPricing,
-  getMinecraftPlayerPricingRules,
+  calculatePlayerCapacityPricing,
+  getPlayerCapacityPricingRules,
   isMinecraftGame,
   isProxyTemplateKey,
   MINECRAFT_SERVER_TYPES,
+  supportsPlayerCapacityPricing,
 } from "@/lib/game-config";
 import { toast } from "sonner";
+import { isManagedCapacityVariable } from "@/lib/server-security";
 import {
   isPlanLockedSearchValue,
   resolveDeployPlan,
@@ -191,8 +193,10 @@ function Deploy() {
           planId: selectedPlan?.id ?? planId,
           serverName: name.trim(),
           variantIndex,
-          environment: env,
-          maxPlayers: isMinecraft ? maxPlayers : undefined,
+          environment: Object.fromEntries(
+            Object.entries(env).filter(([key]) => !isManagedCapacityVariable(key)),
+          ),
+          maxPlayers: hasPlayerCapacity ? maxPlayers : undefined,
           serverType: isMinecraft ? currentVariant?.templateKey : undefined,
           minecraftVersion: isMinecraft ? selectedMinecraftVersion : undefined,
           selectedModpack:
@@ -321,16 +325,18 @@ function Deploy() {
   };
 
   const isMinecraft = selectedPlan ? isMinecraftGame(selectedPlan.game) : false;
+  const hasPlayerCapacity = selectedPlan ? supportsPlayerCapacityPricing(selectedPlan.game) : false;
   const maxPlayersLimit = selectedPlan
-    ? getMaxPlayersLimit(selectedPlan.name, selectedPlan.ram_mb)
+    ? getMaxPlayersLimit(selectedPlan.game, selectedPlan.name, selectedPlan.ram_mb)
     : 10;
   const recommendedPlayers = selectedPlan
-    ? getRecommendedPlayers(selectedPlan.name, selectedPlan.ram_mb)
+    ? getRecommendedPlayers(selectedPlan.game, selectedPlan.name, selectedPlan.ram_mb)
     : 10;
   const playerPrice =
-    selectedPlan && isMinecraft
-      ? calculateMinecraftPlayerPricing(
+    selectedPlan && hasPlayerCapacity
+      ? calculatePlayerCapacityPricing(
           {
+            game: selectedPlan.game,
             name: selectedPlan.name,
             ram_mb: selectedPlan.ram_mb,
             price_monthly_cents: selectedPlan.price_monthly_cents,
@@ -371,13 +377,12 @@ function Deploy() {
     setVariantIndex(firstPlan.variantIndex);
   }, [compatiblePlans, deployType, planId]);
   useEffect(() => {
-    if (!selectedPlan) return;
-    if (!isMinecraft) return;
+    if (!selectedPlan || !hasPlayerCapacity) return;
     setMaxPlayers((current) => {
       if (current < 1 || current > maxPlayersLimit) return recommendedPlayers;
       return current;
     });
-  }, [isMinecraft, maxPlayersLimit, recommendedPlayers, selectedPlan]);
+  }, [hasPlayerCapacity, maxPlayersLimit, recommendedPlayers, selectedPlan]);
   useEffect(() => {
     if (!selectedPlan || isMinecraft || deployType === "classic") return;
     setDeployType("classic");
@@ -391,7 +396,9 @@ function Deploy() {
     (deployType === "classic" || Boolean(selectedModpackId && selectedVersionId));
   const advancedVariables =
     currentVariant?.variables.filter(
-      (variable) => !isHiddenMinecraftVariable(variable.env_variable, variable.default_value),
+      (variable) =>
+        !isManagedCapacityVariable(variable.env_variable) &&
+        !isHiddenMinecraftVariable(variable.env_variable, variable.default_value),
     ) ?? [];
 
   return (
@@ -793,10 +800,10 @@ function Deploy() {
             </div>
           )}
 
-          {isMinecraft && selectedPlan && (
+          {hasPlayerCapacity && selectedPlan && (
             <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <Label htmlFor="maxPlayers">Nombre de joueurs maximum</Label>
+                <Label htmlFor="maxPlayers">Capacité joueurs</Label>
                 <span className="rounded-full border border-primary/25 bg-primary/10 px-3 py-1 text-sm text-primary">
                   {maxPlayers} joueur{maxPlayers > 1 ? "s" : ""}
                 </span>
@@ -825,15 +832,15 @@ function Deploy() {
                   />
                   <p className="text-sm text-muted-foreground">
                     Joueurs inclus : {playerPrice?.included_players ?? 10}. Défaut recommandé :{" "}
-                    {recommendedPlayers}. Limite : {maxPlayersLimit}. Cette valeur sera appliquée
-                    par les templates XNT compatibles.
+                    {recommendedPlayers}. Limite : {maxPlayersLimit}. Cette capacité sera
+                    verrouillée après achat et appliquée par les templates XNT compatibles.
                   </p>
                 </div>
               </div>
             </div>
           )}
 
-          {isMinecraft && selectedPlan && playerPrice && (
+          {hasPlayerCapacity && selectedPlan && playerPrice && (
             <div className="rounded-xl border border-primary/20 bg-primary/10 p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -880,16 +887,16 @@ function Deploy() {
   );
 }
 
-function getMaxPlayersLimit(name: string, ramMb: number) {
-  return getMinecraftPlayerPricingRules(name, ramMb).maxPlayersAllowed;
+function getMaxPlayersLimit(game: string, name: string, ramMb: number) {
+  return getPlayerCapacityPricingRules({ game, name, ram_mb: ramMb }).maxPlayersAllowed;
 }
 
 function formatEuro(cents: number) {
   return `${(cents / 100).toFixed(2).replace(".", ",")} €`;
 }
 
-function getRecommendedPlayers(name: string, ramMb: number) {
-  return getMinecraftPlayerPricingRules(name, ramMb).defaultPlayers;
+function getRecommendedPlayers(game: string, name: string, ramMb: number) {
+  return getPlayerCapacityPricingRules({ game, name, ram_mb: ramMb }).defaultPlayers;
 }
 
 function reliableVersionLabel(value: string | null | undefined) {

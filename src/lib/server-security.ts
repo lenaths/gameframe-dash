@@ -1,8 +1,12 @@
 export const FORBIDDEN_SETTING_KEYS = new Set([
   "max_players",
+  "maxplayers",
   "slot_count",
   "slots",
   "max-players",
+  "player_slots",
+  "players",
+  "server_players",
   "memory",
   "ram",
   "cpu",
@@ -29,6 +33,7 @@ export const FORBIDDEN_SETTING_KEYS = new Set([
 ]);
 
 export const MAX_FILE_CONTENT_BYTES = 1024 * 1024;
+export const MAX_FILE_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 export const BLOCKED_FILE_EXTENSIONS = new Set([
   ".jar",
@@ -82,8 +87,28 @@ export const PROTECTED_PATH_PREFIXES = [
   "/xnt",
 ];
 
+export function normalizeSettingKey(input: string) {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/[-\s]+/g, "_");
+}
+
+export function isManagedCapacityVariable(input: unknown) {
+  const normalized = normalizeSettingKey(String(input ?? ""));
+  return [
+    "max_players",
+    "maxplayers",
+    "slots",
+    "slot_count",
+    "player_slots",
+    "players",
+    "server_players",
+  ].includes(normalized);
+}
+
 export function hasForbiddenServerSetting(input: Record<string, unknown>) {
-  return Object.keys(input).find((key) => FORBIDDEN_SETTING_KEYS.has(key.trim().toLowerCase()));
+  return Object.keys(input).find((key) => FORBIDDEN_SETTING_KEYS.has(normalizeSettingKey(key)));
 }
 
 export function hasBlockedExtension(path: string) {
@@ -127,6 +152,33 @@ export function assertEditableFilePath(path: string) {
   assertNotProtectedServerPath(normalized);
   if (hasBlockedExtension(normalized)) {
     throw new Error("Ce fichier ne peut pas être ouvert dans l’éditeur.");
+  }
+  return normalized;
+}
+
+export function assertUploadFilePath(path: string, sizeBytes: number) {
+  const normalized = normalizeServerPath(path);
+  assertNotProtectedServerPath(normalized);
+  if (hasBlockedExtension(normalized)) {
+    throw new Error("Ce type de fichier ne peut pas être envoyé depuis XNT.");
+  }
+  if (sizeBytes > MAX_FILE_UPLOAD_BYTES) {
+    throw new Error("Ce fichier dépasse la taille maximale autorisée pour l’upload XNT.");
+  }
+  return normalized;
+}
+
+export function assertDownloadFilePath(path: string) {
+  const normalized = normalizeServerPath(path);
+  assertNotProtectedServerPath(normalized);
+  return normalized;
+}
+
+export function assertFileMovePath(path: string) {
+  const normalized = normalizeServerPath(path);
+  assertNotProtectedServerPath(normalized);
+  if (hasBlockedExtension(normalized)) {
+    throw new Error("Ce type de fichier ne peut pas être déplacé depuis XNT.");
   }
   return normalized;
 }

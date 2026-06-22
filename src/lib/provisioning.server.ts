@@ -126,6 +126,8 @@ function findMaxPlayersVariable(allowedVariables: Set<string>) {
     "SERVER_MAX_PLAYERS",
     "PLAYERS",
     "MAXPLAYERS",
+    "PLAYER_SLOTS",
+    "SERVER_PLAYERS",
   ];
   return candidates.find((candidate) => allowedVariables.has(candidate)) ?? null;
 }
@@ -730,6 +732,8 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     ...(selection.selectedModpackVersion
       ? { selected_modpack_version: selection.selectedModpackVersion }
       : {}),
+    ...(selection.maxPlayers ? { max_players: selection.maxPlayers } : {}),
+    ...(selection.playerPricing ? { player_pricing: selection.playerPricing } : {}),
     ...(minecraft
       ? {
           server_type: selection.serverType ?? selection.templateLabel,
@@ -852,7 +856,7 @@ export async function provisionPaidOrder(orderId: string, options: ProvisionPaid
     serverName,
     variantIndex: selection.variantIndex,
     environment: selection.environment,
-    maxPlayers: minecraft ? selection.maxPlayers : undefined,
+    maxPlayers: selection.maxPlayers,
   });
 
   await db

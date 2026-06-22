@@ -1,12 +1,14 @@
 import {
-  calculateMinecraftPlayerPricing,
+  calculatePlayerCapacityPricing,
   getMinecraftVersionVariable,
   isMinecraftGame,
+  supportsPlayerCapacityPricing,
   isProxyTemplateLabel,
   normalizeGameKey,
   normalizeMinecraftServerType,
 } from "@/lib/game-config";
 import type { PlanVariant } from "@/lib/plans.functions";
+import { isManagedCapacityVariable } from "@/lib/server-security";
 
 export type CheckoutPlan = {
   id: string;
@@ -31,11 +33,17 @@ export type CheckoutModpackSelection = {
 };
 
 export function buildCheckoutPricing(plan: CheckoutPlan, requestedMaxPlayers?: number) {
-  if (!isMinecraftGame(plan.game)) {
+  if (!supportsPlayerCapacityPricing(plan.game)) {
     return {
       pricing_mode: "base" as const,
       base_price_cents: plan.price_monthly_cents,
+      base_players: null,
+      included_players: null,
+      selected_players: null,
       price_per_player_cents: 0,
+      players_delta: 0,
+      adjustment_cents: 0,
+      players_adjustment_cents: 0,
       players: null,
       players_price_cents: 0,
       min_players: null,
@@ -46,7 +54,7 @@ export function buildCheckoutPricing(plan: CheckoutPlan, requestedMaxPlayers?: n
       total_price_cents: plan.price_monthly_cents,
     };
   }
-  const pricing = calculateMinecraftPlayerPricing(plan, requestedMaxPlayers);
+  const pricing = calculatePlayerCapacityPricing(plan, requestedMaxPlayers);
   return {
     ...pricing,
     players: pricing.selected_players,
@@ -126,6 +134,7 @@ export function buildOrderMetadata(input: {
 }) {
   const gameKey = normalizeGameKey(input.plan.game);
   const minecraft = gameKey === "minecraft";
+  const hasCapacityPricing = supportsPlayerCapacityPricing(gameKey);
   const maxPlayers = input.pricing.max_players;
   const selectedVariant = input.template.selectedVariant;
   const versionVariable = minecraft
@@ -139,8 +148,11 @@ export function buildOrderMetadata(input: {
       : selectedVersionLabel
         ? "pending_template_support"
         : "managed";
+  const sanitizedEnvironment = Object.fromEntries(
+    Object.entries(input.environment ?? {}).filter(([key]) => !isManagedCapacityVariable(key)),
+  );
   const checkoutEnvironment = {
-    ...(input.environment ?? {}),
+    ...sanitizedEnvironment,
     ...(minecraft && selectedVersionLabel && versionVariable
       ? { [versionVariable]: selectedVersionLabel }
       : {}),
@@ -174,6 +186,12 @@ export function buildOrderMetadata(input: {
       selected_game: gameKey,
       server_name: input.serverName,
       ...minecraftMetadata,
+      ...(!minecraft && hasCapacityPricing && maxPlayers
+        ? {
+            max_players: maxPlayers,
+            player_pricing: input.pricing,
+          }
+        : {}),
       selected_template: {
         index: input.template.selectedVariantIndex,
         ...(selectedVariant?.templateId ? { template_id: selectedVariant.templateId } : {}),
@@ -205,7 +223,7 @@ export function buildStripeCheckoutLineItem(input: {
   pricing: ReturnType<typeof buildCheckoutPricing>;
 }) {
   const useDynamicPrice = input.pricing.total_price_cents !== input.plan.price_monthly_cents;
-  const minecraft = isMinecraftGame(input.plan.game);
+  const hasCapacityPricing = supportsPlayerCapacityPricing(input.plan.game);
   const maxPlayers = input.pricing.max_players;
   if (input.plan.stripe_price_id && !useDynamicPrice) {
     return { price: input.plan.stripe_price_id, quantity: 1 };
@@ -219,7 +237,7 @@ export function buildStripeCheckoutLineItem(input: {
       product_data: {
         name: `${input.plan.game} - ${input.plan.name}`,
         description:
-          minecraft && maxPlayers
+          hasCapacityPricing && maxPlayers
             ? `${input.plan.description ?? "Serveur XNT"} · ${maxPlayers} joueurs max`
             : (input.plan.description ?? undefined),
       },

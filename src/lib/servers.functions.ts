@@ -12,10 +12,15 @@ import {
 import {
   FORBIDDEN_SETTING_KEYS,
   MAX_FILE_CONTENT_BYTES,
+  MAX_FILE_UPLOAD_BYTES,
+  assertDownloadFilePath,
   assertEditableFilePath,
+  assertFileMovePath,
   assertNotProtectedServerPath,
+  assertUploadFilePath,
   hasBlockedExtension,
   hasForbiddenServerSetting,
+  isManagedCapacityVariable,
   isProtectedServerPath,
   normalizeServerPath,
 } from "@/lib/server-security";
@@ -34,6 +39,33 @@ const powerInput = z.object({
 });
 
 const orderInput = z.object({ orderId: z.string().uuid() });
+
+const uploadServerFilesInput = z.object({
+  orderId: z.string().uuid(),
+  directory: z.string().default("/"),
+  files: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(255),
+        contentBase64: z.string().min(1),
+        size: z.number().int().nonnegative(),
+        type: z.string().optional().nullable(),
+      }),
+    )
+    .min(1)
+    .max(10),
+});
+
+const downloadServerFileInput = z.object({
+  orderId: z.string().uuid(),
+  file: z.string().min(1),
+});
+
+const moveServerFileInput = z.object({
+  orderId: z.string().uuid(),
+  from: z.string().min(1),
+  to: z.string().min(1),
+});
 const backupInput = z.object({ orderId: z.string().uuid(), backupId: z.string().uuid() });
 const allocationInput = z.object({
   orderId: z.string().uuid(),
@@ -162,6 +194,7 @@ type SupabaseQuery<T = unknown> = PromiseLike<SupabaseResult<T>> & {
   eq: (column: string, value: unknown) => SupabaseQuery<T>;
   in: (column: string, values: unknown[]) => SupabaseQuery<T>;
   order: (column: string, options?: Record<string, unknown>) => SupabaseQuery<T>;
+  insert: (values: Record<string, unknown>) => SupabaseQuery<T>;
 };
 
 type AdminTableQuery = PromiseLike<SupabaseResult<unknown>> & {
@@ -728,6 +761,34 @@ function parseWebsocketResponse(res: {
     socket: nestedSocket ?? flatSocket ?? "",
     responseShape,
   };
+}
+
+async function logServerFileActivity(values: {
+  userId: string;
+  serverOrderId: string;
+  orderId?: string | null;
+  action: string;
+  description: string;
+  metadata?: Record<string, unknown>;
+}) {
+  try {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = supabaseAdmin as unknown as SupabaseAny;
+    await db.from("activity_logs").insert({
+      user_id: values.userId,
+      server_order_id: values.serverOrderId,
+      order_id: values.orderId ?? null,
+      action: values.action,
+      description: values.description,
+      metadata: values.metadata ?? {},
+    });
+  } catch (error) {
+    console.warn("[Files] Failed to write activity log", {
+      action: values.action,
+      serverOrderId: values.serverOrderId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 async function assertFileSizeAllowed(identifier: string, file: string) {
@@ -2210,9 +2271,143 @@ export const writeServerFile = createServerFn({ method: "POST" })
       body: data.contents,
       contentType: "text/plain",
     });
+    await logServerFileActivity({
+      userId: context.userId,
+      serverOrderId: data.orderId,
+      action: "file_write",
+      description: "Fichier sauvegardé depuis le gestionnaire XNT.",
+      metadata: { file },
+    });
     return { ok: true };
   });
 
+/** Upload files through the Pterodactyl Client API signed upload endpoint. */
+export const uploadServerFiles = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => uploadServerFilesInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { order } = await loadAccessibleServerOrder(
+      data.orderId,
+      context.userId,
+      "uploadServerFiles",
+    );
+    if (!order.pterodactyl_server_identifier) throw new Error("Serveur introuvable.");
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    const directory = normalizeServerPath(data.directory);
+    assertNotProtectedServerPath(directory);
+
+    const prepared = data.files.map((file) => {
+      if (
+        file.name.includes("/") ||
+        file.name.includes("\\") ||
+        file.name === "." ||
+        file.name === ".."
+      ) {
+        throw new Error("Chemin de fichier non autorisé.");
+      }
+      const target = assertUploadFilePath(`${directory}/${file.name}`, file.size);
+      const bytes = Buffer.from(file.contentBase64, "base64");
+      if (bytes.byteLength !== file.size)
+        throw new Error("Upload refusé: taille de fichier incohérente.");
+      return { ...file, target, bytes };
+    });
+
+    const signed = (await ptero.client(
+      `/servers/${order.pterodactyl_server_identifier}/files/upload`,
+    )) as {
+      attributes?: { url?: string };
+    };
+    const url = signed.attributes?.url;
+    if (!url) throw new Error("Upload temporairement indisponible.");
+
+    const form = new FormData();
+    form.set("directory", directory);
+    for (const file of prepared) {
+      form.append(
+        "files",
+        new Blob([file.bytes], { type: file.type || "application/octet-stream" }),
+        file.name,
+      );
+    }
+
+    const uploadResponse = await fetch(url, { method: "POST", body: form });
+    if (!uploadResponse.ok) {
+      const body = await uploadResponse.text().catch(() => "");
+      throw new Error(
+        `Upload refusé par le service fichiers: ${uploadResponse.status} ${body.slice(0, 200)}`,
+      );
+    }
+
+    await logServerFileActivity({
+      userId: context.userId,
+      serverOrderId: order.id,
+      orderId: order.order_id,
+      action: "file_upload",
+      description: "Fichier envoyé depuis le gestionnaire XNT.",
+      metadata: {
+        directory,
+        files: prepared.map((file) => ({ name: file.name, size: file.size })),
+      },
+    });
+
+    return { ok: true, uploaded: prepared.length, maxUploadBytes: MAX_FILE_UPLOAD_BYTES };
+  });
+
+/** Generate a temporary download URL for a file. */
+export const getServerFileDownload = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => downloadServerFileInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { order } = await loadAccessibleServerOrder(
+      data.orderId,
+      context.userId,
+      "getServerFileDownload",
+    );
+    if (!order.pterodactyl_server_identifier) throw new Error("Serveur introuvable.");
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    const file = assertDownloadFilePath(data.file);
+    const signed = (await ptero.client(
+      `/servers/${order.pterodactyl_server_identifier}/files/download?file=${encodeURIComponent(file)}`,
+    )) as { attributes?: { url?: string } };
+    const url = signed.attributes?.url;
+    if (!url) throw new Error("Téléchargement temporairement indisponible.");
+    return { url };
+  });
+
+/** Move or rename a file/folder with full path validation. */
+export const moveServerFile = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((d: unknown) => moveServerFileInput.parse(d))
+  .handler(async ({ data, context }) => {
+    const { order } = await loadAccessibleServerOrder(
+      data.orderId,
+      context.userId,
+      "moveServerFile",
+    );
+    if (!order.pterodactyl_server_identifier) throw new Error("Serveur introuvable.");
+    const { ptero, assertPteroClientConfigured } = await import("@/lib/pterodactyl.server");
+    assertPteroClientConfigured();
+    const from = assertFileMovePath(data.from);
+    const to = assertFileMovePath(data.to);
+    await ptero.client(`/servers/${order.pterodactyl_server_identifier}/files/rename`, {
+      method: "PUT",
+      body: JSON.stringify({
+        root: "/",
+        files: [{ from: from.replace(/^\//, ""), to: to.replace(/^\//, "") }],
+      }),
+    });
+    await logServerFileActivity({
+      userId: context.userId,
+      serverOrderId: order.id,
+      orderId: order.order_id,
+      action: "file_move",
+      description: "Fichier déplacé ou renommé depuis le gestionnaire XNT.",
+      metadata: { from, to },
+    });
+    return { ok: true };
+  });
 /** Delete files or folders. */
 export const deleteServerFiles = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -2243,6 +2438,13 @@ export const deleteServerFiles = createServerFn({ method: "POST" })
     await ptero.client(`/servers/${identifier}/files/delete`, {
       method: "POST",
       body: JSON.stringify({ root, files }),
+    });
+    await logServerFileActivity({
+      userId: context.userId,
+      serverOrderId: data.orderId,
+      action: "file_delete",
+      description: "Fichier ou dossier supprimé depuis le gestionnaire XNT.",
+      metadata: { root, files },
     });
     return { ok: true };
   });
@@ -2280,6 +2482,13 @@ export const createServerFolder = createServerFn({ method: "POST" })
     await ptero.client(`/servers/${identifier}/files/create-folder`, {
       method: "POST",
       body: JSON.stringify({ root, name: data.name }),
+    });
+    await logServerFileActivity({
+      userId: context.userId,
+      serverOrderId: data.orderId,
+      action: "file_create_folder",
+      description: "Dossier créé depuis le gestionnaire XNT.",
+      metadata: { root, name: data.name },
     });
     return { ok: true };
   });
@@ -2731,7 +2940,9 @@ export const getServerStartup = createServerFn({ method: "POST" })
       startup: s.startup,
       image: s.image,
       environment: s.environment,
-      variables: s.variables.filter((v) => v.user_viewable),
+      variables: s.variables.filter(
+        (v) => v.user_viewable && !isManagedCapacityVariable(v.env_variable),
+      ),
     };
   });
 
@@ -2765,7 +2976,9 @@ export const updateServerStartup = createServerFn({ method: "POST" })
 
     const current = await getServerStartupApp(order.pterodactyl_server_id);
     const editable = new Set(
-      current.variables.filter((v) => v.user_editable).map((v) => v.env_variable),
+      current.variables
+        .filter((v) => v.user_editable && !isManagedCapacityVariable(v.env_variable))
+        .map((v) => v.env_variable),
     );
     const nextEnv: Record<string, string> = { ...current.environment };
     for (const [k, v] of Object.entries(data.environment)) {

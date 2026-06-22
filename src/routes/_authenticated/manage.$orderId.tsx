@@ -19,6 +19,13 @@ import {
   Archive,
   Network,
   AlertTriangle,
+  Upload,
+  Download,
+  Pencil,
+  MoveRight,
+  Search,
+  X,
+  Image as ImageIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,6 +45,9 @@ import {
   writeServerFile,
   deleteServerFiles,
   createServerFolder,
+  uploadServerFiles,
+  getServerFileDownload,
+  moveServerFile,
   listServerBackups,
   createServerBackup,
   deleteServerBackup,
@@ -1331,216 +1341,571 @@ function FilesTab({ orderId }: { orderId: string }) {
   const saveFile = useServerFn(writeServerFile);
   const removeFiles = useServerFn(deleteServerFiles);
   const mkdir = useServerFn(createServerFolder);
+  const uploadFiles = useServerFn(uploadServerFiles);
+  const downloadFile = useServerFn(getServerFileDownload);
+  const moveFile = useServerFn(moveServerFile);
   const qc = useQueryClient();
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dir, setDir] = useState("/");
-  const [editing, setEditing] = useState<{ path: string; contents: string } | null>(null);
+  const [search, setSearch] = useState("");
+  const [dragActive, setDragActive] = useState(false);
+  const [editing, setEditing] = useState<{
+    path: string;
+    original: string;
+    contents: string;
+  } | null>(null);
+  const [preview, setPreview] = useState<{
+    path: string;
+    url: string;
+    type: "image" | "log";
+  } | null>(null);
   const [folderName, setFolderName] = useState("");
+  const [moveDialog, setMoveDialog] = useState<{ from: string; to: string } | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<
+    Array<{ name: string; progress: number; status: string }>
+  >([]);
 
   const list = useQuery({
     queryKey: ["files", orderId, dir],
     queryFn: () => fetchList({ data: { orderId, directory: dir } }),
   });
 
-  const parentDir = useMemo(() => {
-    if (dir === "/" || dir === "") return null;
-    const trimmed = dir.replace(/\/+$/, "");
-    const idx = trimmed.lastIndexOf("/");
-    return idx <= 0 ? "/" : trimmed.slice(0, idx);
-  }, [dir]);
+  const parentDir = useMemo(() => parentPath(dir), [dir]);
+  const breadcrumbs = useMemo(() => buildBreadcrumbs(dir), [dir]);
+  const rows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const items = (list.data?.files ?? []) as FileEntry[];
+    return items
+      .filter((file) => !q || file.name.toLowerCase().includes(q))
+      .sort((a, b) => Number(a.is_file) - Number(b.is_file) || a.name.localeCompare(b.name));
+  }, [list.data?.files, search]);
 
-  const openFile = async (file: { name: string; size: number; is_managed?: boolean }) => {
-    if (file.is_managed || hasProtectedFileName(file.name)) {
+  const invalidateFiles = () => qc.invalidateQueries({ queryKey: ["files", orderId, dir] });
+
+  const openFile = async (file: FileEntry) => {
+    if (fileIsManaged(file)) {
       toast.warning(MANAGED_FILE_MESSAGE);
+      return;
+    }
+    const path = joinPath(dir, file.name);
+    if (isImageFile(file.name)) {
+      try {
+        const res = await downloadFile({ data: { orderId, file: path } });
+        setPreview({ path, url: res.url, type: "image" });
+      } catch (error) {
+        toast.error((error as Error).message || "Aperçu indisponible.");
+      }
+      return;
+    }
+    if (!isEditableTextFile(file.name)) {
+      toast.warning("Ce fichier peut être téléchargé, mais pas édité dans XNT.");
       return;
     }
     if (file.size > MAX_EDITABLE_FILE_SIZE_BYTES || hasBlockedEditorExtension(file.name)) {
       toast.warning("Ce fichier ne peut pas être ouvert dans l’éditeur.");
       return;
     }
-
-    const path = joinPath(dir, file.name);
     try {
       const res = await fetchFile({ data: { orderId, file: path } });
-      setEditing({ path, contents: res.contents });
-    } catch (e) {
-      toast.error((e as Error).message || "Impossible d’ouvrir ce fichier.");
+      if (file.name.toLowerCase().endsWith(".log")) {
+        setPreview({ path, url: res.contents, type: "log" });
+        return;
+      }
+      setEditing({ path, original: res.contents, contents: res.contents });
+    } catch (error) {
+      toast.error((error as Error).message || "Impossible d’ouvrir ce fichier.");
     }
   };
 
   const save = useMutation({
     mutationFn: () =>
       saveFile({ data: { orderId, file: editing!.path, contents: editing!.contents } }),
-    onSuccess: () => toast.success("Saved"),
-    onError: (e: Error) => toast.error(e.message),
+    onSuccess: () => {
+      toast.success("Fichier sauvegardé.");
+      setEditing((current) => current && { ...current, original: current.contents });
+      invalidateFiles();
+    },
+    onError: (error: Error) => toast.error(error.message),
   });
 
   const del = useMutation({
     mutationFn: (name: string) => removeFiles({ data: { orderId, root: dir, files: [name] } }),
     onSuccess: () => {
-      toast.success("Deleted");
-      qc.invalidateQueries({ queryKey: ["files", orderId, dir] });
+      toast.success("Élément supprimé.");
+      invalidateFiles();
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (error: Error) => toast.error(error.message),
   });
 
   const createFolder = useMutation({
     mutationFn: () => mkdir({ data: { orderId, root: dir, name: folderName } }),
     onSuccess: () => {
-      toast.success("Folder created");
+      toast.success("Dossier créé.");
       setFolderName("");
-      qc.invalidateQueries({ queryKey: ["files", orderId, dir] });
+      invalidateFiles();
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (error: Error) => toast.error(error.message),
   });
 
+  const move = useMutation({
+    mutationFn: () => moveFile({ data: { orderId, from: moveDialog!.from, to: moveDialog!.to } }),
+    onSuccess: () => {
+      toast.success("Élément déplacé.");
+      setMoveDialog(null);
+      invalidateFiles();
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  const handleDownload = async (file: FileEntry) => {
+    if (!file.is_file) {
+      toast.warning("Téléchargement de dossier non supporté par l’infrastructure pour le moment.");
+      return;
+    }
+    try {
+      const res = await downloadFile({ data: { orderId, file: joinPath(dir, file.name) } });
+      window.open(res.url, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      toast.error((error as Error).message || "Téléchargement indisponible.");
+    }
+  };
+
+  const handleUploadFiles = async (files: FileList | File[]) => {
+    const selected = Array.from(files);
+    if (selected.length === 0) return;
+    const progress = selected.map((file) => ({
+      name: file.name,
+      progress: 5,
+      status: "Préparation",
+    }));
+    setUploadProgress(progress);
+    try {
+      const payload = [];
+      for (const [index, file] of selected.entries()) {
+        setUploadProgress((current) => updateUploadProgress(current, file.name, 25, "Lecture"));
+        payload.push({
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          contentBase64: await readFileAsBase64(file),
+        });
+        setUploadProgress((current) =>
+          updateUploadProgress(
+            current,
+            file.name,
+            55 + Math.round((index / selected.length) * 20),
+            "Prêt",
+          ),
+        );
+      }
+      setUploadProgress((current) =>
+        current.map((row) => ({ ...row, progress: 80, status: "Envoi" })),
+      );
+      await uploadFiles({ data: { orderId, directory: dir, files: payload } });
+      setUploadProgress((current) =>
+        current.map((row) => ({ ...row, progress: 100, status: "Terminé" })),
+      );
+      toast.success(
+        `${selected.length} fichier${selected.length > 1 ? "s" : ""} envoyé${selected.length > 1 ? "s" : ""}.`,
+      );
+      invalidateFiles();
+    } catch (error) {
+      setUploadProgress((current) => current.map((row) => ({ ...row, status: "Erreur" })));
+      toast.error((error as Error).message || "Upload impossible.");
+    }
+  };
+
+  const closeEditor = () => {
+    if (editing && editing.contents !== editing.original && !confirm("Fermer sans sauvegarder ?"))
+      return;
+    setEditing(null);
+  };
+
   if (editing) {
+    const dirty = editing.contents !== editing.original;
     return (
       <div className="xnt-card rounded-xl p-4">
-        <div className="flex items-center justify-between mb-3 gap-2">
-          <div className="font-mono text-sm truncate">{editing.path}</div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="truncate font-mono text-sm">{editing.path}</div>
+            {dirty && <div className="text-xs text-accent">Modifications non sauvegardées</div>}
+          </div>
           <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => setEditing(null)}>
-              Close
+            <Button size="sm" variant="outline" onClick={closeEditor}>
+              Annuler
             </Button>
             <Button
               size="sm"
               onClick={() => save.mutate()}
-              disabled={save.isPending}
+              disabled={save.isPending || !dirty}
               className="bg-primary text-primary-foreground hover:bg-primary/90"
             >
-              <Save className="h-4 w-4 mr-1.5" /> Save
+              <Save className="mr-1.5 h-4 w-4" /> Sauvegarder
             </Button>
           </div>
         </div>
         <Textarea
           value={editing.contents}
-          onChange={(e) => setEditing({ ...editing, contents: e.target.value })}
-          className="h-[500px] bg-[#050816] font-mono text-sm"
+          onChange={(event) => setEditing({ ...editing, contents: event.target.value })}
+          className="h-[520px] bg-[#050816] font-mono text-sm"
           spellCheck={false}
         />
       </div>
     );
   }
 
-  return (
-    <div className="xnt-card rounded-xl">
-      <div className="flex flex-wrap items-center gap-2 border-b border-border/60 p-3">
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={!parentDir}
-          onClick={() => parentDir && setDir(parentDir)}
-        >
-          <ChevronLeft className="h-4 w-4 mr-1" /> Up
-        </Button>
-        <div className="font-mono text-sm text-muted-foreground truncate flex-1">{dir}</div>
-        <Button size="sm" variant="ghost" onClick={() => list.refetch()}>
-          <RefreshCw className="h-4 w-4" />
-        </Button>
-        <Input
-          value={folderName}
-          onChange={(e) => setFolderName(e.target.value)}
-          placeholder="New folder name"
-          className="h-8 w-44"
-        />
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => createFolder.mutate()}
-          disabled={!folderName.trim()}
-        >
-          <FolderPlus className="h-4 w-4 mr-1" /> Create
-        </Button>
-      </div>
-      <div className="divide-y divide-border/60">
-        {list.isLoading ? (
-          <div className="p-6 text-sm text-muted-foreground">Loading…</div>
-        ) : list.error || list.data?.error ? (
-          <div className="space-y-3 p-6">
-            <div className="text-sm font-medium text-destructive">File manager unavailable</div>
-            <div className="text-sm text-muted-foreground">
-              {(list.error as Error | null)?.message ?? list.data?.error}
-            </div>
-            <Button size="sm" variant="outline" onClick={() => list.refetch()}>
-              <RefreshCw className="h-4 w-4 mr-1" /> Retry
-            </Button>
-          </div>
-        ) : (list.data?.files ?? []).length === 0 ? (
-          <div className="p-6 text-sm text-muted-foreground">Empty directory.</div>
+  if (preview) {
+    return (
+      <div className="xnt-card space-y-4 rounded-xl p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="font-mono text-sm">{preview.path}</div>
+          <Button size="sm" variant="outline" onClick={() => setPreview(null)}>
+            <X className="mr-1.5 h-4 w-4" /> Fermer
+          </Button>
+        </div>
+        {preview.type === "image" ? (
+          <img
+            src={preview.url}
+            alt="Aperçu fichier"
+            className="max-h-[70vh] rounded-lg border border-primary/20 object-contain"
+          />
         ) : (
-          list.data!.files.map((f) => {
-            const isManaged = Boolean(
-              (f as { is_managed?: boolean }).is_managed || hasProtectedFileName(f.name),
-            );
-            return (
-              <div key={f.name} className="flex items-center gap-3 p-3 hover:bg-muted/30">
-                <button
-                  type="button"
-                  className="flex items-center gap-2 flex-1 text-left truncate"
-                  onClick={() => (f.is_file ? openFile(f) : setDir(joinPath(dir, f.name)))}
-                >
-                  {f.is_file ? (
-                    <FileIcon className="h-4 w-4 text-muted-foreground shrink-0" />
-                  ) : (
-                    <Folder className="h-4 w-4 text-primary shrink-0" />
-                  )}
-                  <span className="font-mono text-sm truncate">{f.name}</span>
-                  {isManaged && (
-                    <Badge
-                      variant="outline"
-                      className="border-primary/30 bg-primary/10 text-primary"
-                    >
-                      Géré par XNT
-                    </Badge>
-                  )}
-                </button>
-                <span className="text-xs text-muted-foreground w-24 text-right">
-                  {f.is_file ? formatSize(f.size) : "—"}
-                </span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={isManaged}
-                  onClick={() => {
-                    if (isManaged) {
-                      toast.warning(MANAGED_FILE_MESSAGE);
-                      return;
-                    }
-                    if (confirm(`Delete ${f.name}?`)) del.mutate(f.name);
-                  }}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
-            );
-          })
+          <pre className="max-h-[70vh] overflow-auto rounded-lg border border-primary/20 bg-background/70 p-4 text-xs text-muted-foreground">
+            {preview.url}
+          </pre>
         )}
       </div>
+    );
+  }
+
+  return (
+    <div
+      className={`xnt-card rounded-xl ${dragActive ? "ring-2 ring-primary" : ""}`}
+      onDragOver={(event) => {
+        event.preventDefault();
+        setDragActive(true);
+      }}
+      onDragLeave={() => setDragActive(false)}
+      onDrop={(event) => {
+        event.preventDefault();
+        setDragActive(false);
+        void handleUploadFiles(event.dataTransfer.files);
+      }}
+    >
+      <div className="space-y-4 border-b border-border/60 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="font-display text-lg font-semibold">Files</h3>
+            <p className="text-sm text-muted-foreground">
+              Gestionnaire de fichiers XNT pour les opérations courantes.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                if (event.target.files) void handleUploadFiles(event.target.files);
+                event.currentTarget.value = "";
+              }}
+            />
+            <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()}>
+              <Upload className="mr-1.5 h-4 w-4" /> Upload
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => list.refetch()}>
+              <RefreshCw className="mr-1.5 h-4 w-4" /> Actualiser
+            </Button>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!parentDir}
+            onClick={() => parentDir && setDir(parentDir)}
+          >
+            <ChevronLeft className="mr-1 h-4 w-4" /> Up
+          </Button>
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1 font-mono text-xs text-muted-foreground">
+            {breadcrumbs.map((crumb) => (
+              <button
+                key={crumb.path}
+                type="button"
+                className="rounded px-2 py-1 hover:bg-muted/40"
+                onClick={() => setDir(crumb.path)}
+              >
+                {crumb.label}
+              </button>
+            ))}
+          </div>
+          <div className="relative">
+            <Search className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Recherche"
+              className="h-9 w-48 pl-8"
+            />
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Input
+            value={folderName}
+            onChange={(event) => setFolderName(event.target.value)}
+            placeholder="Nouveau dossier"
+            className="h-9 w-56"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => createFolder.mutate()}
+            disabled={!folderName.trim() || createFolder.isPending}
+          >
+            <FolderPlus className="mr-1.5 h-4 w-4" /> Nouveau dossier
+          </Button>
+        </div>
+        {uploadProgress.length > 0 && (
+          <div className="grid gap-2">
+            {uploadProgress.map((item) => (
+              <div
+                key={item.name}
+                className="rounded-lg border border-primary/15 bg-background/35 p-2"
+              >
+                <div className="flex justify-between gap-2 text-xs">
+                  <span className="truncate font-mono">{item.name}</span>
+                  <span className="text-muted-foreground">
+                    {item.status} · {item.progress}%
+                  </span>
+                </div>
+                <div className="mt-2 h-1.5 rounded-full bg-muted">
+                  <div
+                    className="h-1.5 rounded-full bg-primary"
+                    style={{ width: `${item.progress}%` }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="overflow-x-auto">
+        <div className="min-w-[760px]">
+          <div className="grid grid-cols-[1fr_120px_180px_220px] gap-3 border-b border-border/60 px-4 py-2 text-xs uppercase tracking-wider text-muted-foreground">
+            <div>Nom</div>
+            <div>Taille</div>
+            <div>Modification</div>
+            <div className="text-right">Actions</div>
+          </div>
+          {list.isLoading ? (
+            <div className="p-6 text-sm text-muted-foreground">Chargement…</div>
+          ) : list.error || list.data?.error ? (
+            <div className="space-y-3 p-6">
+              <div className="text-sm font-medium text-destructive">Gestionnaire indisponible</div>
+              <div className="text-sm text-muted-foreground">
+                {(list.error as Error | null)?.message ?? list.data?.error}
+              </div>
+              <Button size="sm" variant="outline" onClick={() => list.refetch()}>
+                <RefreshCw className="mr-1 h-4 w-4" /> Réessayer
+              </Button>
+            </div>
+          ) : rows.length === 0 ? (
+            <div className="p-8 text-center text-sm text-muted-foreground">Dossier vide.</div>
+          ) : (
+            rows.map((file) => {
+              const managed = fileIsManaged(file);
+              const fullPath = joinPath(dir, file.name);
+              return (
+                <div
+                  key={file.name}
+                  className="grid grid-cols-[1fr_120px_180px_220px] items-center gap-3 border-b border-border/50 px-4 py-3 hover:bg-muted/25"
+                >
+                  <button
+                    type="button"
+                    className="flex min-w-0 items-center gap-2 text-left"
+                    onClick={() => (file.is_file ? openFile(file) : setDir(fullPath))}
+                  >
+                    {file.is_file ? (
+                      isImageFile(file.name) ? (
+                        <ImageIcon className="h-4 w-4 shrink-0 text-accent" />
+                      ) : (
+                        <FileIcon className="h-4 w-4 shrink-0 text-muted-foreground" />
+                      )
+                    ) : (
+                      <Folder className="h-4 w-4 shrink-0 text-primary" />
+                    )}
+                    <span className="truncate font-mono text-sm">{file.name}</span>
+                    {managed ? (
+                      <Badge
+                        variant="outline"
+                        className="border-primary/30 bg-primary/10 text-primary"
+                      >
+                        Géré par XNT
+                      </Badge>
+                    ) : null}
+                  </button>
+                  <div className="text-right text-xs text-muted-foreground">
+                    {file.is_file ? formatSize(file.size) : "—"}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {file.modified_at ? new Date(file.modified_at).toLocaleString() : "—"}
+                  </div>
+                  <div className="flex justify-end gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => handleDownload(file)}
+                      disabled={!file.is_file || managed}
+                    >
+                      <Download className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={managed}
+                      onClick={() => setMoveDialog({ from: fullPath, to: fullPath })}
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={managed}
+                      onClick={() => setMoveDialog({ from: fullPath, to: fullPath })}
+                    >
+                      <MoveRight className="h-4 w-4" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={managed}
+                      onClick={() => {
+                        if (confirm(`Supprimer ${file.name} ?`)) del.mutate(file.name);
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+      {dragActive && (
+        <div className="p-4 text-center text-sm text-primary">
+          Déposez les fichiers pour les envoyer dans {dir}
+        </div>
+      )}
+      {moveDialog && (
+        <div className="border-t border-border/60 p-4">
+          <div className="mb-2 text-sm font-medium">Renommer ou déplacer</div>
+          <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+            <Input
+              value={moveDialog.to}
+              onChange={(event) => setMoveDialog({ ...moveDialog, to: event.target.value })}
+              className="font-mono"
+            />
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => setMoveDialog(null)}>
+                Annuler
+              </Button>
+              <Button size="sm" onClick={() => move.mutate()} disabled={move.isPending}>
+                Valider
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
+type FileEntry = {
+  name: string;
+  mode: string;
+  size: number;
+  is_file: boolean;
+  is_symlink: boolean;
+  mimetype: string;
+  modified_at: string;
+  is_managed?: boolean;
+};
+
+function parentPath(path: string) {
+  if (path === "/" || path === "") return null;
+  const trimmed = path.replace(/\/+$/, "");
+  const index = trimmed.lastIndexOf("/");
+  return index <= 0 ? "/" : trimmed.slice(0, index);
+}
+
+function buildBreadcrumbs(path: string) {
+  const parts = path.split("/").filter(Boolean);
+  const crumbs = [{ label: "/", path: "/" }];
+  let current = "";
+  for (const part of parts) {
+    current += `/${part}`;
+    crumbs.push({ label: part, path: current });
+  }
+  return crumbs;
+}
+
 function joinPath(dir: string, name: string) {
+  if (name.startsWith("/")) return name;
   if (dir.endsWith("/")) return dir + name;
-  return dir + "/" + name;
+  return `${dir}/${name}`;
 }
-function formatSize(b: number) {
-  if (b < 1024) return `${b} B`;
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
-  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
+
+function formatSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
+
 function hasBlockedEditorExtension(name: string) {
   const normalized = name.toLowerCase();
   return [...BLOCKED_EDITOR_EXTENSIONS].some((extension) => normalized.endsWith(extension));
 }
+
 function hasProtectedFileName(name: string) {
   const normalized = name.toLowerCase();
   return (
     PROTECTED_FILE_BASENAMES.has(normalized) ||
     /(secret|token|private[_-]?key|api[_-]?key|credentials?)/i.test(normalized)
   );
+}
+function fileIsManaged(file: FileEntry) {
+  return Boolean(file.is_managed || hasProtectedFileName(file.name));
+}
+
+function isEditableTextFile(name: string) {
+  return /\.(txt|json|ya?ml|cfg|properties|ini|log)$/i.test(name);
+}
+
+function isImageFile(name: string) {
+  return /\.(png|jpe?g|webp)$/i.test(name);
+}
+
+function updateUploadProgress(
+  rows: Array<{ name: string; progress: number; status: string }>,
+  name: string,
+  progress: number,
+  status: string,
+) {
+  return rows.map((row) => (row.name === name ? { ...row, progress, status } : row));
+}
+
+async function readFileAsBase64(file: File) {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () => reject(reader.error ?? new Error("Lecture du fichier impossible."));
+    reader.readAsDataURL(file);
+  });
+  return dataUrl.includes(",") ? dataUrl.split(",")[1] : dataUrl;
 }
 
 /* ---------------- Backups ---------------- */
