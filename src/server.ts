@@ -1,4 +1,7 @@
 import "./lib/error-capture";
+import { initServerMonitoring, reportServerError } from "./lib/monitoring.server";
+
+initServerMonitoring();
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
@@ -63,6 +66,7 @@ export default {
       return await normalizeCatastrophicSsrResponse(response);
     } catch (error) {
       console.error(error);
+      reportServerError(error, { action: "server.fetch" });
       return new Response(renderErrorPage(), {
         status: 500,
         headers: { "content-type": "text/html; charset=utf-8" },

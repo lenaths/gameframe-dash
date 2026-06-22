@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { reportCurseForgeError, reportProvisioningError } from "@/lib/monitoring.server";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
@@ -532,6 +533,13 @@ async function processJob(db: SupabaseAny, jobId: string) {
       serverPackFileId ?? 0,
     );
   } catch (error) {
+    reportCurseForgeError(error, {
+      action: "modpack_download_url",
+      job_id: workingJob.id,
+      server_order_id: workingJob.server_order_id,
+      curseforge_mod_id: modpack.curseforge_mod_id ?? workingJob.curseforge_mod_id,
+      curseforge_file_id: serverPackFileId,
+    });
     return failJob(
       db,
       { ...workingJob, status: "extracting", logs: extractingLogs },
@@ -590,6 +598,11 @@ async function processJob(db: SupabaseAny, jobId: string) {
       body: JSON.stringify({ command }),
     });
   } catch (error) {
+    reportProvisioningError(error, {
+      action: "modpack_install_command",
+      job_id: workingJob.id,
+      server_order_id: workingJob.server_order_id,
+    });
     return failJob(
       db,
       { ...workingJob, status: "installing", logs: installingLogs },

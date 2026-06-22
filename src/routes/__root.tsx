@@ -7,12 +7,25 @@ import {
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
+import { createClientOnlyFn } from "@tanstack/react-start";
 import { useEffect, type ReactNode } from "react";
 
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { Toaster } from "@/components/ui/sonner";
 import { supabase } from "@/integrations/supabase/client";
+
+const initMonitoringClient = createClientOnlyFn(async () => {
+  const { initClientMonitoring } = await import("@/lib/monitoring.client");
+  initClientMonitoring();
+});
+
+const reportMonitoringClientError = createClientOnlyFn(
+  async (error: Error, context: Record<string, unknown>) => {
+    const { reportClientError } = await import("@/lib/monitoring.client");
+    reportClientError(error, context);
+  },
+);
 
 function NotFoundComponent() {
   return (
@@ -41,6 +54,7 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   const router = useRouter();
   useEffect(() => {
     reportLovableError(error, { boundary: "tanstack_root_error_component" });
+    void reportMonitoringClientError(error, { boundary: "tanstack_root_error_component" });
   }, [error]);
 
   return (
@@ -128,6 +142,9 @@ function RootShell({ children }: { children: ReactNode }) {
 }
 
 function RootComponent() {
+  useEffect(() => {
+    void initMonitoringClient();
+  }, []);
   const { queryClient } = Route.useRouteContext();
   const router = useRouter();
 

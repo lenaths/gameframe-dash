@@ -1,5 +1,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import {
+  buildMissingServerArchiveMetadata,
+  isArchivedServerOrderMetadata,
+  isStagingServerOrderMetadata,
+} from "@/lib/reconciliation-cleanup";
 
 type SupabaseAny = {
   from: (table: string) => SupabaseQuery;
@@ -363,6 +368,8 @@ type ReconciliationAnomaly = {
     | "sync_server"
     | "reprocess_stripe_event"
     | "regenerate_notification"
+    | "archive_missing_server"
+    | "cleanup_staging_missing_servers"
     | "none";
   orderId?: string | null;
   serverOrderId?: string | null;
@@ -1731,7 +1738,10 @@ export const adminGetMonitoring = createServerFn({ method: "GET" })
     const net = (payment: { amount_cents: number | null; refunded_cents: number | null }) =>
       (payment.amount_cents ?? 0) - (payment.refunded_cents ?? 0);
 
+    const { getServerMonitoringConfig } = await import("@/lib/monitoring.server");
+
     return {
+      sentry: getServerMonitoringConfig(),
       users: ((profiles ?? []) as unknown[]).length,
       servers: ((servers ?? []) as unknown[]).length,
       orders: ((orders ?? []) as unknown[]).length,
@@ -1747,6 +1757,21 @@ export const adminGetMonitoring = createServerFn({ method: "GET" })
         (ticket) => ticket.status === "closed",
       ).length,
     };
+  });
+
+export const adminSendMonitoringTestEvent = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertAdmin(context.userId);
+    const { captureAdminMonitoringTest } = await import("@/lib/monitoring.server");
+    const result = await captureAdminMonitoringTest(context.userId);
+    await writeAdminAuditLog({
+      actorUserId: context.userId,
+      action: "admin.monitoring.test_event",
+      entityType: "monitoring",
+      after: result,
+    });
+    return result;
   });
 
 export const adminListReconciliation = createServerFn({ method: "GET" })
@@ -1772,7 +1797,7 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
       db
         .from("server_orders")
         .select(
-          "id, order_id, status, pterodactyl_server_id, pterodactyl_server_identifier, error_message, created_at",
+          "id, order_id, user_id, status, pterodactyl_server_id, pterodactyl_server_identifier, error_message, metadata, created_at",
         )
         .order("created_at", { ascending: false })
         .limit(200),
@@ -1819,7 +1844,9 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
       notificationsError;
     if (firstError) throw new Error(firstError.message);
 
-    const serverRows = (servers ?? []) as ServerLinkRow[];
+    const serverRows = ((servers ?? []) as Array<ServerLinkRow & { metadata?: unknown }>).filter(
+      (server) => !isArchivedServerOrderMetadata(server.metadata),
+    );
     const invoiceRows = (invoices ?? []) as Array<{
       id: string;
       order_id: string | null;
@@ -1995,8 +2022,12 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
                 (server as ServerLinkRow & { created_at?: string }).created_at ??
                 new Date().toISOString(),
               message: `Pterodactyl server ${server.pterodactyl_server_id} is referenced but not found.`,
-              recommendation: "Sync server status to mark it failed, then review before retry.",
-              repairAction: "sync_server",
+              recommendation: isStagingServerOrder(server)
+                ? "Nettoyer cette référence de serveur test supprimé."
+                : "Archiver la référence après vérification que le serveur est absent.",
+              repairAction: isStagingServerOrder(server)
+                ? "cleanup_staging_missing_servers"
+                : "archive_missing_server",
               orderId: server.order_id,
               serverOrderId: server.id,
             });
@@ -2096,6 +2127,147 @@ export const adminListReconciliation = createServerFn({ method: "GET" })
     return { anomalies };
   });
 
+function isStagingServerOrder(server: { metadata?: unknown; user_id?: string | null }) {
+  return isStagingServerOrderMetadata(server.metadata);
+}
+
+async function verifyPterodactylServerMissing(serverId: number) {
+  const { ptero, assertPteroAppConfigured } = await import("@/lib/pterodactyl.server");
+  assertPteroAppConfigured();
+  try {
+    await ptero.app(`/servers/${serverId}`);
+    return false;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("404") || message.toLowerCase().includes("not found")) return true;
+    throw error;
+  }
+}
+
+async function archiveMissingServerOrder(
+  serverOrderId: string,
+  actorUserId: string,
+  options: { stagingOnly: boolean },
+) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const db = supabaseAdmin as unknown as SupabaseAny;
+  const { data: server, error } = await db
+    .from("server_orders")
+    .select("id, order_id, user_id, status, pterodactyl_server_id, metadata")
+    .eq("id", serverOrderId)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!server) throw new Error("Server order introuvable.");
+  const typed = server as {
+    id: string;
+    order_id: string | null;
+    user_id: string | null;
+    status: string;
+    pterodactyl_server_id: number | null;
+    metadata?: unknown;
+  };
+  if (isArchivedServerOrderMetadata(typed.metadata)) {
+    return { ok: true as const, skipped: true, status: typed.status, reason: "already_archived" };
+  }
+  if (options.stagingOnly && !isStagingServerOrder(typed)) {
+    throw new Error("Nettoyage staging refusé: ce serveur n’est pas marqué test/staging.");
+  }
+  if (!typed.pterodactyl_server_id) throw new Error("Aucun serveur infrastructure à vérifier.");
+  const missing = await verifyPterodactylServerMissing(typed.pterodactyl_server_id);
+  if (!missing) throw new Error("Nettoyage refusé: le serveur existe encore côté infrastructure.");
+
+  const archivedAt = new Date().toISOString();
+  const nextMetadata = buildMissingServerArchiveMetadata({
+    existingMetadata: typed.metadata,
+    actorUserId,
+    archivedAt,
+  });
+  const { error: updateError } = await db
+    .from("server_orders")
+    .update({
+      status: "cancelled",
+      error_message: "Référence archivée: serveur infrastructure introuvable.",
+      metadata: nextMetadata,
+    })
+    .eq("id", typed.id);
+  if (updateError) throw new Error(updateError.message);
+
+  if (options.stagingOnly && typed.order_id) {
+    await db
+      .from("orders")
+      .update({
+        status: "cancelled",
+        cancelled_at: archivedAt,
+        metadata: {
+          archived_reason: "staging_pterodactyl_server_missing",
+          archived_at: archivedAt,
+          archived_by: actorUserId,
+          cleanup_source: "admin_reconciliation",
+        },
+      })
+      .eq("id", typed.order_id);
+  }
+
+  await writeAdminAuditLog({
+    actorUserId,
+    action: options.stagingOnly
+      ? "admin.reconciliation.cleanup_staging_missing_server"
+      : "admin.reconciliation.archive_missing_server",
+    entityType: "server_order",
+    entityId: typed.id,
+    after: {
+      status: "cancelled",
+      pterodactyl_server_id: typed.pterodactyl_server_id,
+      order_id: typed.order_id,
+      stagingOnly: options.stagingOnly,
+      archived_at: archivedAt,
+    },
+  });
+  return { ok: true as const, skipped: false, status: "cancelled" as const, archivedAt };
+}
+
+async function cleanupStagingMissingServers(actorUserId: string, serverOrderId?: string | null) {
+  if (serverOrderId) {
+    return archiveMissingServerOrder(serverOrderId, actorUserId, { stagingOnly: true });
+  }
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const db = supabaseAdmin as unknown as SupabaseAny;
+  const { data, error } = await db
+    .from("server_orders")
+    .select("id, user_id, pterodactyl_server_id, metadata")
+    .order("created_at", { ascending: false })
+    .limit(200);
+  if (error) throw new Error(error.message);
+  const candidates = (
+    (data ?? []) as Array<{
+      id: string;
+      user_id: string | null;
+      pterodactyl_server_id: number | null;
+      metadata?: unknown;
+    }>
+  ).filter(
+    (server) =>
+      server.pterodactyl_server_id &&
+      isStagingServerOrder(server) &&
+      !isArchivedServerOrderMetadata(server.metadata),
+  );
+  const results = [];
+  for (const server of candidates) {
+    try {
+      const missing = await verifyPterodactylServerMissing(server.pterodactyl_server_id as number);
+      if (!missing) continue;
+      results.push(await archiveMissingServerOrder(server.id, actorUserId, { stagingOnly: true }));
+    } catch (error) {
+      results.push({
+        ok: false,
+        serverOrderId: server.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { ok: true as const, processed: results.length, results };
+}
+
 export const adminRepairReconciliation = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((d: unknown) =>
@@ -2106,6 +2278,8 @@ export const adminRepairReconciliation = createServerFn({ method: "POST" })
           "sync_server",
           "reprocess_stripe_event",
           "regenerate_notification",
+          "archive_missing_server",
+          "cleanup_staging_missing_servers",
         ]),
         orderId: z.string().uuid().optional().nullable(),
         serverOrderId: z.string().uuid().optional().nullable(),
@@ -2153,6 +2327,13 @@ export const adminRepairReconciliation = createServerFn({ method: "POST" })
         invoiceId: data.invoiceId ?? null,
       });
       return result;
+    }
+    if (data.repairAction === "archive_missing_server") {
+      if (!data.serverOrderId) throw new Error("Missing server order id for archive repair.");
+      return archiveMissingServerOrder(data.serverOrderId, context.userId, { stagingOnly: false });
+    }
+    if (data.repairAction === "cleanup_staging_missing_servers") {
+      return cleanupStagingMissingServers(context.userId, data.serverOrderId ?? null);
     }
     if (!data.serverOrderId) throw new Error("Missing server order id for sync repair.");
     return syncServerOrderStatus(data.serverOrderId, context.userId);

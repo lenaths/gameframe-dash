@@ -47,6 +47,7 @@ import {
   adminMarkInitialMinecraftSyncFailed,
   adminProcessPendingMinecraftSyncs,
   adminRetryInitialMinecraftSync,
+  adminSendMonitoringTestEvent,
   adminCreateCurseForgeTemplateMapping,
   adminDeleteCurseForgeTemplateMapping,
   adminImportCurseForgeModpack,
@@ -455,6 +456,12 @@ type AuditLog = {
 };
 
 type AdminMonitoring = {
+  sentry?: {
+    frontendDsnConfigured: boolean;
+    serverDsnConfigured: boolean;
+    environment: string;
+    tracesSampleRate: number;
+  };
   users: number;
   servers: number;
   orders: number;
@@ -479,6 +486,8 @@ type AdminAnomaly = {
     | "sync_server"
     | "reprocess_stripe_event"
     | "regenerate_notification"
+    | "archive_missing_server"
+    | "cleanup_staging_missing_servers"
     | "none";
   orderId?: string | null;
   serverOrderId?: string | null;
@@ -488,6 +497,15 @@ type AdminAnomaly = {
 };
 
 function AdminMonitoringSection({ data }: { data?: AdminMonitoring }) {
+  const sendTestFn = useServerFn(adminSendMonitoringTestEvent);
+  const sendTest = useMutation({
+    mutationFn: () => sendTestFn(),
+    onSuccess: (result) => {
+      if (result.sent) toast.success("Événement test Sentry envoyé.");
+      else toast.info(result.message);
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
   const cards = [
     ["Users", data?.users ?? 0],
     ["Servers", data?.servers ?? 0],
@@ -509,13 +527,51 @@ function AdminMonitoringSection({ data }: { data?: AdminMonitoring }) {
           </div>
         ))}
       </div>
+      <div className="xnt-card mt-4 rounded-xl p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="font-display text-lg font-semibold">Sentry</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              État de la configuration monitoring beta, sans afficher de DSN ni de secret.
+            </p>
+          </div>
+          <Button variant="outline" disabled={sendTest.isPending} onClick={() => sendTest.mutate()}>
+            <RefreshCw className="mr-1.5 h-4 w-4" />
+            {sendTest.isPending ? "Envoi…" : "Envoyer événement test"}
+          </Button>
+        </div>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <InfoPill
+            label="Frontend DSN"
+            value={data?.sentry?.frontendDsnConfigured ? "Oui" : "Non"}
+          />
+          <InfoPill label="Server DSN" value={data?.sentry?.serverDsnConfigured ? "Oui" : "Non"} />
+          <InfoPill label="Environment" value={data?.sentry?.environment ?? "development"} />
+          <InfoPill label="Traces sample" value={String(data?.sentry?.tracesSampleRate ?? 0.1)} />
+        </div>
+      </div>
     </section>
+  );
+}
+
+function InfoPill({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-primary/15 bg-background/35 p-3">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 font-medium text-primary">{value}</div>
+    </div>
   );
 }
 
 function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }) {
   const qc = useQueryClient();
   const repairFn = useServerFn(adminRepairReconciliation);
+  const refreshReconciliation = () => {
+    qc.invalidateQueries({ queryKey: ["admin-reconciliation"] });
+    qc.invalidateQueries({ queryKey: ["admin-orders-detailed"] });
+    qc.invalidateQueries({ queryKey: ["admin-servers-detailed"] });
+    qc.invalidateQueries({ queryKey: ["admin-logs-detailed"] });
+  };
   const repair = useMutation({
     mutationFn: (anomaly: AdminAnomaly) =>
       repairFn({
@@ -530,9 +586,20 @@ function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }
       }),
     onSuccess: () => {
       toast.success("Repair lancé");
-      qc.invalidateQueries({ queryKey: ["admin-reconciliation"] });
-      qc.invalidateQueries({ queryKey: ["admin-orders-detailed"] });
-      qc.invalidateQueries({ queryKey: ["admin-servers-detailed"] });
+      refreshReconciliation();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+  const cleanupStaging = useMutation({
+    mutationFn: () =>
+      repairFn({
+        data: {
+          repairAction: "cleanup_staging_missing_servers",
+        },
+      }),
+    onSuccess: () => {
+      toast.success("Nettoyage staging lancé");
+      refreshReconciliation();
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -544,14 +611,32 @@ function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }
           icon={<RefreshCw className="h-5 w-5" />}
           title={`Reconciliation (${anomalies.length})`}
         />
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => qc.invalidateQueries({ queryKey: ["admin-reconciliation"] })}
-        >
-          <RefreshCw className="mr-2 h-4 w-4" />
-          Rafraîchir
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={cleanupStaging.isPending}
+            onClick={() => {
+              if (
+                confirm(
+                  "Nettoyer uniquement les serveurs test/staging absents côté infrastructure ? Les paiements/factures ne seront jamais supprimés.",
+                )
+              ) {
+                cleanupStaging.mutate();
+              }
+            }}
+          >
+            Nettoyer tests manquants
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => qc.invalidateQueries({ queryKey: ["admin-reconciliation"] })}
+          >
+            <RefreshCw className="mr-2 h-4 w-4" />
+            Rafraîchir
+          </Button>
+        </div>
       </div>
       <TableShell empty={anomalies.length === 0 ? "Aucune anomalie détectée." : null}>
         <Table>
@@ -595,7 +680,25 @@ function AdminReconciliationSection({ anomalies }: { anomalies: AdminAnomaly[] }
                       size="sm"
                       variant="outline"
                       disabled={repair.isPending}
-                      onClick={() => repair.mutate(anomaly)}
+                      onClick={() => {
+                        if (
+                          anomaly.repairAction === "archive_missing_server" &&
+                          !confirm(
+                            "Archiver cette référence de serveur absent ? Aucun paiement, facture ou commande réelle ne sera supprimé.",
+                          )
+                        ) {
+                          return;
+                        }
+                        if (
+                          anomaly.repairAction === "cleanup_staging_missing_servers" &&
+                          !confirm(
+                            "Nettoyer cette référence staging absente ? Cette action ne concerne que les serveurs marqués test/staging.",
+                          )
+                        ) {
+                          return;
+                        }
+                        repair.mutate(anomaly);
+                      }}
                     >
                       {repairLabel(anomaly.repairAction)}
                     </Button>
@@ -3447,6 +3550,8 @@ function repairLabel(action: AdminAnomaly["repairAction"]) {
     sync_server: "Sync server",
     reprocess_stripe_event: "Reprocess event",
     regenerate_notification: "Regenerate",
+    archive_missing_server: "Archiver",
+    cleanup_staging_missing_servers: "Nettoyer test",
     none: "Manual",
   };
   return labels[action];

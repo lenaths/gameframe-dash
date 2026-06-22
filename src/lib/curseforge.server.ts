@@ -1,6 +1,7 @@
 import "@tanstack/react-start/server-only";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { reportCurseForgeError } from "@/lib/monitoring.server";
 
 const CURSEFORGE_BASE_URL = "https://api.curseforge.com";
 const MINECRAFT_GAME_ID = 432;
@@ -206,6 +207,11 @@ async function curseForgeRequest<T>(path: string, searchParams?: URLSearchParams
 
     return (await response.json()) as CurseForgeResponse<T>;
   } catch (error) {
+    reportCurseForgeError(error, {
+      action: "curseForgeRequest",
+      endpoint: path,
+      url: url.toString(),
+    });
     if ((error as Error).name === "AbortError") {
       throw new Error("CurseForge ne répond pas assez vite. Réessayez dans quelques instants.");
     }

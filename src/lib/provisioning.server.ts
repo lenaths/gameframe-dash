@@ -2,6 +2,7 @@ import "@tanstack/react-start/server-only";
 
 import { z } from "zod";
 import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
+import { reportProvisioningError } from "@/lib/monitoring.server";
 
 type ServerOrderStatus =
   | "pending"
@@ -633,6 +634,12 @@ export async function provisionServerOrder(input: ProvisionServerOrderInput) {
       },
     };
   } catch (error) {
+    reportProvisioningError(error, {
+      action: "provisionServerOrder",
+      server_order_id: input.serverOrderId,
+      user_id: input.userId,
+      plan_id: input.planId,
+    });
     const message = cleanProvisioningError(error);
     console.error(`[Provisioning] Failed server_order=${input.serverOrderId}: ${message}`);
     await db

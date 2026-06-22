@@ -1,4 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
+import { reportSyncError } from "@/lib/monitoring.server";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { isMinecraftGame, normalizeGameKey } from "@/lib/game-config";
@@ -1545,6 +1546,13 @@ export async function applyInitialMinecraftSettings(
       restartRecommended: sync.restartRecommended,
     };
   } catch (error) {
+    reportSyncError(error, {
+      action: "applyInitialMinecraftSettings",
+      server_order_id: order.id,
+      user_id: order.user_id,
+      game: order.plans?.game,
+      status: order.status,
+    });
     const syncedAt = new Date().toISOString();
     const message =
       error instanceof Error ? error.message : "Synchronisation initiale Minecraft impossible.";
@@ -1637,6 +1645,12 @@ export async function processPendingMinecraftSyncs(
       });
       processed.push({ serverOrderId: order.id, ok: sync.ok, status: sync.status, sync });
     } catch (error) {
+      reportSyncError(error, {
+        action: "processPendingMinecraftSyncs",
+        server_order_id: order.id,
+        user_id: order.user_id,
+        game: order.plans?.game,
+      });
       processed.push({
         serverOrderId: order.id,
         ok: false,
