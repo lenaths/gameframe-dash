@@ -37,7 +37,7 @@ export function canCleanupStagingMissingServer(input: {
 
 export function buildMissingServerArchiveMetadata(input: {
   existingMetadata: unknown;
-  actorUserId: string;
+  actorUserId: string | null;
   archivedAt: string;
   hideFromCustomer?: boolean;
   hiddenReason?: string;

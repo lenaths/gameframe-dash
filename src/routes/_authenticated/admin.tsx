@@ -84,6 +84,12 @@ import {
   adminProcessNextModpackInstallJob,
   adminRetryModpackInstallJob,
 } from "@/lib/modpack-install.functions";
+import {
+  adminListWorkers,
+  adminRunAllWorkers,
+  adminRunWorker,
+  adminSetWorkerEnabled,
+} from "@/lib/workers.functions";
 
 export const Route = createFileRoute("/_authenticated/admin")({
   head: () => ({ meta: [{ title: "Admin · XntServers" }] }),
@@ -99,6 +105,7 @@ function Admin() {
   const fetchLogs = useServerFn(adminListLogsDetailed);
   const fetchTickets = useServerFn(adminListTickets);
   const fetchMonitoring = useServerFn(adminGetMonitoring);
+  const fetchWorkers = useServerFn(adminListWorkers);
   const fetchMinecraftSyncQueue = useServerFn(adminListMinecraftSyncQueue);
   const fetchReconciliation = useServerFn(adminListReconciliation);
   const fetchCatalog = useServerFn(adminListGameCatalog);
@@ -138,6 +145,11 @@ function Admin() {
   const monitoringQ = useQuery({
     queryKey: ["admin-monitoring"],
     queryFn: () => fetchMonitoring(),
+    retry: false,
+  });
+  const workersQ = useQuery({
+    queryKey: ["admin-workers"],
+    queryFn: () => fetchWorkers(),
     retry: false,
   });
   const minecraftSyncQueueQ = useQuery({
@@ -190,6 +202,7 @@ function Admin() {
     logsQ.error ??
     ticketsQ.error ??
     monitoringQ.error ??
+    workersQ.error ??
     minecraftSyncQueueQ.error ??
     reconciliationQ.error ??
     catalogQ.error ??
@@ -223,6 +236,7 @@ function Admin() {
           <TabsList className="h-auto w-full flex-wrap justify-start">
             <TabsTrigger value="orders">Orders</TabsTrigger>
             <TabsTrigger value="monitoring">Monitoring</TabsTrigger>
+            <TabsTrigger value="workers">Workers</TabsTrigger>
             <TabsTrigger value="reconciliation">Reconciliation</TabsTrigger>
             <TabsTrigger value="minecraft-sync">Minecraft Sync</TabsTrigger>
             <TabsTrigger value="servers">Servers</TabsTrigger>
@@ -240,6 +254,9 @@ function Admin() {
           </TabsContent>
           <TabsContent value="monitoring" className="mt-6">
             <AdminMonitoringSection data={monitoringQ.data as AdminMonitoring | undefined} />
+          </TabsContent>
+          <TabsContent value="workers" className="mt-6">
+            <AdminWorkersSection data={workersQ.data as AdminWorkersData | undefined} />
           </TabsContent>
           <TabsContent value="reconciliation" className="mt-6">
             <AdminReconciliationSection
@@ -477,6 +494,37 @@ type AdminMonitoring = {
   ticketsClosed: number;
 };
 
+type AdminWorkerName = "minecraft-sync" | "reconciliation" | "modpack" | "monitoring";
+
+type AdminWorkerState = {
+  name: AdminWorkerName;
+  enabled: boolean;
+  status: string;
+  last_run_at: string | null;
+  last_duration_ms: number | null;
+  last_success: boolean | null;
+  last_error: string | null;
+  next_run_at: string | null;
+  success_count: number;
+  error_count: number;
+};
+
+type AdminWorkerHistoryEntry = {
+  id: string;
+  worker: AdminWorkerName | "all";
+  started_at: string;
+  finished_at: string;
+  duration_ms: number;
+  success: boolean;
+  processed: number;
+  error?: string | null;
+};
+
+type AdminWorkersData = {
+  workers: AdminWorkerState[];
+  history: AdminWorkerHistoryEntry[];
+};
+
 type AdminAnomaly = {
   id: string;
   type: string;
@@ -554,6 +602,159 @@ function AdminMonitoringSection({ data }: { data?: AdminMonitoring }) {
           <InfoPill label="Environment" value={data?.sentry?.environment ?? "development"} />
           <InfoPill label="Traces sample" value={String(data?.sentry?.tracesSampleRate ?? 0.1)} />
         </div>
+      </div>
+    </section>
+  );
+}
+
+function AdminWorkersSection({ data }: { data?: AdminWorkersData }) {
+  const qc = useQueryClient();
+  const runWorkerFn = useServerFn(adminRunWorker);
+  const runAllFn = useServerFn(adminRunAllWorkers);
+  const setEnabledFn = useServerFn(adminSetWorkerEnabled);
+  const workers = data?.workers ?? [];
+  const history = data?.history ?? [];
+  const refreshWorkers = () => {
+    qc.invalidateQueries({ queryKey: ["admin-workers"] });
+    qc.invalidateQueries({ queryKey: ["admin-minecraft-sync-queue"] });
+    qc.invalidateQueries({ queryKey: ["admin-reconciliation"] });
+    qc.invalidateQueries({ queryKey: ["admin-modpack-install-jobs"] });
+    qc.invalidateQueries({ queryKey: ["admin-servers-detailed"] });
+  };
+  const runWorker = useMutation({
+    mutationFn: (worker: AdminWorkerName) => runWorkerFn({ data: { worker } }),
+    onSuccess: (result) => {
+      const entry = result as AdminWorkerHistoryEntry;
+      if (entry.success) toast.success(`Worker ${workerLabel(entry.worker)} terminé.`);
+      else toast.error(entry.error ?? "Worker en erreur.");
+      refreshWorkers();
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+  const runAll = useMutation({
+    mutationFn: () => runAllFn(),
+    onSuccess: (result) => {
+      const output = result as { entry: AdminWorkerHistoryEntry };
+      if (output.entry.success) toast.success("Tous les workers ont été exécutés.");
+      else toast.error("Un ou plusieurs workers sont en erreur.");
+      refreshWorkers();
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+  const setEnabled = useMutation({
+    mutationFn: (input: { worker: AdminWorkerName; enabled: boolean }) =>
+      setEnabledFn({ data: input }),
+    onSuccess: (result) => {
+      const state = result as AdminWorkerState;
+      toast.success(`${workerLabel(state.name)} ${state.enabled ? "activé" : "désactivé"}.`);
+      refreshWorkers();
+    },
+    onError: (error: Error) => toast.error(error.message),
+  });
+
+  return (
+    <section className="grid gap-6">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <SectionTitle icon={<Gauge className="h-5 w-5" />} title="Workers" />
+          <p className="mt-1 text-sm text-muted-foreground">
+            Exécution contrôlée des traitements automatiques. Aucun worker ne démarre au lancement
+            du serveur.
+          </p>
+        </div>
+        <Button
+          className="bg-primary text-primary-foreground hover:bg-primary/90"
+          disabled={runAll.isPending}
+          onClick={() => runAll.mutate()}
+        >
+          <RefreshCw className="mr-1.5 h-4 w-4" />
+          {runAll.isPending ? "Exécution…" : "Run all"}
+        </Button>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        {workers.map((worker) => (
+          <div key={worker.name} className="xnt-card rounded-xl p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="font-display text-lg font-semibold">{workerLabel(worker.name)}</div>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  <StatusBadge status={worker.enabled ? worker.status : "disabled"} />
+                  <Badge variant="outline">
+                    {worker.success_count} OK · {worker.error_count} erreurs
+                  </Badge>
+                </div>
+              </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={runWorker.isPending}
+                  onClick={() => runWorker.mutate(worker.name)}
+                >
+                  Run now
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={setEnabled.isPending}
+                  onClick={() =>
+                    setEnabled.mutate({ worker: worker.name, enabled: !worker.enabled })
+                  }
+                >
+                  {worker.enabled ? "Disable" : "Enable"}
+                </Button>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
+              <InfoPill label="Dernier run" value={formatDateTime(worker.last_run_at)} />
+              <InfoPill
+                label="Durée"
+                value={
+                  typeof worker.last_duration_ms === "number"
+                    ? `${worker.last_duration_ms} ms`
+                    : "—"
+                }
+              />
+              <InfoPill label="Prochain run" value={worker.next_run_at ?? "Cron externe"} />
+              <InfoPill label="Dernière erreur" value={worker.last_error ?? "—"} />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="xnt-card rounded-xl p-5">
+        <SectionTitle icon={<ScrollText className="h-5 w-5" />} title="Historique workers" />
+        <TableShell empty={history.length === 0 ? "Aucun run worker enregistré." : null}>
+          <Table>
+            <TableHeader className="bg-surface-2">
+              <TableRow>
+                <TableHead>Worker</TableHead>
+                <TableHead>Résultat</TableHead>
+                <TableHead>Traités</TableHead>
+                <TableHead>Durée</TableHead>
+                <TableHead>Date</TableHead>
+                <TableHead>Erreur</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {history.map((entry) => (
+                <TableRow key={entry.id}>
+                  <TableCell>{workerLabel(entry.worker)}</TableCell>
+                  <TableCell>
+                    <StatusBadge status={entry.success ? "success" : "error"} />
+                  </TableCell>
+                  <TableCell>{entry.processed}</TableCell>
+                  <TableCell>{entry.duration_ms} ms</TableCell>
+                  <TableCell>{formatDateTime(entry.finished_at)}</TableCell>
+                  <TableCell className="max-w-80 truncate text-xs text-muted-foreground">
+                    {entry.error ?? "—"}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableShell>
       </div>
     </section>
   );
@@ -3538,6 +3739,17 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       {children}
     </label>
   );
+}
+
+function workerLabel(worker: AdminWorkerName | "all") {
+  const labels: Record<AdminWorkerName | "all", string> = {
+    "minecraft-sync": "Minecraft Sync",
+    reconciliation: "Reconciliation",
+    modpack: "Modpacks",
+    monitoring: "Monitoring",
+    all: "Tous les workers",
+  };
+  return labels[worker] ?? worker;
 }
 
 function StatusBadge({ status }: { status: string }) {

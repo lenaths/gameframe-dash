@@ -403,7 +403,7 @@ export async function assertAdmin(userId: string) {
 }
 
 async function writeAdminAuditLog(input: {
-  actorUserId: string;
+  actorUserId: string | null;
   action: string;
   entityType: string;
   entityId?: string | null;
@@ -2150,7 +2150,7 @@ async function verifyPterodactylServerMissing(serverId: number) {
 
 async function archiveMissingServerOrder(
   serverOrderId: string,
-  actorUserId: string,
+  actorUserId: string | null,
   options: { stagingOnly: boolean },
 ) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -2289,7 +2289,10 @@ export const adminRestoreServerOrderVisibility = createServerFn({ method: "POST"
     return restoreServerOrderCustomerVisibility(data.serverOrderId, context.userId);
   });
 
-async function cleanupStagingMissingServers(actorUserId: string, serverOrderId?: string | null) {
+export async function cleanupStagingMissingServers(
+  actorUserId: string | null,
+  serverOrderId?: string | null,
+) {
   if (serverOrderId) {
     return archiveMissingServerOrder(serverOrderId, actorUserId, { stagingOnly: true });
   }
