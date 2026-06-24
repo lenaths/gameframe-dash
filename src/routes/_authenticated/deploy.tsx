@@ -831,9 +831,9 @@ function Deploy() {
                     className="w-28"
                   />
                   <p className="text-sm text-muted-foreground">
-                    Joueurs inclus : {playerPrice?.included_players ?? 10}. Défaut recommandé :{" "}
-                    {recommendedPlayers}. Limite : {maxPlayersLimit}. Cette capacité sera
-                    verrouillée après achat et appliquée par les templates XNT compatibles.
+                    Recommandé : {playerPrice?.recommended_players ?? recommendedPlayers} joueurs.
+                    Maximum : {maxPlayersLimit} joueurs. Cette capacité sera verrouillée après achat
+                    et appliquée par les templates XNT compatibles.
                   </p>
                 </div>
               </div>
@@ -854,12 +854,27 @@ function Deploy() {
                   <span className="text-sm font-sans text-muted-foreground">/mo</span>
                 </div>
               </div>
-              <div className="mt-3 text-sm text-muted-foreground">
-                Prix plan : {formatEuro(selectedPlan.price_monthly_cents)}/mo avec{" "}
-                {playerPrice.included_players} joueurs inclus · Prix par joueur :{" "}
-                {formatEuro(playerPrice.price_per_player_cents)}/mo · Ajustement joueurs :{" "}
-                {playerPrice.players_adjustment_cents < 0 ? "-" : "+"}
-                {formatEuro(Math.abs(playerPrice.players_adjustment_cents))}/mo
+              <div className="mt-3 space-y-1 text-sm text-muted-foreground">
+                <div>Prix plan : {formatEuro(selectedPlan.price_monthly_cents)}/mo</div>
+                <div>
+                  Recommandé : {playerPrice.recommended_players} joueurs · Supplément :{" "}
+                  {formatEuro(playerPrice.price_per_extra_player_cents)}/joueur · Réduction :{" "}
+                  {formatEuro(playerPrice.price_reduction_per_missing_player_cents)}/joueur
+                </div>
+                {playerPrice.capacity_adjustment_cents > 0 && (
+                  <div>
+                    Supplément capacité : +{formatEuro(playerPrice.capacity_adjustment_cents)}/mo
+                  </div>
+                )}
+                {playerPrice.capacity_adjustment_cents < 0 && (
+                  <div>
+                    Réduction capacité : -
+                    {formatEuro(Math.abs(playerPrice.capacity_adjustment_cents))}/mo
+                  </div>
+                )}
+                {playerPrice.capacity_adjustment_cents === 0 && (
+                  <div>Capacité recommandée : aucun ajustement.</div>
+                )}
               </div>
             </div>
           )}
@@ -896,7 +911,7 @@ function formatEuro(cents: number) {
 }
 
 function getRecommendedPlayers(game: string, name: string, ramMb: number) {
-  return getPlayerCapacityPricingRules({ game, name, ram_mb: ramMb }).defaultPlayers;
+  return getPlayerCapacityPricingRules({ game, name, ram_mb: ramMb }).recommendedPlayers;
 }
 
 function reliableVersionLabel(value: string | null | undefined) {

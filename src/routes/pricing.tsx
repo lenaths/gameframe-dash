@@ -13,6 +13,7 @@ import {
   buildPricingDeployUrl,
   defaultPlayersForPricingPlan,
 } from "@/lib/deploy-flow";
+import { getPlayerCapacityPricingRules, supportsPlayerCapacityPricing } from "@/lib/game-config";
 
 export const Route = createFileRoute("/pricing")({
   head: () => ({
@@ -136,18 +137,20 @@ function Pricing() {
                     </div>
                   </div>
                 )}
-                <div className="mt-6 rounded-lg border border-primary/15 bg-background/35 p-4">
-                  <div className="text-xs uppercase tracking-wider text-primary">
-                    Capacité joueurs
+                {supportsPlayerCapacityPricing(p.game) && (
+                  <div className="mt-6 rounded-lg border border-primary/15 bg-background/35 p-4">
+                    <div className="text-xs uppercase tracking-wider text-primary">
+                      Capacité joueurs
+                    </div>
+                    <div className="mt-2 text-sm text-muted-foreground">
+                      Recommandé : {getRecommendedPlayers(p)} joueurs · Maximum configurable :{" "}
+                      {getMaxPlayersLimit(p)} joueurs
+                    </div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      Configure le nombre exact de joueurs avant paiement.
+                    </div>
                   </div>
-                  <div className="mt-2 text-sm text-muted-foreground">
-                    Inclus : {getIncludedPlayers(p.name, p.ram_mb)} joueurs · Maximum :{" "}
-                    {getMaxPlayersLimit(p.name, p.ram_mb)}
-                  </div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    Configure le nombre exact de joueurs avant paiement.
-                  </div>
-                </div>
+                )}
                 <Button
                   className="mt-6 bg-primary text-primary-foreground shadow-[0_0_28px_rgba(0,191,255,0.22)] hover:bg-primary/90"
                   onClick={() => {
@@ -205,24 +208,17 @@ function Pricing() {
   );
 }
 
-function getIncludedPlayers(name: string, ramMb: number) {
-  const lower = name.toLowerCase();
-  if (lower.includes("netherite")) return 80;
-  if (lower.includes("diamond")) return 40;
-  if (lower.includes("iron")) return 20;
-  if (ramMb >= 16384) return 80;
-  if (ramMb >= 8192) return 40;
-  if (ramMb >= 4096) return 20;
-  return 10;
+type PricingCapacityPlan = {
+  game?: string | null;
+  name: string;
+  ram_mb: number;
+  price_monthly_cents?: number | null;
+};
+
+function getRecommendedPlayers(plan: PricingCapacityPlan) {
+  return getPlayerCapacityPricingRules(plan).recommendedPlayers;
 }
 
-function getMaxPlayersLimit(name: string, ramMb: number) {
-  const lower = name.toLowerCase();
-  if (lower.includes("netherite")) return 100;
-  if (lower.includes("diamond")) return 60;
-  if (lower.includes("iron")) return 30;
-  if (ramMb >= 16384) return 100;
-  if (ramMb >= 8192) return 60;
-  if (ramMb >= 4096) return 30;
-  return 10;
+function getMaxPlayersLimit(plan: PricingCapacityPlan) {
+  return getPlayerCapacityPricingRules(plan).maxPlayersAllowed;
 }

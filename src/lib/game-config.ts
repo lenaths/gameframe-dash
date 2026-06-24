@@ -1,15 +1,25 @@
 export type GameKey = "minecraft" | "conan" | "ark" | "gmod" | "rust" | "unknown";
 
 export type PlayerCapacityPricing = {
-  pricing_mode: "included_players_delta";
+  pricing_mode: "recommended_players_delta";
   base_price_cents: number;
   base_players: number;
+  recommended_players: number;
+  /** @deprecated use recommended_players */
   included_players: number;
   selected_players: number;
+  price_per_extra_player_cents: number;
+  price_reduction_per_missing_player_cents: number;
+  /** @deprecated use price_per_extra_player_cents */
   price_per_player_cents: number;
   players_delta: number;
+  capacity_delta: number;
   adjustment_cents: number;
+  capacity_adjustment_cents: number;
+  /** @deprecated use capacity_adjustment_cents */
   players_adjustment_cents: number;
+  minimum_plan_price_cents: number;
+  /** @deprecated use minimum_plan_price_cents */
   min_price_cents: number;
   total_price_cents: number;
   min_players: number;
@@ -19,11 +29,18 @@ export type PlayerCapacityPricing = {
 export type MinecraftPlayerPricing = PlayerCapacityPricing;
 
 export type PlayerCapacityPricingRules = {
+  recommendedPlayers: number;
+  /** @deprecated use recommendedPlayers */
   includedPlayers: number;
   minPlayers: number;
   maxPlayersAllowed: number;
   defaultPlayers: number;
+  pricePerExtraPlayerCents: number;
+  priceReductionPerMissingPlayerCents: number;
+  minimumPlanPriceCents: number;
+  /** @deprecated use pricePerExtraPlayerCents */
   pricePerPlayerCents: number;
+  /** @deprecated use minimumPlanPriceCents */
   minPriceCents: number;
 };
 
@@ -162,107 +179,126 @@ export function getPlayerCapacityPricingRules(plan: {
 
   if (gameKey === "ark") {
     if (lower.includes("alpha")) {
-      return {
-        includedPlayers: 10,
-        minPlayers: 1,
-        maxPlayersAllowed: 70,
-        defaultPlayers: 20,
-        pricePerPlayerCents: 25,
-        minPriceCents: planPrice,
-      };
+      return buildCapacityRules({
+        recommendedPlayers: 20,
+        maxPlayersAllowed: 50,
+        pricePerExtraPlayerCents: 25,
+        priceReductionPerMissingPlayerCents: 5,
+        minimumPlanPriceCents: 1999,
+      });
     }
-    return {
-      includedPlayers: 10,
-      minPlayers: 1,
+    return buildCapacityRules({
+      recommendedPlayers: 10,
       maxPlayersAllowed: 30,
-      defaultPlayers: 10,
-      pricePerPlayerCents: 20,
-      minPriceCents: planPrice,
-    };
+      pricePerExtraPlayerCents: 20,
+      priceReductionPerMissingPlayerCents: 5,
+      minimumPlanPriceCents: 1299,
+    });
   }
 
   if (gameKey === "conan") {
     if (lower.includes("warlord")) {
-      return {
-        includedPlayers: 10,
-        minPlayers: 1,
-        maxPlayersAllowed: 70,
-        defaultPlayers: 20,
-        pricePerPlayerCents: 20,
-        minPriceCents: planPrice,
-      };
+      return buildCapacityRules({
+        recommendedPlayers: 20,
+        maxPlayersAllowed: 50,
+        pricePerExtraPlayerCents: 20,
+        priceReductionPerMissingPlayerCents: 5,
+        minimumPlanPriceCents: 1999,
+      });
     }
-    return {
-      includedPlayers: 10,
-      minPlayers: 1,
-      maxPlayersAllowed: 40,
-      defaultPlayers: 10,
-      pricePerPlayerCents: 15,
-      minPriceCents: planPrice,
-    };
+    return buildCapacityRules({
+      recommendedPlayers: 10,
+      maxPlayersAllowed: 30,
+      pricePerExtraPlayerCents: 15,
+      priceReductionPerMissingPlayerCents: 5,
+      minimumPlanPriceCents: 1299,
+    });
   }
 
   if (gameKey === "gmod") {
-    if (lower.includes("roleplay") || lower.includes("rp")) {
-      return {
-        includedPlayers: 10,
-        minPlayers: 1,
+    if (
+      lower.includes("roleplay") ||
+      lower.includes("darkrp") ||
+      lower.includes("scp") ||
+      lower.includes("starwars") ||
+      lower.includes("rp")
+    ) {
+      return buildCapacityRules({
+        recommendedPlayers: 32,
         maxPlayersAllowed: 64,
-        defaultPlayers: 20,
-        pricePerPlayerCents: 15,
-        minPriceCents: planPrice,
-      };
+        pricePerExtraPlayerCents: 15,
+        priceReductionPerMissingPlayerCents: 5,
+        minimumPlanPriceCents: 1299,
+      });
     }
-    return {
-      includedPlayers: 10,
-      minPlayers: 1,
+    return buildCapacityRules({
+      recommendedPlayers: 16,
       maxPlayersAllowed: 32,
-      defaultPlayers: 10,
-      pricePerPlayerCents: 10,
-      minPriceCents: planPrice,
-    };
+      pricePerExtraPlayerCents: 10,
+      priceReductionPerMissingPlayerCents: 3,
+      minimumPlanPriceCents: 899,
+    });
   }
 
-  if (lower.includes("netherite")) {
-    return {
-      includedPlayers: 10,
-      minPlayers: 1,
-      maxPlayersAllowed: 100,
-      defaultPlayers: 40,
-      pricePerPlayerCents: 25,
-      minPriceCents: 999,
-    };
-  }
-  if (lower.includes("diamond")) {
-    return {
-      includedPlayers: 10,
-      minPlayers: 1,
-      maxPlayersAllowed: 60,
-      defaultPlayers: 20,
-      pricePerPlayerCents: 20,
-      minPriceCents: 599,
-    };
-  }
-  if (lower.includes("iron")) {
-    return {
-      includedPlayers: 10,
-      minPlayers: 1,
-      maxPlayersAllowed: 30,
-      defaultPlayers: 10,
-      pricePerPlayerCents: 15,
-      minPriceCents: 299,
-    };
+  if (gameKey === "minecraft") {
+    if (lower.includes("netherite")) {
+      return buildCapacityRules({
+        recommendedPlayers: 20,
+        maxPlayersAllowed: 60,
+        pricePerExtraPlayerCents: 25,
+        priceReductionPerMissingPlayerCents: 5,
+        minimumPlanPriceCents: 1499,
+      });
+    }
+    if (lower.includes("diamond")) {
+      return buildCapacityRules({
+        recommendedPlayers: 10,
+        maxPlayersAllowed: 40,
+        pricePerExtraPlayerCents: 20,
+        priceReductionPerMissingPlayerCents: 5,
+        minimumPlanPriceCents: 799,
+      });
+    }
+    if (lower.includes("iron")) {
+      return buildCapacityRules({
+        recommendedPlayers: 5,
+        maxPlayersAllowed: 20,
+        pricePerExtraPlayerCents: 15,
+        priceReductionPerMissingPlayerCents: 5,
+        minimumPlanPriceCents: 399,
+      });
+    }
   }
 
   const maxPlayersAllowed = ramMb >= 16384 ? 100 : ramMb >= 8192 ? 60 : ramMb >= 4096 ? 30 : 10;
   const unsupportedGame = gameKey === "unknown" || gameKey === "rust";
-  return {
-    includedPlayers: 10,
-    minPlayers: 1,
+  return buildCapacityRules({
+    recommendedPlayers: Math.min(maxPlayersAllowed, ramMb >= 16384 ? 20 : ramMb >= 8192 ? 10 : 5),
     maxPlayersAllowed,
-    defaultPlayers: Math.min(maxPlayersAllowed, ramMb >= 16384 ? 40 : ramMb >= 8192 ? 20 : 10),
-    pricePerPlayerCents: unsupportedGame ? 0 : ramMb >= 16384 ? 25 : ramMb >= 8192 ? 20 : 15,
-    minPriceCents: unsupportedGame ? planPrice : Math.max(299, Math.round(maxPlayersAllowed * 10)),
+    pricePerExtraPlayerCents: unsupportedGame ? 0 : ramMb >= 16384 ? 25 : ramMb >= 8192 ? 20 : 15,
+    priceReductionPerMissingPlayerCents: unsupportedGame ? 0 : 5,
+    minimumPlanPriceCents: unsupportedGame ? planPrice : Math.max(399, planPrice),
+  });
+}
+
+function buildCapacityRules(input: {
+  recommendedPlayers: number;
+  maxPlayersAllowed: number;
+  pricePerExtraPlayerCents: number;
+  priceReductionPerMissingPlayerCents: number;
+  minimumPlanPriceCents: number;
+}): PlayerCapacityPricingRules {
+  return {
+    recommendedPlayers: input.recommendedPlayers,
+    includedPlayers: input.recommendedPlayers,
+    minPlayers: 1,
+    maxPlayersAllowed: input.maxPlayersAllowed,
+    defaultPlayers: input.recommendedPlayers,
+    pricePerExtraPlayerCents: input.pricePerExtraPlayerCents,
+    priceReductionPerMissingPlayerCents: input.priceReductionPerMissingPlayerCents,
+    minimumPlanPriceCents: input.minimumPlanPriceCents,
+    pricePerPlayerCents: input.pricePerExtraPlayerCents,
+    minPriceCents: input.minimumPlanPriceCents,
   };
 }
 export function calculatePlayerCapacityPricing(
@@ -279,21 +315,32 @@ export function calculatePlayerCapacityPricing(
         : rules.defaultPlayers,
     ),
   );
-  const playersDelta = selectedPlayers - rules.includedPlayers;
-  const playersAdjustmentCents = playersDelta * rules.pricePerPlayerCents;
-  const rawTotal = plan.price_monthly_cents + playersAdjustmentCents;
+  const playersDelta = selectedPlayers - rules.recommendedPlayers;
+  const capacityAdjustmentCents =
+    playersDelta > 0
+      ? playersDelta * rules.pricePerExtraPlayerCents
+      : playersDelta < 0
+        ? playersDelta * rules.priceReductionPerMissingPlayerCents
+        : 0;
+  const rawTotal = plan.price_monthly_cents + capacityAdjustmentCents;
   return {
-    pricing_mode: "included_players_delta",
+    pricing_mode: "recommended_players_delta",
     base_price_cents: plan.price_monthly_cents,
-    base_players: rules.includedPlayers,
-    included_players: rules.includedPlayers,
+    base_players: rules.recommendedPlayers,
+    recommended_players: rules.recommendedPlayers,
+    included_players: rules.recommendedPlayers,
     selected_players: selectedPlayers,
-    price_per_player_cents: rules.pricePerPlayerCents,
+    price_per_extra_player_cents: rules.pricePerExtraPlayerCents,
+    price_reduction_per_missing_player_cents: rules.priceReductionPerMissingPlayerCents,
+    price_per_player_cents: rules.pricePerExtraPlayerCents,
     players_delta: playersDelta,
-    adjustment_cents: playersAdjustmentCents,
-    players_adjustment_cents: playersAdjustmentCents,
-    min_price_cents: rules.minPriceCents,
-    total_price_cents: Math.max(rules.minPriceCents, rawTotal),
+    capacity_delta: playersDelta,
+    adjustment_cents: capacityAdjustmentCents,
+    capacity_adjustment_cents: capacityAdjustmentCents,
+    players_adjustment_cents: capacityAdjustmentCents,
+    minimum_plan_price_cents: rules.minimumPlanPriceCents,
+    min_price_cents: rules.minimumPlanPriceCents,
+    total_price_cents: Math.max(rules.minimumPlanPriceCents, rawTotal),
     min_players: rules.minPlayers,
     max_players_allowed: rules.maxPlayersAllowed,
   };

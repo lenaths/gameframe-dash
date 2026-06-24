@@ -103,36 +103,86 @@ test("forged slots and max players settings are rejected", () => {
   assert.equal(hasForbiddenServerSetting({ motd: "Bienvenue" }), undefined);
 });
 
-test("Minecraft Iron player pricing uses included-player delta formula", () => {
-  const iron = { name: "Iron", ram_mb: 4096, price_monthly_cents: 499 };
-  assert.equal(calculateMinecraftPlayerPricing(iron, 3).total_price_cents, 394);
-  assert.equal(calculateMinecraftPlayerPricing(iron, 10).total_price_cents, 499);
-  assert.equal(calculateMinecraftPlayerPricing(iron, 20).total_price_cents, 649);
-  assert.equal(calculateMinecraftPlayerPricing(iron, 30).total_price_cents, 799);
+test("Minecraft pricing uses recommended-player delta formula", () => {
+  const iron = { game: "Minecraft", name: "Iron", ram_mb: 4096, price_monthly_cents: 499 };
+  const diamond = { game: "Minecraft", name: "Diamond", ram_mb: 8192, price_monthly_cents: 999 };
+  const netherite = {
+    game: "Minecraft",
+    name: "Netherite",
+    ram_mb: 16384,
+    price_monthly_cents: 1999,
+  };
+
+  assert.equal(calculateMinecraftPlayerPricing(iron, 1).total_price_cents, 479);
+  assert.equal(calculateMinecraftPlayerPricing(iron, 5).total_price_cents, 499);
+  assert.equal(calculateMinecraftPlayerPricing(iron, 20).total_price_cents, 724);
+
+  assert.equal(calculateMinecraftPlayerPricing(diamond, 1).total_price_cents, 954);
+  assert.equal(calculateMinecraftPlayerPricing(diamond, 10).total_price_cents, 999);
+  assert.equal(calculateMinecraftPlayerPricing(diamond, 40).total_price_cents, 1599);
+
+  assert.equal(calculateMinecraftPlayerPricing(netherite, 1).total_price_cents, 1904);
+  assert.equal(calculateMinecraftPlayerPricing(netherite, 20).total_price_cents, 1999);
+  assert.equal(calculateMinecraftPlayerPricing(netherite, 40).total_price_cents, 2499);
+  assert.equal(calculateMinecraftPlayerPricing(netherite, 60).total_price_cents, 2999);
 });
 
-test("Minecraft pricing clamps minimum and maximum player counts server-side", () => {
-  const iron = { name: "Iron", ram_mb: 4096, price_monthly_cents: 499 };
+test("Minecraft pricing clamps player counts and applies plan floors server-side", () => {
+  const iron = { game: "Minecraft", name: "Iron", ram_mb: 4096, price_monthly_cents: 499 };
   assert.equal(calculateMinecraftPlayerPricing(iron, -50).selected_players, 1);
-  assert.equal(calculateMinecraftPlayerPricing(iron, -50).total_price_cents, 364);
-  assert.equal(calculateMinecraftPlayerPricing(iron, 500).selected_players, 30);
-  assert.equal(calculateMinecraftPlayerPricing(iron, 500).total_price_cents, 799);
+  assert.equal(calculateMinecraftPlayerPricing(iron, -50).total_price_cents, 479);
+  assert.equal(calculateMinecraftPlayerPricing(iron, 500).selected_players, 20);
+  assert.equal(calculateMinecraftPlayerPricing(iron, 500).total_price_cents, 724);
 
-  const cheapIron = { name: "Iron", ram_mb: 4096, price_monthly_cents: 350 };
-  assert.equal(calculateMinecraftPlayerPricing(cheapIron, 1).total_price_cents, 299);
+  const cheapIron = { game: "Minecraft", name: "Iron", ram_mb: 4096, price_monthly_cents: 350 };
+  assert.equal(calculateMinecraftPlayerPricing(cheapIron, 1).total_price_cents, 399);
 });
 
-test("player capacity pricing covers ARK, Conan and Garry's Mod", () => {
-  const ark = { game: "ARK", name: "Survivor", ram_mb: 8192, price_monthly_cents: 1499 };
-  const conan = { game: "Conan Exiles", name: "Warlord", ram_mb: 8192, price_monthly_cents: 1299 };
-  const gmod = { game: "Garry's Mod", name: "Roleplay", ram_mb: 4096, price_monthly_cents: 999 };
+test("player capacity pricing covers ARK, Conan and Garry's Mod grids", () => {
+  const arkSurvivor = { game: "ARK", name: "Survivor", ram_mb: 8192, price_monthly_cents: 1499 };
+  const arkAlpha = { game: "ARK", name: "Alpha", ram_mb: 16384, price_monthly_cents: 1999 };
+  const conanHyborian = {
+    game: "Conan Exiles",
+    name: "Hyborian",
+    ram_mb: 8192,
+    price_monthly_cents: 1299,
+  };
+  const conanWarlord = {
+    game: "Conan Exiles",
+    name: "Warlord",
+    ram_mb: 16384,
+    price_monthly_cents: 1999,
+  };
+  const gmodSandbox = {
+    game: "Garry's Mod",
+    name: "Sandbox",
+    ram_mb: 4096,
+    price_monthly_cents: 999,
+  };
+  const gmodRoleplay = {
+    game: "Garry's Mod",
+    name: "Roleplay",
+    ram_mb: 8192,
+    price_monthly_cents: 1299,
+  };
 
-  assert.equal(calculatePlayerCapacityPricing(ark, 20).total_price_cents, 1699);
-  assert.equal(calculatePlayerCapacityPricing(ark, 999).selected_players, 30);
-  assert.equal(calculatePlayerCapacityPricing(conan, 20).total_price_cents, 1499);
-  assert.equal(calculatePlayerCapacityPricing(conan, 999).selected_players, 70);
-  assert.equal(calculatePlayerCapacityPricing(gmod, 20).total_price_cents, 1149);
-  assert.equal(calculatePlayerCapacityPricing(gmod, 999).selected_players, 64);
+  assert.equal(calculatePlayerCapacityPricing(arkSurvivor, 1).total_price_cents, 1454);
+  assert.equal(calculatePlayerCapacityPricing(arkSurvivor, 999).selected_players, 30);
+  assert.equal(calculatePlayerCapacityPricing(arkSurvivor, 30).total_price_cents, 1899);
+  assert.equal(calculatePlayerCapacityPricing(arkAlpha, 1).total_price_cents, 1999);
+  assert.equal(calculatePlayerCapacityPricing(arkAlpha, 50).total_price_cents, 2749);
+
+  assert.equal(calculatePlayerCapacityPricing(conanHyborian, 1).total_price_cents, 1299);
+  assert.equal(calculatePlayerCapacityPricing(conanHyborian, 999).selected_players, 30);
+  assert.equal(calculatePlayerCapacityPricing(conanHyborian, 30).total_price_cents, 1599);
+  assert.equal(calculatePlayerCapacityPricing(conanWarlord, 1).total_price_cents, 1999);
+  assert.equal(calculatePlayerCapacityPricing(conanWarlord, 50).total_price_cents, 2599);
+
+  assert.equal(calculatePlayerCapacityPricing(gmodSandbox, 1).total_price_cents, 954);
+  assert.equal(calculatePlayerCapacityPricing(gmodSandbox, 32).total_price_cents, 1159);
+  assert.equal(calculatePlayerCapacityPricing(gmodRoleplay, 1).total_price_cents, 1299);
+  assert.equal(calculatePlayerCapacityPricing(gmodRoleplay, 999).selected_players, 64);
+  assert.equal(calculatePlayerCapacityPricing(gmodRoleplay, 64).total_price_cents, 1779);
 });
 
 test("player capacity options are scoped to supported games", () => {

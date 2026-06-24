@@ -81,7 +81,7 @@ const gmodPlan: CheckoutPlan = {
   game: "Garry's Mod",
   name: "Roleplay",
   description: "Serveur GMod",
-  price_monthly_cents: 999,
+  price_monthly_cents: 1299,
   ram_mb: 4096,
   cpu_percent: 200,
   currency: "EUR",
@@ -202,61 +202,61 @@ function unitAmount(lineItem: ReturnType<typeof buildStripeCheckoutLineItem>) {
   return lineItem.price_data.unit_amount;
 }
 
-test("Minecraft Iron 3 players ignores forged client total and sends 394 cents to Stripe", () => {
+test("Minecraft Iron 1 player ignores forged client total and sends 479 cents to Stripe", () => {
   const { pricing, order, lineItem } = buildMinecraftCheckoutCase({
-    players: 3,
+    players: 1,
     variantIndex: 1,
     serverType: "paper",
     minecraftVersion: "1.21.4",
   });
-  assert.equal(pricing.total_price_cents, 394);
-  assert.equal(unitAmount(lineItem), 394);
-  assert.equal(order.metadata.max_players, 3);
+  assert.equal(pricing.total_price_cents, 479);
+  assert.equal(unitAmount(lineItem), 479);
+  assert.equal(order.metadata.max_players, 1);
   assert.equal(
     (order.metadata.player_pricing as { total_price_cents: number }).total_price_cents,
-    394,
+    479,
   );
   assert.equal((order.metadata.environment as Record<string, string>).total, "1");
   assert.equal("MAX_PLAYERS" in (order.metadata.environment as Record<string, string>), false);
 });
 
-test("Minecraft Iron 10 players keeps fixed Stripe price and stores correct metadata", () => {
+test("Minecraft Iron 5 recommended players keeps fixed Stripe price and stores correct metadata", () => {
   const { pricing, order, lineItem } = buildMinecraftCheckoutCase({
-    players: 10,
+    players: 5,
     variantIndex: 1,
     serverType: "paper",
   });
   assert.equal(pricing.total_price_cents, 499);
   assert.deepEqual(lineItem, { price: "price_fixed_iron", quantity: 1 });
-  assert.equal(order.metadata.max_players, 10);
+  assert.equal(order.metadata.max_players, 5);
   assert.equal(
     (order.metadata.player_pricing as { total_price_cents: number }).total_price_cents,
     499,
   );
 });
 
-test("Minecraft Iron 20 players sends 649 cents and correct metadata", () => {
+test("Minecraft Iron 20 players sends 724 cents and correct metadata", () => {
   const { pricing, order, lineItem } = buildMinecraftCheckoutCase({
     players: 20,
     variantIndex: 1,
     serverType: "paper",
   });
-  assert.equal(pricing.total_price_cents, 649);
-  assert.equal(unitAmount(lineItem), 649);
+  assert.equal(pricing.total_price_cents, 724);
+  assert.equal(unitAmount(lineItem), 724);
   assert.equal(order.metadata.max_players, 20);
 });
 
-test("Minecraft Iron 999 players clamps to 30 and sends 799 cents", () => {
+test("Minecraft Iron 999 players clamps to 20 and sends 724 cents", () => {
   const { pricing, order, lineItem } = buildMinecraftCheckoutCase({
     players: 999,
     variantIndex: 1,
     serverType: "paper",
   });
-  assert.equal(pricing.max_players_allowed, 30);
-  assert.equal(pricing.max_players, 30);
-  assert.equal(pricing.total_price_cents, 799);
-  assert.equal(unitAmount(lineItem), 799);
-  assert.equal(order.metadata.max_players, 30);
+  assert.equal(pricing.max_players_allowed, 20);
+  assert.equal(pricing.max_players, 20);
+  assert.equal(pricing.total_price_cents, 724);
+  assert.equal(unitAmount(lineItem), 724);
+  assert.equal(order.metadata.max_players, 20);
 });
 
 test("Unsupported game checkout keeps base price and omits capacity metadata", () => {
@@ -295,8 +295,8 @@ test("Unsupported game checkout keeps base price and omits capacity metadata", (
 test("ARK, Conan and GMod checkout recalculate capacity pricing server-side", () => {
   for (const { plan, players, total, max } of [
     { plan: arkPlan, players: 20, total: 1699, max: 20 },
-    { plan: conanPlan, players: 999, total: 1749, max: 40 },
-    { plan: gmodPlan, players: 20, total: 1149, max: 20 },
+    { plan: conanPlan, players: 999, total: 1599, max: 30 },
+    { plan: gmodPlan, players: 64, total: 1779, max: 64 },
   ]) {
     const template = resolveCheckoutTemplate({
       plan,
@@ -378,7 +378,7 @@ test("Pricing builds locked deploy URL search with selected Forge template", () 
     variant: 2,
     server_type: "forge",
     minecraft_version: "auto",
-    players: 10,
+    players: 5,
     plan_locked: 1,
   });
 });
